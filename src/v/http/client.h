@@ -150,13 +150,14 @@ public:
     ///
     /// \param client is an http client
     /// \param header is a prepared request header
-    static ss::future<bytes> fetch(client&, request_header&& header, iobuf&& body);
+    static ss::future<bytes>
+    fetch(client&, request_header&& header, iobuf&& body);
+
 private:
     template<class BufferSeq>
     static ss::future<>
     forward(rpc::batched_output_stream& stream, BufferSeq&& seq);
 };
-
 
 template<class BufferSeq>
 inline ss::future<>

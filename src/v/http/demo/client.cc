@@ -63,14 +63,12 @@ void cli_opts(boost::program_options::options_description_easy_init opt) {
       po::value<std::string>()->default_value("GET"),
       "http method (GET/POST/PUT/etc)");
 
-    opt(
-        "https",
-        po::value<bool>()->default_value(false),
-        "Connect using TLS");
+    opt("https", po::value<bool>()->default_value(false), "Connect using TLS");
 
     opt(
       "cert",
-      po::value<std::string>()->default_value("./src/v/http/demo/cherrypy-cert.pem"),
+      po::value<std::string>()->default_value(
+        "./src/v/http/demo/cherrypy-cert.pem"),
       "Certificate for TLS connection");
 }
 
@@ -103,7 +101,8 @@ test_conf cfg_from(boost::program_options::variables_map& m) {
         // Setup credentials for TLS
         ss::tls::credentials_builder builder;
         auto cert_path = m["cert"].as<std::string>();
-        builder.set_x509_trust_file(cert_path, ss::tls::x509_crt_format::PEM).get();
+        builder.set_x509_trust_file(cert_path, ss::tls::x509_crt_format::PEM)
+          .get();
         client_cfg.credentials = builder;
     }
     return test_conf{
