@@ -56,6 +56,8 @@ public:
     using request_header = boost::beast::http::request_header<>;
     using response_header = boost::beast::http::response_header<>;
     using response_parser = boost::beast::http::response_parser<iobuf_body>;
+    using field = boost::beast::http::field;
+    using verb = boost::beast::http::verb;
 
     explicit client(const rpc::base_transport::configuration& cfg);
 
@@ -70,6 +72,9 @@ public:
         response_stream& operator=(response_stream const&) = delete;
         response_stream operator=(response_stream&&) = delete;
         ~response_stream() = default;
+
+        /// \brief Shutdown connection gracefully
+        ss::future<> shutdown();
 
         /// Return true if the parsing is done
         bool is_done() const;
@@ -139,11 +144,19 @@ public:
     // first otherwise the future will resolve immediately.
     ss::future<request_response_t> make_request(request_header&& header);
 
+    /// Utility function that executes request without the http-body.
+    /// The function accumulates and returns all the response octets.
+    /// Can be used for simple GET requests that return small amount of data.
+    ///
+    /// \param client is an http client
+    /// \param header is a prepared request header
+    static ss::future<bytes> fetch(client&, request_header&& header, iobuf&& body);
 private:
     template<class BufferSeq>
     static ss::future<>
     forward(rpc::batched_output_stream& stream, BufferSeq&& seq);
 };
+
 
 template<class BufferSeq>
 inline ss::future<>

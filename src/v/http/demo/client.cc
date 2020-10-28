@@ -24,6 +24,7 @@
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/net/tls.hh>
 #include <seastar/util/defer.hh>
 
 #include <boost/optional/optional.hpp>
@@ -61,6 +62,16 @@ void cli_opts(boost::program_options::options_description_easy_init opt) {
       "method",
       po::value<std::string>()->default_value("GET"),
       "http method (GET/POST/PUT/etc)");
+
+    opt(
+        "https",
+        po::value<bool>()->default_value(false),
+        "Connect using TLS");
+
+    opt(
+      "cert",
+      po::value<std::string>()->default_value("./src/v/http/demo/cherrypy-cert.pem"),
+      "Certificate for TLS connection");
 }
 
 struct test_conf {
@@ -88,6 +99,13 @@ test_conf cfg_from(boost::program_options::variables_map& m) {
     rpc::transport_configuration client_cfg;
     client_cfg.server_addr = ss::socket_address(
       ss::ipv4_addr(m["ip"].as<std::string>(), m["port"].as<uint16_t>()));
+    if (m["https"].as<bool>()) {
+        // Setup credentials for TLS
+        ss::tls::credentials_builder builder;
+        auto cert_path = m["cert"].as<std::string>();
+        builder.set_x509_trust_file(cert_path, ss::tls::x509_crt_format::PEM).get();
+        client_cfg.credentials = builder;
+    }
     return test_conf{
       .chunk_size = m["chunk-size"].as<std::size_t>(),
       .data = m["data"].as<std::string>(),

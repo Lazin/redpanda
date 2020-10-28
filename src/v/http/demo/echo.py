@@ -9,16 +9,31 @@
 
 import cherrypy
 import json
+import argparse
 
 
 class EchoServer(object):
     @cherrypy.expose
     def echo(self):
-        body = cherrypy.request.body.read()
-        print("Body: ", str(body))
-        headers = cherrypy.request.headers
-        print("Headers: ", str(headers))
-        return json.dumps({"headers": str(headers), "body": str(body)})
+        if cherrypy.request.method == 'POST':
+            body = cherrypy.request.body.read()
+            print("Body: ", str(body))
+            headers = cherrypy.request.headers
+            print("Headers: ", str(headers))
+            return json.dumps({"headers": str(headers), "body": str(body)})
+        else:
+            return "POST request with data expected"
 
+
+parser = argparse.ArgumentParser(description='Sample http client built with seastar')
+parser.add_argument('--https', dest='https', action='store_true',
+                     help='run as https server')
+
+args = parser.parse_args()
+if args.https:
+    # Set up SSL
+    cherrypy.server.ssl_module = 'builtin'
+    cherrypy.server.ssl_certificate = 'cherrypy-cert.pem'
+    cherrypy.server.ssl_private_key = 'cherrypy-pkey.pem'
 
 cherrypy.quickstart(EchoServer())

@@ -70,6 +70,11 @@ iobuf_to_constbufseq(const iobuf& iobuf) {
     return seq;
 }
 
+ss::future<> client::response_stream::shutdown() {
+    _client->shutdown();
+    return _client->stop();
+}
+
 ss::future<iobuf> client::response_stream::recv_some() {
     return ss::do_with(iobuf(), [this](iobuf& result) {
         return do_recv_some(result).then([&result]() {
@@ -219,6 +224,37 @@ ss::future<> client::request_stream::send_some(iobuf&& seq) {
 }
 
 bool client::request_stream::is_done() { return _serializer.is_done(); }
+
+ss::future<bytes> client::fetch(client& cl, request_header&& header, iobuf&& body) {
+    return cl.make_request(std::move(header)).then([body = std::move(body)] (request_response_t reqresp) mutable {
+        auto [request, response] = std::move(reqresp);
+        auto fsend = request->send_some(std::move(body)).then([request=request]() {
+            return request->send_eof();
+        });
+        auto frecv = fsend.then([response=response]() {
+            return ss::do_with(iobuf(), [response] (iobuf& result) {
+                return ss::repeat([response, &result] () {
+                    if (response->is_done()) {
+                        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::yes);
+                    }
+                    return response->recv_some().then([&result] (iobuf&& buf) {
+                        result.append(std::move(buf));
+                    }).then([] {
+                        return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::no);
+                    });
+                }).then([response] {
+                    vlog(http_log.trace, "shutdown connection");
+                    return response->shutdown();
+                }).then([response, &result] {
+                    vlog(http_log.trace, "response header:\n {}", response->get_headers());
+                    vlog(http_log.trace, "result size :\n {}", result.size_bytes());
+                    return ss::make_ready_future<bytes>(iobuf_to_bytes(result));
+                });
+            });
+        });
+        return frecv;
+    });
+}
 
 // Wait until remaining data will be transmitted
 ss::future<> client::request_stream::send_eof() { return _gate.close(); }
