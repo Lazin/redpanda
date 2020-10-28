@@ -25,9 +25,12 @@ class EchoServer(object):
             return "POST request with data expected"
 
 
-parser = argparse.ArgumentParser(description='Sample http client built with seastar')
-parser.add_argument('--https', dest='https', action='store_true',
-                     help='run as https server')
+parser = argparse.ArgumentParser(
+    description='Sample http client built with seastar')
+parser.add_argument('--https',
+                    dest='https',
+                    action='store_true',
+                    help='run as https server')
 
 args = parser.parse_args()
 if args.https:
