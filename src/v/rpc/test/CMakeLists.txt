@@ -1,4 +1,5 @@
 include(rpcgen)
+include(credgen)
 rpcgen(
   TARGET cycling_gen
   IN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/cycling_service.json
@@ -12,6 +13,11 @@ rpcgen(
   OUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/echo_service.h
   INCLUDES ${CMAKE_BINARY_DIR}/src/v
   )
+
+credgen(
+    OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}
+    OUTPUT_FILES CREDGEN_OUTPUT_FILES
+)
 
 v_cc_library(
   NAME
@@ -52,11 +58,9 @@ rp_test(
   UNIT_TEST
   BINARY_NAME rpcgenerator_cycling
   SOURCES rpc_gen_cycling_test.cc
+  INPUT_FILES ${CREDGEN_OUTPUT_FILES}
   LIBRARIES v::seastar_testing_main v::rpc_testing
   LABELS rpc
-  INPUT_FILES ${CMAKE_CURRENT_SOURCE_DIR}/redpanda.crt
-              ${CMAKE_CURRENT_SOURCE_DIR}/redpanda.key
-              ${CMAKE_CURRENT_SOURCE_DIR}/root_certificate_authority.chain_cert
   ARGS "-- -c 1"
 )
 
