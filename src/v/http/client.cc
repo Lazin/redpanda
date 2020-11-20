@@ -9,10 +9,18 @@
 
 #include "http/client.h"
 
+#include "bytes/iobuf.h"
+
+#include <seastar/core/condition-variable.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/iostream.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/core/semaphore.hh>
 
 #include <boost/beast/core/buffer_traits.hpp>
+
+#include <chrono>
+#include <stdexcept>
 
 namespace http {
 
@@ -271,6 +279,100 @@ client::fetch(client& cl, request_header&& header, iobuf&& body) {
           });
           return frecv;
       });
+}
+
+ss::future<ss::input_stream<char>> client::request(
+  client::request_header&& header,
+  ss::input_stream<char>& input,
+  const request_bounds& limits) {
+    struct response_source final : ss::data_source_impl {
+        explicit response_source(
+          response_stream_ref resp, const request_bounds& limits)
+          : _io(std::move(resp))
+          , _skip(0)
+          , _timeout(limits.recv_timeout)
+          , _mem_limit(limits.max_buffered_bytes) {
+            // Transfer data from response stream to the output iobuf
+            // asynchronously with respect to the memory limit
+            (void)ss::with_gate(_gate, [this] {
+                return ss::do_until(
+                  [this] { return _io->is_done() || _gate.is_closed(); },
+                  [this] {
+                      return _io->recv_some().then([this](iobuf buf) {
+                          auto sz = buf.size_bytes();
+                          return ss::with_semaphore(
+                            _mem_limit,
+                            sz,
+                            [this, buf = std::move(buf)]() mutable {
+                                _queue.append(std::move(buf));
+                                _sig.signal();
+                                return ss::now();
+                            });
+                      });
+                  });
+            });
+        }
+        ss::future<> close() final { return _gate.close(); }
+        ss::future<ss::temporary_buffer<char>> skip(uint64_t n) final {
+            _skip += n;
+            return get();
+        }
+        ss::future<ss::temporary_buffer<char>> get() final {
+            auto ntrim = std::min(_skip, _queue.size_bytes());
+            _skip -= ntrim;
+            _queue.trim_front(ntrim);
+            auto wait_next = ss::now();
+            if (_queue.begin() == _queue.end()) {
+                if (_gate.get_count() == 0) {
+                    return ss::make_ready_future<ss::temporary_buffer<char>>();
+                } else {
+                    auto deadline = std::chrono::steady_clock::now() + _timeout;
+                    wait_next = _sig.wait(deadline, [this] {
+                        return _queue.begin() != _queue.end();
+                    });
+                }
+            }
+            return wait_next.then([this] {
+                auto buf = _queue.begin()->share();
+                _queue.pop_front();
+                return ss::make_ready_future<ss::temporary_buffer<char>>(
+                  std::move(buf));
+            });
+        }
+        response_stream_ref _io;
+        uint64_t _skip;
+        request_bounds::duration _timeout;
+        iobuf _queue;
+        ss::semaphore _mem_limit;
+        ss::gate _gate;
+        ss::condition_variable _sig;
+    };
+
+    return make_request(std::move(header))
+      .then(
+        [&input, limits](request_response_t reqresp) mutable
+        -> ss::future<ss::input_stream<char>> {
+            auto [request, response] = std::move(reqresp);
+            auto fsend = ss::do_until(
+                           [&input] { return !input.eof(); },
+                           [&input, request = request] {
+                               return input.read().then(
+                                 [request](ss::temporary_buffer<char>&& buf) {
+                                     iobuf iob;
+                                     iob.append(std::move(buf));
+                                     return request->send_some(std::move(iob));
+                                 });
+                           })
+                           .then([request = request] {
+                               return request->send_eof();
+                           });
+            return fsend.then([response = response, limits]() {
+                auto ds = ss::data_source(
+                  std::make_unique<response_source>(response, limits));
+                return ss::make_ready_future<ss::input_stream<char>>(
+                  ss::input_stream<char>(std::move(ds)));
+            });
+        });
 }
 
 // Wait until remaining data will be transmitted

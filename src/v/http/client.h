@@ -22,6 +22,7 @@
 
 #include <seastar/core/circular_buffer.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/iostream.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/temporary_buffer.hh>
 
@@ -45,6 +46,14 @@ using http_request
   = boost::beast::http::request<boost::beast::http::string_body>;
 using http_serializer
   = boost::beast::http::request_serializer<boost::beast::http::string_body>;
+
+/// Limitations for the long running HTTP request
+struct request_bounds {
+    using duration = std::chrono::duration<std::chrono::steady_clock>;
+    duration recv_timeout;
+    duration send_timeout;
+    size_t max_buffered_bytes;
+};
 
 /// Http client
 class client : protected rpc::base_transport {
@@ -144,14 +153,27 @@ public:
     // first otherwise the future will resolve immediately.
     ss::future<request_response_t> make_request(request_header&& header);
 
-    /// Utility function that executes request without the http-body.
+    /// Utility function that executes request with specified http-body.
     /// The function accumulates and returns all the response octets.
     /// Can be used for simple GET requests that return small amount of data.
     ///
     /// \param client is an http client
     /// \param header is a prepared request header
     static ss::future<bytes>
-    fetch(client&, request_header&& header, iobuf&& body);
+    fetch(client& client, request_header&& header, iobuf&& body);
+
+    /// Utility function that executes request with the body and returns
+    /// stream. Returned future becomes ready when the body is sent.
+    /// Using the stream returned by the future client can pull response.
+    ///
+    /// \param header is a prepred request header
+    /// \param input in an input stream that contains request body octets
+    /// \param limits is a set of limitation for a query
+    /// \returns response stream
+    ss::future<ss::input_stream<char>> request(
+      request_header&& header,
+      ss::input_stream<char>& input,
+      const request_bounds& limits);
 
 private:
     template<class BufferSeq>
