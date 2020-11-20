@@ -43,6 +43,9 @@ public:
     result<http::client::request_header>
     make_request(operation op, std::initializer_list<std::string>&& args);
 
+    result<http::client::request_header> make_unsigned_put_request(
+      bucket_name const& name, object_key const& key, size_t payload_size);
+
 private:
     access_point_uri _ap;
     signature_v4 _sign;
@@ -59,6 +62,19 @@ public:
 
     ss::future<bytes>
     put_object(bucket_name const& name, object_key const& key, iobuf&& body);
+
+    /// Put object to S3 bucket. 
+    /// \param name is a bucket name
+    /// \param key is an id of the object
+    /// \param payload_size is a size of the object in bytes
+    /// \param body is an input_stream that can be used to read body
+    /// \return future becomes available whan the body is sent The
+    /// input_stream returned by this future can be used to get the response.
+    ss::future<ss::input_stream<char>> put_object(
+      bucket_name const& name,
+      object_key const& key,
+      size_t payload_size,
+      ss::input_stream<char>&& body);
 
 private:
     request_creator _requestor;
