@@ -2,6 +2,7 @@
 v_cc_library(
   NAME s3
   SRCS
+    client.cc
     signature.cc
     logger.cc
     error.cc
