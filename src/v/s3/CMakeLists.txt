@@ -12,3 +12,4 @@ v_cc_library(
     v::http
 )
 add_subdirectory(tests)
+add_subdirectory(test_client)
