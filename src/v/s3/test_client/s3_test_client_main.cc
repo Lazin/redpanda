@@ -1,6 +1,5 @@
-#include "http/client.h"
-
 #include "bytes/iobuf.h"
+#include "http/client.h"
 #include "rpc/transport.h"
 #include "rpc/types.h"
 #include "s3/client.h"
@@ -11,12 +10,15 @@
 #include "vlog.h"
 
 #include <seastar/core/app-template.hh>
+#include <seastar/core/file.hh>
+#include <seastar/core/fstream.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/report_exception.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/net/dns.hh>
@@ -24,9 +26,6 @@
 #include <seastar/net/socket_defs.hh>
 #include <seastar/net/tls.hh>
 #include <seastar/util/defer.hh>
-#include <seastar/core/file.hh>
-#include <seastar/core/fstream.hh>
-#include <seastar/core/seastar.hh>
 
 #include <boost/optional/optional.hpp>
 #include <boost/outcome/detail/value_storage.hpp>
@@ -68,15 +67,18 @@ void cli_opts(boost::program_options::options_description_easy_init opt) {
       po::value<std::string>()->default_value("us-east-1"),
       "aws region");
 
-    opt("in",
+    opt(
+      "in",
       po::value<std::string>()->default_value(""),
       "file to send to the S3 object");
 
-    opt("out",
+    opt(
+      "out",
       po::value<std::string>()->default_value(""),
       "file to receive data from S3 object");
 
-    opt("list-with-prefix",
+    opt(
+      "list-with-prefix",
       po::value<std::string>()->default_value(""),
       "list objects in a bucket");
 }
@@ -103,12 +105,12 @@ inline std::ostream& operator<<(std::ostream& out, const test_conf& cfg) {
 }
 
 test_conf cfg_from(boost::program_options::variables_map& m) {
-    auto access_key = s3::public_key_str(
-      m["accesskey"].as<std::string>());
-    auto secret_key = s3::private_key_str(
-      m["secretkey"].as<std::string>());
+    auto access_key = s3::public_key_str(m["accesskey"].as<std::string>());
+    auto secret_key = s3::private_key_str(m["secretkey"].as<std::string>());
     auto region = s3::aws_region_name(m["region"].as<std::string>());
-    s3::configuration client_cfg = s3::configuration::make_configuration(access_key, secret_key, region).get0();
+    s3::configuration client_cfg = s3::configuration::make_configuration(
+                                     access_key, secret_key, region)
+                                     .get0();
     vlog(test_log.info, "connecting to {}", client_cfg.server_addr);
     return test_conf{
       .bucket = s3::bucket_name(m["bucket"].as<std::string>()),
@@ -117,10 +119,11 @@ test_conf cfg_from(boost::program_options::variables_map& m) {
       .in = m["in"].as<std::string>(),
       .out = m["out"].as<std::string>(),
       .list_with_prefix = m.count("list-with-prefix") > 0,
-      };
+    };
 }
 
-static std::pair<ss::input_stream<char>, uint64_t> get_input_file_as_stream(const std::filesystem::path& path) {
+static std::pair<ss::input_stream<char>, uint64_t>
+get_input_file_as_stream(const std::filesystem::path& path) {
     auto file = ss::open_file_dma(path.native(), ss::open_flags::ro).get0();
     auto size = file.size().get0();
     // ss::file_input_stream_options opt {
@@ -130,8 +133,11 @@ static std::pair<ss::input_stream<char>, uint64_t> get_input_file_as_stream(cons
     return std::make_pair(ss::make_file_input_stream(std::move(file), 0), size);
 }
 
-static ss::output_stream<char> get_output_file_as_stream(const std::filesystem::path& path) {
-    auto file = ss::open_file_dma(path.native(), ss::open_flags::rw|ss::open_flags::create).get0();
+static ss::output_stream<char>
+get_output_file_as_stream(const std::filesystem::path& path) {
+    auto file = ss::open_file_dma(
+                  path.native(), ss::open_flags::rw | ss::open_flags::create)
+                  .get0();
     return ss::make_file_output_stream(std::move(file)).get0();
 }
 
@@ -149,10 +155,6 @@ int main(int args, char** argv, char** env) {
             vlog(test_log.info, "config:{}", lcfg);
             vlog(test_log.info, "constructing client");
             client.start(s3_cfg).get();
-            auto cd = ss::defer([&client] {
-                vlog(test_log.info, "defer:stop");
-                client.stop().get();
-            });
             vlog(test_log.info, "connecting");
             client
               .invoke_on(
@@ -162,30 +164,29 @@ int main(int args, char** argv, char** env) {
                     if (!lcfg.out.empty()) {
                         vlog(test_log.info, "receiving file {}", lcfg.out);
                         auto out_file = get_output_file_as_stream(lcfg.out);
-                        auto resp
-                          = cli.get_object(lcfg.bucket, lcfg.object).get0()->as_input_stream();
-                        vlog(
-                          test_log.info,
-                          "response: OK");
-                          ss::copy(resp, out_file).get();
-                        vlog(
-                          test_log.info,
-                          "file write done");
+                        auto resp = cli.get_object(lcfg.bucket, lcfg.object)
+                                      .get0()
+                                      ->as_input_stream();
+                        vlog(test_log.info, "response: OK");
+                        ss::copy(resp, out_file).get();
+                        vlog(test_log.info, "file write done");
                         resp.close().get();
                         out_file.flush().get();
                         out_file.close().get();
                     } else if (!lcfg.in.empty()) {
                         // put
                         vlog(test_log.info, "sending file {}", lcfg.in);
-                        auto [payload, payload_size] = get_input_file_as_stream(lcfg.in);
+                        auto [payload, payload_size] = get_input_file_as_stream(
+                          lcfg.in);
                         auto resp2 = cli
                                        .put_object(
                                          lcfg.bucket,
                                          lcfg.object,
                                          payload_size,
                                          std::move(payload))
-                                       .get0()->as_input_stream();
-                        iobuf resp_body; 
+                                       .get0()
+                                       ->as_input_stream();
+                        iobuf resp_body;
                         while (!resp2.eof()) {
                             auto buf = resp2.read().get0();
                             resp_body.append(std::move(buf));
@@ -198,10 +199,9 @@ int main(int args, char** argv, char** env) {
                     } else if (lcfg.list_with_prefix) {
                         // put
                         vlog(test_log.info, "listing objects");
-                        auto input_stream = cli
-                                       .list_objects_v2(lcfg.bucket)
-                                       .get0();
-                        iobuf resp_body; 
+                        auto input_stream
+                          = cli.list_objects_v2(lcfg.bucket).get0();
+                        iobuf resp_body;
                         while (!input_stream.eof()) {
                             auto buf = input_stream.read().get0();
                             resp_body.append(std::move(buf));
@@ -214,7 +214,9 @@ int main(int args, char** argv, char** env) {
                     }
                 })
               .get();
+            client.stop().get();
             vlog(test_log.info, "done");
+            ss::sleep(std::chrono::milliseconds(500)).get();
         });
     });
 }
