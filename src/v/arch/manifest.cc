@@ -1,4 +1,16 @@
+/*
+ * Copyright 2020 Vectorized, Inc.
+ *
+ * Use of this software is governed by the Business Source License
+ * included in the file licenses/BSL.md
+ *
+ * As of the Change Date specified in that file, in accordance with
+ * the Business Source License, use of this software will be governed
+ * by the Apache License, Version 2.0
+ */
+
 #include "arch/manifest.h"
+#include "arch/error.h"
 
 #include "arch/logger.h"
 #include "bytes/iobuf.h"
@@ -35,6 +47,10 @@ manifest::const_iterator manifest::begin() const { return _objects.begin(); }
 
 manifest::const_iterator manifest::end() const { return _objects.end(); }
 
+size_t manifest::size() const {
+    return _objects.size();
+}
+
 bool manifest::contains(const manifest::value& obj) const {
     return _objects.count(obj) != 0;
 }
@@ -49,6 +65,9 @@ std::insert_iterator<manifest::segments_set> manifest::get_insert_iterator() {
 }
 
 manifest manifest::difference(const manifest& remote_set) const {
+    if (_ntp != remote_set._ntp) {
+        throw manifest_error("NTPs doesn't match");
+    }
     manifest result(_ntp);
     std::set_difference(
       begin(),

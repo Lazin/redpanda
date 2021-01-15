@@ -46,6 +46,7 @@ public:
     /// Return iterator to the begining(end) of the segments list
     const_iterator begin() const;
     const_iterator end() const;
+    size_t size() const;
 
     /// Check if the manifest contains particular segment
     bool contains(const value& obj) const;

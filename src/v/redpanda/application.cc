@@ -374,6 +374,10 @@ void application::wire_up_services() {
       .get();
     vlog(_log.info, "Partition manager started");
 
+    /* TODO: 
+    construct_service(archival, storage?, partition_manager?).get();
+    */
+
     // controller
 
     syschecks::systemd_message("Creating cluster::controller");

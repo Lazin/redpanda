@@ -62,7 +62,6 @@ SEASTAR_TEST_CASE(test_manifest_serialization) {
         arch::manifest m(manifest_ntp);
         m.add(arch::remote_segment_name("foo"));
         m.add(arch::remote_segment_name("bar"));
-        m.serialize(std::cout, true);
         auto is = m.serialize();
         iobuf buf;
         auto os = make_iobuf_output_stream(buf);
@@ -71,8 +70,32 @@ SEASTAR_TEST_CASE(test_manifest_serialization) {
         auto rstr = make_iobuf_input_stream(std::move(buf));
         arch::manifest restored;
         restored.update(std::move(rstr)).get0();
-        restored.serialize(std::cout, true);
 
         BOOST_REQUIRE(m == restored);
+    });
+}
+
+SEASTAR_TEST_CASE(test_manifest_difference) {
+    return ss::async([] { 
+        arch::manifest a(manifest_ntp);
+        a.add(arch::remote_segment_name("1"));
+        a.add(arch::remote_segment_name("2"));
+        a.add(arch::remote_segment_name("3"));
+        arch::manifest b(manifest_ntp);
+        b.add(arch::remote_segment_name("1"));
+        b.add(arch::remote_segment_name("2"));
+        {
+            auto c = a.difference(b);
+            BOOST_REQUIRE(c.size() == 1);
+            auto res = *c.begin();
+            BOOST_REQUIRE(res() == "3");
+        }
+        // check that set difference is not symmetrical
+        b.add(arch::remote_segment_name("3"));
+        b.add(arch::remote_segment_name("4"));
+        {
+            auto c = a.difference(b);
+            BOOST_REQUIRE(c.size() == 0);
+        }
     });
 }

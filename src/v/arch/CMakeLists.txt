@@ -4,6 +4,7 @@ v_cc_library(
   SRCS
     service.cc
     manifest.cc
+    error.cc
   DEPS
     Seastar::seastar
     v::bytes
