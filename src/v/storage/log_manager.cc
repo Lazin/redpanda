@@ -284,8 +284,7 @@ log_manager::get(const model::topic_namespace& tn) {
     return r;
 }
 
-absl::flat_hash_set<model::ntp>
-log_manager::get() const {
+absl::flat_hash_set<model::ntp> log_manager::get() const {
     absl::flat_hash_set<model::ntp> r;
     for (const auto& p : _logs) {
         r.insert(p.first);

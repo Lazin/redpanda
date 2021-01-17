@@ -374,7 +374,7 @@ void application::wire_up_services() {
       .get();
     vlog(_log.info, "Partition manager started");
 
-    /* TODO: 
+    /* TODO:
     construct_service(archival, storage?, partition_manager?).get();
     */
 

@@ -1,19 +1,20 @@
 /*
- * Copyright 2020 Vectorized, Inc.
+ * Copyright 2021 Vectorized, Inc.
  *
- * Use of this software is governed by the Business Source License
- * included in the file licenses/BSL.md
+ * Licensed as a Redpanda Enterprise file under the Redpanda Community
+ * License (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- * As of the Change Date specified in that file, in accordance with
- * the Business Source License, use of this software will be governed
- * by the Apache License, Version 2.0
+ * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
  */
 
 #pragma once
 
 #include "bytes/iobuf.h"
 #include "model/fundamental.h"
+#include "model/metadata.h"
 #include "seastarx.h"
+#include "storage/ntp_config.h"
 
 #include <boost/property_tree/ptree_fwd.hpp>
 
@@ -21,27 +22,63 @@
 
 namespace arch {
 
-using remote_segment_name
-  = named_type<ss::sstring, struct arch_remote_segment_name_t>;
+/// Segment file name without working directory,
+/// expected format: <base-offset>-<term-id>-<revision>.log
+using segment_name = named_type<ss::sstring, struct arch_segment_name_t>;
+/// Segment path in S3, expected format:
+/// <prefix>/<ns>/<topic>/<part-id>_<rev>/<base-offset>-<term-id>-<revision>.log
+using remote_segment_path
+  = named_type<ss::sstring, struct arch_remote_segment_path_t>;
+using remote_manifest_path
+  = named_type<ss::sstring, struct arch_remote_manifest_path_t>;
+/// Local segment path, expected format:
+/// <work-dir>/<ns>/<topic>/<part-id>_<rev>/<base-offset>-<term-id>-<revision>.log
+using local_segment_path
+  = named_type<ss::sstring, struct arch_local_segment_path_t>;
 
-class manifest {
+/// Manifest file stored in S3
+class manifest final {
     using ptree = boost::property_tree::ptree;
 
 public:
-    using value = remote_segment_name;
-    using segments_set = std::set<value>;
-    using const_iterator = segments_set::const_iterator;
+    struct segment_meta {
+        bool is_compacted;
+        size_t size_bytes;
+        model::offset base_offset;
+        model::offset committed_offset;
+        /// Set to true if the file was deleted
+        bool is_deleted_locally; // NOTE: because S3 doesn't delete files
+                                 // immediately we will still be able to read
+                                 // the deleted file for a while, to prevent
+                                 // confusion we mark such file as deleted in
+                                 // manifest in order for GC alg. to remove the
+                                 // record eventually
+
+        bool operator==(const segment_meta& other) const;
+        bool operator<(const segment_meta& other) const;
+    };
+    using key = segment_name;
+    using value = segment_meta;
+    using segments_map = std::map<key, value>;
+    using const_iterator = segments_map::const_iterator;
 
     /// Create empty manifest that supposed to be updated later
     manifest();
+
     /// Create manifest for specific ntp
-    explicit manifest(model::ntp ntp);
+    explicit manifest(model::ntp ntp, model::revision_id rev);
 
     /// Manifest object name in S3
-    ss::sstring get_object_name() const;
+    remote_manifest_path get_manifest_path() const;
+
+    /// Segment file name in S3
+    remote_segment_path get_remote_segment_path(const segment_name& name) const;
 
     /// Get NTP
     model::ntp get_ntp() const;
+
+    /// Get revision
+    model::revision_id get_revision_id() const;
 
     /// Return iterator to the begining(end) of the segments list
     const_iterator begin() const;
@@ -49,13 +86,17 @@ public:
     size_t size() const;
 
     /// Check if the manifest contains particular segment
-    bool contains(const value& obj) const;
+    bool contains(const segment_name& obj) const;
 
     /// Add new segment to the manifest
-    bool add(const value& obj);
+    bool add(const segment_name& key, const segment_meta& meta);
+
+    /// Get segment if available or nullopt
+    std::optional<std::reference_wrapper<const segment_meta>>
+    get(const segment_name& key) const;
 
     /// Get insert iterator for segments set
-    std::insert_iterator<segments_set> get_insert_iterator();
+    std::insert_iterator<segments_map> get_insert_iterator();
 
     /// Return new manifest that contains only those segments that present
     /// in local manifest and not found in 'remote_set'.
@@ -70,7 +111,7 @@ public:
     /// Serialize manifest object
     ///
     /// \return asynchronous input_stream with the serialized json
-    ss::input_stream<char> serialize() const;
+    std::tuple<ss::input_stream<char>, size_t> serialize() const;
 
     /// Serialize manifest object
     ///
@@ -81,13 +122,27 @@ public:
     /// Compare two manifests for equality
     bool operator==(const manifest& other) const;
 
+    /// Remove segment record from manifest
+    ///
+    /// \param name is a segment name
+    /// \return true on success, false on failure (no such segment)
+    bool delete_permanently(const segment_name& name);
+
+    /// Remove segment as deleted in manifest
+    ///
+    /// \param name is a segment name
+    /// \return true on success, false on failure (no such segment or already
+    /// marked)
+    bool mark_as_deleted(const segment_name& name);
+
 private:
     /// Update manifest content from ptree object that supposed to be generated
     /// from manifest.json file
     void update(const ptree& m);
 
     model::ntp _ntp;
-    segments_set _objects;
+    model::revision_id _rev;
+    segments_map _segments;
 };
 
 } // namespace arch

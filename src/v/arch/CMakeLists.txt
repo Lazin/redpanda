@@ -3,6 +3,7 @@ v_cc_library(
   NAME arch
   SRCS
     service.cc
+    ntp_archiver_service.cc
     manifest.cc
     error.cc
   DEPS
