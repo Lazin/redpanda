@@ -114,6 +114,16 @@ struct configuration final : public config_store {
     property<int16_t> id_allocator_log_capacity;
     property<int16_t> id_allocator_batch_size;
 
+    // Archival storage
+    property<bool> archival_storage_enabled;
+    property<std::optional<ss::sstring>> archival_storage_s3_access_key;
+    property<std::optional<ss::sstring>> archival_storage_s3_secret_key;
+    property<std::optional<ss::sstring>> archival_storage_s3_region;
+    property<std::optional<ss::sstring>> archival_storage_s3_bucket;
+    property<std::chrono::milliseconds> archival_storage_upload_interval;
+    property<std::chrono::milliseconds> archival_storage_gc_interval;
+    property<int16_t> archival_storage_max_connections;
+
     configuration();
 
     void read_yaml(const YAML::Node& root_node) override;
