@@ -16,6 +16,23 @@
 
 namespace archival {
 
+std::ostream& operator<<(std::ostream& o, upload_policy_selector s) {
+    switch (s) {
+    case upload_policy_selector::archive_non_compacted:
+        o << "archive_non_compacted";
+        break;
+    }
+    return o;
+}
+std::ostream& operator<<(std::ostream& o, delete_policy_selector s) {
+    switch (s) {
+    case delete_policy_selector::do_not_keep:
+        o << "do_not_keep";
+        break;
+    }
+    return o;
+}
+
 class arch_policy_non_compacted_impl {
 public:
     arch_policy_non_compacted_impl(

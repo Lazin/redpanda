@@ -11,7 +11,6 @@
 #include "archival/archival_policy.h"
 #include "archival/ntp_archiver_service.h"
 #include "archival/tests/service_fixture.h"
-#include "cluster/tests/utils.h"
 #include "cluster/types.h"
 #include "model/metadata.h"
 #include "test_utils/fixture.h"
@@ -200,8 +199,8 @@ FIXTURE_TEST(test_upload_segments, archiver_fixture) {
     auto res
       = archiver.upload_next_candidate(limit, get_local_storage_api().log_mgr())
           .get0();
-    BOOST_REQUIRE_EQUAL(res.succeded, 2);
-    BOOST_REQUIRE_EQUAL(res.failed, 0);
+    BOOST_REQUIRE_EQUAL(res.num_succeded, 2);
+    BOOST_REQUIRE_EQUAL(res.num_failed, 0);
 
     for (auto [url, req] : get_targets()) {
         vlog(test_log.error, "{}", url);
@@ -248,8 +247,8 @@ FIXTURE_TEST(test_delete_segments, archiver_fixture) {
     auto res
       = archiver.delete_next_candidate(limit, get_local_storage_api().log_mgr())
           .get0();
-    BOOST_REQUIRE_EQUAL(res.succeded, 2);
-    BOOST_REQUIRE_EQUAL(res.failed, 0);
+    BOOST_REQUIRE_EQUAL(res.num_succeded, 2);
+    BOOST_REQUIRE_EQUAL(res.num_failed, 0);
 
     BOOST_REQUIRE_EQUAL(get_requests().size(), 3);
     BOOST_REQUIRE(get_targets().count(manifest_url)); // NOLINT

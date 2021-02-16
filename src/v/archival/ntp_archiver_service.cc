@@ -29,6 +29,17 @@
 
 namespace archival {
 
+std::ostream& operator<<(std::ostream& o, const configuration& cfg) {
+    o << "{bucket_name:" << cfg.bucket_name()
+      << ",upload_policy:" << cfg.upload_policy
+      << ",delete_policy:" << cfg.delete_policy
+      << ",interval:" << cfg.interval.count()
+      << ",gc_interval:" << cfg.gc_interval.count()
+      << ",client_config:" << cfg.client_config
+      << ",connection_limit:" << cfg.connection_limit() << "}";
+    return o;
+}
+
 ntp_archiver::ntp_archiver(
   const storage::ntp_config& ntp, const configuration& conf)
   : _ntp(ntp.ntp())
@@ -60,6 +71,7 @@ ss::future<bool> ntp_archiver::download_manifest() {
     vlog(archival_log.trace, "Download manifest {}", key());
     auto path = s3::object_key(key());
     s3::client client(_client_conf);
+    bool result = true;
     try {
         auto resp = co_await client.get_object(_bucket, path);
         co_await _remote.update(resp->as_input_stream());
@@ -70,12 +82,13 @@ ss::future<bool> ntp_archiver::download_manifest() {
             // the first segment and crashed before we were able to upload the
             // manifest. This shouldn't be the problem though. We will just
             // re-upload this segment for once.
-            co_return false;
+            result = false;
+        } else {
+            throw;
         }
-        throw;
     }
     co_await client.shutdown();
-    co_return true;
+    co_return result;
 }
 
 ss::future<> ntp_archiver::upload_manifest() {
@@ -133,6 +146,7 @@ ss::future<bool> ntp_archiver::upload_segment(
             vlog(
               archival_log.trace, "Completed segment \"{}\" to S3", s3path());
             _remote.add(sname, meta);
+            co_await client.shutdown();
         } catch (...) {
             vlog(
               archival_log.error,
@@ -169,23 +183,21 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidate(
     std::copy_n(
       candidates->begin(), num_candidates, std::back_inserter(upload_set));
     vlog(archival_log.trace, "Upload {} elements", upload_set.size());
-    s3::client client(_client_conf);
     batch_result result{};
     auto fut = ss::parallel_for_each(
       upload_set,
       [this, &lm, &result](manifest::segment_map::value_type target) {
           return upload_segment(std::move(target), lm).then([&result](bool ok) {
               if (ok) {
-                  result.succeded++;
+                  result.num_succeded++;
               } else {
-                  result.failed++;
+                  result.num_failed++;
               }
           });
       });
     co_await std::move(fut);
     if (num_candidates) {
         vlog(archival_log.trace, "Completed S3 upload");
-        co_await client.shutdown();
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }
@@ -203,6 +215,7 @@ ss::future<bool> ntp_archiver::delete_segment(
         try {
             co_await client.delete_object(_bucket, s3::object_key(s3path()));
             _remote.delete_permanently(sname);
+            co_await client.shutdown();
         } catch (...) {
             vlog(
               archival_log.error,
@@ -236,22 +249,20 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
     vlog(archival_log.trace, "Delete {} elements", delete_set.size());
     // upload segments in parallel
     batch_result result{};
-    s3::client client(_client_conf);
     auto fut = ss::parallel_for_each(
       delete_set,
       [this, &lm, &result](manifest::segment_map::value_type target) {
           return delete_segment(std::move(target), lm).then([&result](bool ok) {
               if (ok) {
-                  result.succeded++;
+                  result.num_succeded++;
               } else {
-                  result.failed++;
+                  result.num_failed++;
               }
           });
       });
     co_await std::move(fut);
     if (num_candidates) {
         vlog(archival_log.trace, "Completed S3 upload");
-        co_await client.shutdown();
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }

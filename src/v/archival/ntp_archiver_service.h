@@ -47,6 +47,8 @@ struct configuration {
     s3_connection_limit connection_limit;
 };
 
+std::ostream& operator<<(std::ostream& o, const configuration& cfg);
+
 /// This class performs per-ntp arhcival workload. Every ntp can be
 /// processed independently, without the knowledge about others. All
 /// 'ntp_archiver' instances that the shard posesses are supposed to be
@@ -92,8 +94,8 @@ public:
     const manifest& get_remote_manifest() const;
 
     struct batch_result {
-        size_t succeded;
-        size_t failed;
+        size_t num_succeded;
+        size_t num_failed;
     };
 
     /// \brief Upload next segment to S3 (if any)

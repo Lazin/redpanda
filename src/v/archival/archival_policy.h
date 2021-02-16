@@ -28,6 +28,9 @@ enum class delete_policy_selector {
     do_not_keep,
 };
 
+std::ostream& operator<<(std::ostream& o, upload_policy_selector s);
+std::ostream& operator<<(std::ostream& o, delete_policy_selector s);
+
 class upload_policy_base {
 public:
     /// \brief Generate list of segments that should be uploaded to S3
