@@ -79,6 +79,14 @@ ss::future<configuration> configuration::make_configuration(
     co_return client_cfg;
 }
 
+std::ostream& operator<<(std::ostream& o, const configuration& c) {
+    o << "{access_key:" << c.access_key << ",region:" << c.region()
+      << ",secret_key:****"
+      << ",access_point_uri:" << c.uri() << ",server_addr:" << c.server_addr
+      << "}";
+    return o;
+}
+
 // request_creator //
 
 request_creator::request_creator(const configuration& conf)

@@ -51,6 +51,8 @@ struct configuration : rpc::base_transport::configuration {
       const aws_region_name& region);
 };
 
+std::ostream& operator<<(std::ostream& o, const configuration& c);
+
 /// Request formatter for AWS S3
 class request_creator {
 public:
