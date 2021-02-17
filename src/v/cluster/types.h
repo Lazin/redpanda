@@ -107,6 +107,7 @@ struct topic_configuration {
     std::optional<model::compaction_strategy> compaction_strategy;
     std::optional<model::timestamp_type> timestamp_type;
     std::optional<size_t> segment_size;
+    std::optional<ss::sstring> manifest_object_name;
 
     // Tristate fields
     // Mapped according to the following policy:

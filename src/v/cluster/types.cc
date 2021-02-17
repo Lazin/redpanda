@@ -84,7 +84,7 @@ std::ostream& operator<<(std::ostream& o, const topic_configuration& cfg) {
       "{{ topic: {}, partition_count: {}, replication_factor: {}, compression: "
       "{}, cleanup_policy_bitflags: {}, compaction_strategy: {}, "
       "retention_bytes: {}, "
-      "retention_duration_hours: {}, segment_size: {}, timestamp_type: {} }}",
+      "retention_duration_hours: {}, segment_size: {}, timestamp_type: {}, manifest: {} }}",
       cfg.tp_ns,
       cfg.partition_count,
       cfg.replication_factor,
@@ -94,7 +94,8 @@ std::ostream& operator<<(std::ostream& o, const topic_configuration& cfg) {
       cfg.retention_bytes,
       cfg.retention_duration,
       cfg.segment_size,
-      cfg.timestamp_type);
+      cfg.timestamp_type,
+      cfg.manifest_object_name);
 
     return o;
 }
@@ -139,7 +140,8 @@ void adl<cluster::topic_configuration>::to(
       t.timestamp_type,
       t.segment_size,
       t.retention_bytes,
-      t.retention_duration);
+      t.retention_duration,
+      t.manifest_object_name);
 }
 
 cluster::topic_configuration
@@ -162,6 +164,7 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
     cfg.retention_bytes = adl<tristate<size_t>>{}.from(in);
     cfg.retention_duration = adl<tristate<std::chrono::milliseconds>>{}.from(
       in);
+    cfg.manifest_object_name = adl<std::optional<ss::sstring>>{}.from(in);
 
     return cfg;
 }

@@ -29,6 +29,7 @@ v_cc_library(
     segment_utils.cc
     compaction_reducers.cc
     parser_utils.cc
+    s3_downloader.cc
   DEPS
     Seastar::seastar
     v::bytes

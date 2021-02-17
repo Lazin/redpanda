@@ -93,6 +93,8 @@ cluster::topic_configuration to_cluster_type(const creatable_topic& t) {
       config_entries, "retention.bytes");
     cfg.retention_duration = get_tristate_value<std::chrono::milliseconds>(
       config_entries, "retention.ms");
+    cfg.manifest_object_name = get_config_value<ss::sstring>(
+      config_entries, "manifest.object.name");
 
     return cfg;
 }
