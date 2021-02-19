@@ -37,6 +37,8 @@ public:
         tristate<std::chrono::milliseconds> retention_time{std::nullopt};
         // if set, log will not use batch cache
         with_cache cache_enabled = with_cache::yes;
+        // if set, log will be prepopulated using archived data upon creation
+        std::optional<ss::sstring> manifest_object_name;
 
         friend std::ostream&
         operator<<(std::ostream&, const default_overrides&);

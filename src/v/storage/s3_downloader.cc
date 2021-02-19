@@ -24,8 +24,8 @@
 
 namespace storage {
 
-s3_downloader::s3_downloader(s3_downloader_configuration&& config)
-  : _conf(config)
+s3_downloader::s3_downloader(s3_downloader_configuration config)
+  : _conf(std::move(config))
   , _dl_limit(config.num_connections()) {}
 
 s3_downloader::~s3_downloader() {
@@ -79,6 +79,23 @@ ss::future<> s3_downloader::stop() {
 
 void s3_downloader::cancel() { _cancel.request_abort(); }
 
+ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
+    vlog(stlog.info, "Downloading log for {}", ntpc.ntp());
+    if (!ntpc.has_overrides()) {
+        vlog(stlog.info, "No overrides for {} found, skipping", ntpc.ntp());
+        return ss::now();
+    }
+    auto name = ntpc.get_overrides().manifest_object_name;
+    if (!name.has_value()) {
+        vlog(
+          stlog.info,
+          "No manifest override for {} found, skipping",
+          ntpc.ntp());
+        return ss::now();
+    }
+    return download_log(s3::object_key(*name), ntpc);
+}
+
 ss::future<> s3_downloader::download_log(
   const s3::object_key& manifest_key, const ntp_config& ntpc) {
     auto prefix = std::filesystem::path(ntpc.work_directory());
@@ -87,11 +104,19 @@ ss::future<> s3_downloader::download_log(
     // we can limit based on segment size that we want to keep and
     // base/committed offsets of individual segments (e.g. keep last 1GB of data
     // for every partition)
-    vlog(stlog.info, "Downloading segments into {}", prefix);
+    vlog(
+      stlog.info,
+      "Downloading segments from {} into {}",
+      manifest_key(),
+      prefix);
+    for (auto x : segments) {
+        vlog(stlog.info, "... segment {} path {}", x.segment, x.s3_path);
+    }
     co_await ss::max_concurrent_for_each(
       segments,
       _conf.num_connections(),
       [this, prefix](const s3_manifest_entry& entry) {
+          _cancel.check();
           return download_file(entry, prefix);
       })
       .handle_exception([this, prefix, segments](std::exception_ptr eptr) {
@@ -136,6 +161,7 @@ static std::vector<s3_manifest_entry> parse_segments(
 
 ss::future<std::vector<s3_manifest_entry>> s3_downloader::download_manifest(
   const s3::object_key& key, const ntp_config& ntp_cfg) {
+    vlog(stlog.info, "Downloading manifest {}", key());
     using namespace rapidjson;
     s3::client cl(_conf.client_config);
     auto resp = co_await cl.get_object(_conf.bucket, key);
@@ -174,7 +200,14 @@ ss::future<> s3_downloader::download_file(
     auto resp = co_await cl.get_object(
       _conf.bucket, s3::object_key(key.s3_path));
     auto is = resp->as_input_stream();
+    // parse segment name from S3
     auto localpath = prefix / std::filesystem::path(key.segment);
+    vlog(
+      stlog.info,
+      "Copying s3 path {} to local location {}",
+      key.s3_path,
+      localpath.string());
+    co_await ss::recursive_touch_directory(prefix.string());
     auto fs = co_await open_output_file_stream(localpath);
     co_await ss::copy(is, fs);
     co_return;
@@ -182,6 +215,7 @@ ss::future<> s3_downloader::download_file(
 
 ss::future<> s3_downloader::remove_file(
   const s3_manifest_entry& key, const std::filesystem::path& prefix) {
+    vlog(stlog.info, "removing file {}", prefix.string());
     auto localpath = prefix / std::filesystem::path(key.segment);
     co_await ss::remove_file(localpath.string());
     co_return;

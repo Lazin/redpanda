@@ -41,7 +41,7 @@ struct s3_manifest_entry {
 /// out of space, etc.
 class s3_downloader {
 public:
-    explicit s3_downloader(s3_downloader_configuration&& config);
+    explicit s3_downloader(s3_downloader_configuration config);
     static ss::future<s3_downloader_configuration> make_s3_config();
 
     s3_downloader(const s3_downloader& config) = delete;
@@ -54,6 +54,12 @@ public:
     ss::future<> stop();
 
     void cancel();
+
+    /// Download full log based on manifest data.
+    /// The 'ntp_config' should have corresponding override. If override
+    /// is not set nothing will happen and the returned future will be
+    /// ready (not in failed state).
+    ss::future<> download_log(const ntp_config& ntp_cfg);
 
     /// Download full log based on manifest data
     ss::future<>

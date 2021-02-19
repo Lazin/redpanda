@@ -32,6 +32,7 @@
 #include "rpc/simple_protocol.h"
 #include "storage/chunk_cache.h"
 #include "storage/directories.h"
+#include "storage/s3_downloader.h"
 #include "syschecks/syschecks.h"
 #include "test_utils/logs.h"
 #include "utils/file_io.h"
@@ -361,10 +362,13 @@ void application::wire_up_services() {
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing storage services").get();
+    // TODO: make s3_config optional, only available if archival is enabled
+    auto s3_config = storage::s3_downloader::make_s3_config().get0();
     construct_service(
       storage,
       kvstore_config_from_global_config(),
-      manager_config_from_global_config())
+      manager_config_from_global_config(),
+      std::move(s3_config))
       .get();
 
     if (coproc_enabled()) {
@@ -394,6 +398,18 @@ void application::wire_up_services() {
       .get();
     vlog(_log.info, "Partition manager started");
 
+    if (archival_storage_enabled()) {
+        auto config
+          = archival::scheduler_service::get_archival_service_config().get0();
+        syschecks::systemd_message("Starting archival scheduler {}", config)
+          .get();
+        construct_service(
+          archival_scheduler,
+          std::ref(config),
+          std::ref(storage),
+          std::ref(partition_manager))
+          .get();
+    }
     // controller
 
     syschecks::systemd_message("Creating cluster::controller").get();
@@ -550,6 +566,11 @@ void application::wire_up_services() {
       .get();
 }
 
+bool application::archival_storage_enabled() {
+    const auto& cfg = config::shard_local_cfg();
+    return cfg.developer_mode() && cfg.archival_storage_enabled();
+}
+
 void application::start() {
     syschecks::systemd_message("Staring storage services").get();
     storage.invoke_on_all(&storage::api::start).get();
@@ -621,6 +642,14 @@ void application::start() {
           _log.info,
           "Started coproc RPC server listening at {}",
           conf.coproc_script_manager_server());
+    }
+
+    if (archival_storage_enabled()) {
+        syschecks::systemd_message("Starting archival storage").get();
+        archival_scheduler
+          .invoke_on_all(
+            [](archival::scheduler_service& svc) { return svc.start(); })
+          .get();
     }
 
     quota_mgr.invoke_on_all(&kafka::quota_manager::start).get();

@@ -32,11 +32,13 @@ storage::ntp_config topic_configuration::make_ntp_config(
   const ss::sstring& work_dir,
   model::partition_id p_id,
   model::revision_id rev) const {
+    // TODO: add override for manifest option
     auto has_overrides = cleanup_policy_bitflags || compaction_strategy
                          || segment_size || retention_bytes.has_value()
                          || retention_bytes.is_disabled()
                          || retention_duration.has_value()
-                         || retention_duration.is_disabled() || is_internal();
+                         || retention_duration.is_disabled()
+                         || manifest_object_name.has_value() || is_internal();
     std::unique_ptr<storage::ntp_config::default_overrides> overrides = nullptr;
 
     if (has_overrides) {
@@ -49,7 +51,8 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .retention_time = retention_duration,
             // we disable cache for internal topics as they are read only once
             // during bootstrap.
-            .cache_enabled = storage::with_cache(!is_internal())});
+            .cache_enabled = storage::with_cache(!is_internal()),
+            .manifest_object_name = manifest_object_name});
     }
     return storage::ntp_config(
       model::ntp(tp_ns.ns, tp_ns.tp, p_id),
@@ -84,7 +87,8 @@ std::ostream& operator<<(std::ostream& o, const topic_configuration& cfg) {
       "{{ topic: {}, partition_count: {}, replication_factor: {}, compression: "
       "{}, cleanup_policy_bitflags: {}, compaction_strategy: {}, "
       "retention_bytes: {}, "
-      "retention_duration_hours: {}, segment_size: {}, timestamp_type: {}, manifest: {} }}",
+      "retention_duration_hours: {}, segment_size: {}, timestamp_type: {}, "
+      "manifest: {} }}",
       cfg.tp_ns,
       cfg.partition_count,
       cfg.replication_factor,
