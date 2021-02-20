@@ -68,6 +68,10 @@ public:
 private:
     ss::future<std::vector<s3_manifest_entry>>
     download_manifest(const s3::object_key& key, const ntp_config& ntp_cfg);
+    /// Download topic manifest parse it and return list of partition
+    /// manifest locations (array index is a partition id)
+    ss::future<std::vector<s3::object_key>>
+    download_topic_manifest(const s3::object_key& key);
     ss::future<> download_file(
       const s3_manifest_entry& target, const std::filesystem::path& prefix);
     ss::future<> remove_file(

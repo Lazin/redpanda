@@ -4,6 +4,7 @@
 #include "config/configuration.h"
 #include "hashing/murmur.h"
 #include "json/json.h"
+#include "s3/error.h"
 #include "storage/logger.h"
 
 #include <seastar/core/coroutine.hh>
@@ -80,10 +81,14 @@ ss::future<> s3_downloader::stop() {
 void s3_downloader::cancel() { _cancel.request_abort(); }
 
 ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
-    vlog(stlog.info, "Downloading log for {}", ntpc.ntp());
+    vlog(stlog.info, "Check conditions for {} S3 recovery", ntpc.ntp());
+    bool exists = co_await ss::file_exists(ntpc.work_directory());
+    if (exists) {
+        co_return;
+    }
     if (!ntpc.has_overrides()) {
         vlog(stlog.info, "No overrides for {} found, skipping", ntpc.ntp());
-        return ss::now();
+        co_return;
     }
     auto name = ntpc.get_overrides().manifest_object_name;
     if (!name.has_value()) {
@@ -91,15 +96,19 @@ ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
           stlog.info,
           "No manifest override for {} found, skipping",
           ntpc.ntp());
-        return ss::now();
+        co_return;
     }
-    return download_log(s3::object_key(*name), ntpc);
+    vlog(stlog.info, "Downloading log for {}", ntpc.ntp());
+    co_await download_log(s3::object_key(*name), ntpc);
 }
 
 ss::future<> s3_downloader::download_log(
   const s3::object_key& manifest_key, const ntp_config& ntpc) {
     auto prefix = std::filesystem::path(ntpc.work_directory());
-    auto segments = co_await download_manifest(manifest_key, ntpc);
+    auto partitions = co_await download_topic_manifest(manifest_key);
+    auto part_ix = ntpc.ntp().tp.partition();
+    auto part_s3_loc = partitions[part_ix];
+    auto segments = co_await download_manifest(part_s3_loc, ntpc);
     // TODO: limit number of downloaded segments based on topic configuration
     // we can limit based on segment size that we want to keep and
     // base/committed offsets of individual segments (e.g. keep last 1GB of data
@@ -107,7 +116,7 @@ ss::future<> s3_downloader::download_log(
     vlog(
       stlog.info,
       "Downloading segments from {} into {}",
-      manifest_key(),
+      part_s3_loc(),
       prefix);
     for (auto x : segments) {
         vlog(stlog.info, "... segment {} path {}", x.segment, x.s3_path);
@@ -134,6 +143,15 @@ static ss::sstring make_s3_segment_path(
     auto path = fmt::format("{}_{}/{}", ntp.path(), rawrev, segment);
     uint32_t hash = murmurhash3_x86_32(path.data(), path.size());
     return fmt::format("{:08x}/{}", hash, path);
+}
+
+static s3::object_key
+make_partition_manifest_path(const model::ntp& ntp, model::revision_id rev) {
+    constexpr uint32_t bitmask = 0xF0000000;
+    auto path = fmt::format("{}_{}", ntp.path(), rev());
+    uint32_t hash = bitmask & murmurhash3_x86_32(path.data(), path.size());
+    return s3::object_key(
+      fmt::format("{:08x}/meta/{}_{}/manifest.json", hash, ntp.path(), rev()));
 }
 
 static std::vector<s3_manifest_entry> parse_segments(
@@ -186,6 +204,56 @@ ss::future<std::vector<s3_manifest_entry>> s3_downloader::download_manifest(
     co_return parse_segments(m, ntp, rev);
 }
 
+ss::future<std::vector<s3::object_key>>
+s3_downloader::download_topic_manifest(const s3::object_key& key) {
+    vlog(stlog.info, "Downloading topic manifest {}", key());
+    using namespace rapidjson;
+    iobuf tmp;
+    auto os = make_iobuf_ref_output_stream(tmp);
+    s3::client cl(_conf.client_config);
+    try {
+        auto resp = co_await cl.get_object(_conf.bucket, key);
+        auto is = resp->as_input_stream();
+        co_await ss::copy(is, os);
+    } catch (const s3::rest_error_response& err) {
+        vlog(
+          stlog.error,
+          "Error during topic manifest download: {}, code: {}, resource: {}",
+          err.message(),
+          err.code(),
+          err.resource());
+        throw;
+    }
+    iobuf_istreambuf ibuf(tmp);
+    std::istream stream(&ibuf);
+    Document m;
+    IStreamWrapper wrapper(stream);
+    m.ParseStream(wrapper);
+    // Parse manifest fields that we need to find partition manifest files
+    auto ns = m["namespace"].GetString();
+    auto tp = m["topic"].GetString();
+    int32_t partitions = m["partition_count"].GetInt();
+    int32_t rev = m["revision_id"].GetInt();
+    // TODO: parse all fields and do something meaningful (verify
+    // topic_configuration or alter it).
+    vlog(
+      stlog.info,
+      "Restoring from S3 ns: {}, topic: {}, num-partitions: {}, rev: {}",
+      ns,
+      tp,
+      partitions,
+      rev);
+    std::vector<s3::object_key> result;
+    for (int32_t i = 0; i < partitions; i++) {
+        auto ntp = model::ntp(
+          model::ns(ns), model::topic(tp), model::partition_id(i));
+        result.emplace_back(
+          make_partition_manifest_path(ntp, model::revision_id(rev)));
+    }
+    co_await cl.shutdown();
+    co_return result;
+}
+
 static ss::future<ss::output_stream<char>>
 open_output_file_stream(const std::filesystem::path& path) {
     auto file = co_await ss::open_file_dma(
@@ -210,6 +278,9 @@ ss::future<> s3_downloader::download_file(
     co_await ss::recursive_touch_directory(prefix.string());
     auto fs = co_await open_output_file_stream(localpath);
     co_await ss::copy(is, fs);
+    co_await cl.shutdown();
+    co_await fs.flush();
+    co_await fs.close();
     co_return;
 }
 

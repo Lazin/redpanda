@@ -100,7 +100,20 @@ public:
     scheduler_service_impl(
       const configuration& conf,
       ss::sharded<storage::api>& api,
-      ss::sharded<cluster::partition_manager>& pm);
+      ss::sharded<cluster::partition_manager>& pm,
+      ss::sharded<cluster::topic_table>& tt);
+    scheduler_service_impl(
+      ss::sharded<storage::api>& api,
+      ss::sharded<cluster::partition_manager>& pm,
+      ss::sharded<cluster::topic_table>& tt,
+      ss::sharded<archival::configuration>& configs);
+
+    /// \brief Configure scheduler service
+    ///
+    /// \param c is a service configuration
+    /// \note two step initialization is needed when the
+    ///       service is initialized in ss::sharded container
+    void configure(configuration c);
 
     /// \brief create scheduler service config
     /// This mehtod will use shard-local redpanda configuration
@@ -145,6 +158,7 @@ private:
 
     configuration _conf;
     ss::sharded<cluster::partition_manager>& _partition_manager;
+    ss::sharded<cluster::topic_table>& _topic_table;
     ss::sharded<storage::api>& _storage_api;
     simple_time_jitter<ss::lowres_clock> _jitter;
     simple_time_jitter<ss::lowres_clock> _gc_jitter;
@@ -172,6 +186,13 @@ public:
 
     /// Stop service
     using internal::scheduler_service_impl::stop;
+
+    /// \brief Configure scheduler service
+    ///
+    /// \param c is a service configuration
+    /// \note two step initialization is needed when the
+    ///       service is initialized in ss::sharded container
+    using internal::scheduler_service_impl::configure;
 
     /// Generate configuration
     using internal::scheduler_service_impl::get_archival_service_config;

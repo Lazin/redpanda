@@ -9,6 +9,8 @@
 
 #include "redpanda/application.h"
 
+#include "archival/ntp_archiver_service.h"
+#include "archival/service.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/id_allocator.h"
 #include "cluster/id_allocator_frontend.h"
@@ -41,6 +43,7 @@
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
+#include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/http/api_docs.hh>
 #include <seastar/http/exception.hh>
@@ -362,13 +365,20 @@ void application::wire_up_services() {
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing storage services").get();
+
     // TODO: make s3_config optional, only available if archival is enabled
-    auto s3_config = storage::s3_downloader::make_s3_config().get0();
     construct_service(
       storage,
       kvstore_config_from_global_config(),
-      manager_config_from_global_config(),
-      std::move(s3_config))
+      manager_config_from_global_config())
+      .get();
+    storage
+      .invoke_on_all([](storage::api& api) {
+          return storage::s3_downloader::make_s3_config().then(
+            [&api](storage::s3_downloader_configuration cfg) {
+                api.configure_downloader(std::move(cfg));
+            });
+      })
       .get();
 
     if (coproc_enabled()) {
@@ -398,18 +408,6 @@ void application::wire_up_services() {
       .get();
     vlog(_log.info, "Partition manager started");
 
-    if (archival_storage_enabled()) {
-        auto config
-          = archival::scheduler_service::get_archival_service_config().get0();
-        syschecks::systemd_message("Starting archival scheduler {}", config)
-          .get();
-        construct_service(
-          archival_scheduler,
-          std::ref(config),
-          std::ref(storage),
-          std::ref(partition_manager))
-          .get();
-    }
     // controller
 
     syschecks::systemd_message("Creating cluster::controller").get();
@@ -441,6 +439,26 @@ void application::wire_up_services() {
       std::ref(_raft_connection_cache))
       .get();
 
+    if (archival_storage_enabled()) {
+        syschecks::systemd_message("Starting archival scheduler").get();
+        ss::sharded<archival::configuration> configs;
+        configs.start().get();
+        configs
+          .invoke_on_all([](archival::configuration& c) {
+              return archival::scheduler_service::get_archival_service_config()
+                .then(
+                  [&c](archival::configuration cfg) { c = std::move(cfg); });
+          })
+          .get();
+        construct_service(
+          archival_scheduler,
+          std::ref(storage),
+          std::ref(partition_manager),
+          std::ref(controller->get_topics_state()),
+          std::ref(configs))
+          .get();
+        configs.stop().get();
+    }
     // group membership
     syschecks::systemd_message("Creating partition manager").get();
     construct_service(

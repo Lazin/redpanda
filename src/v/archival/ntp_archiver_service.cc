@@ -50,12 +50,16 @@ ntp_archiver::ntp_archiver(
   , _bucket(conf.bucket_name)
   , _remote(_ntp, _rev)
   , _gate() {
-    vlog(archival_log.trace, "Create ntp_archiver {}", _ntp.path());
+    vlog(archival_log.debug, "Create ntp_archiver {}", _ntp.path());
 }
 
 ss::future<> ntp_archiver::stop() { return _gate.close(); }
 
 const model::ntp& ntp_archiver::get_ntp() const { return _ntp; }
+
+model::revision_id ntp_archiver::get_revision_id() const {
+    return _rev;
+}
 
 const ss::lowres_clock::time_point ntp_archiver::get_last_upload_time() const {
     return _last_upload_time;
@@ -68,7 +72,7 @@ const ss::lowres_clock::time_point ntp_archiver::get_last_delete_time() const {
 ss::future<bool> ntp_archiver::download_manifest() {
     gate_guard guard{_gate};
     auto key = _remote.get_manifest_path();
-    vlog(archival_log.trace, "Download manifest {}", key());
+    vlog(archival_log.debug, "Download manifest {}", key());
     auto path = s3::object_key(key());
     s3::client client(_client_conf);
     bool result = true;
@@ -94,7 +98,7 @@ ss::future<bool> ntp_archiver::download_manifest() {
 ss::future<> ntp_archiver::upload_manifest() {
     gate_guard guard{_gate};
     auto key = _remote.get_manifest_path();
-    vlog(archival_log.trace, "Upload manifest {}", key());
+    vlog(archival_log.debug, "Upload manifest {}", key());
     auto path = s3::object_key(key());
     auto [is, size] = _remote.serialize();
     s3::client client(_client_conf);
@@ -124,7 +128,7 @@ static bool validate_metadata(
 
 ss::future<bool> ntp_archiver::upload_segment(
   manifest::segment_map::value_type target, storage::log_manager& lm) {
-    vlog(archival_log.trace, "Upload {} segments", target.first);
+    vlog(archival_log.debug, "Upload {} segments", target.first);
     s3::client client(_client_conf);
     const auto& [sname, meta] = target;
     auto segment = get_segment(sname, lm);
@@ -136,7 +140,7 @@ ss::future<bool> ntp_archiver::upload_segment(
         auto stream = segment->offset_data_stream(
           meta.base_offset, ss::default_priority_class());
         auto s3path = _remote.get_remote_segment_path(sname);
-        vlog(archival_log.trace, "Uploading segment \"{}\" to S3", s3path());
+        vlog(archival_log.debug, "Uploading segment \"{}\" to S3", s3path());
         try {
             co_await client.put_object(
               _bucket,
@@ -144,7 +148,7 @@ ss::future<bool> ntp_archiver::upload_segment(
               segment->size_bytes(),
               std::move(stream));
             vlog(
-              archival_log.trace, "Completed segment \"{}\" to S3", s3path());
+              archival_log.debug, "Completed segment \"{}\" to S3", s3path());
             _remote.add(sname, meta);
             co_await client.shutdown();
         } catch (...) {
@@ -163,7 +167,7 @@ ss::future<bool> ntp_archiver::upload_segment(
 
 ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidate(
   ss::semaphore& req_limit, storage::log_manager& lm) {
-    vlog(archival_log.trace, "Uploading next candidate called");
+    vlog(archival_log.debug, "Uploading next candidate called");
     gate_guard guard{_gate};
     // calculate candidate set
     auto candidates = _policy->generate_upload_set(_remote, lm);
@@ -182,7 +186,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidate(
     std::vector<manifest::segment_map::value_type> upload_set;
     std::copy_n(
       candidates->begin(), num_candidates, std::back_inserter(upload_set));
-    vlog(archival_log.trace, "Upload {} elements", upload_set.size());
+    vlog(archival_log.debug, "Upload {} elements", upload_set.size());
     batch_result result{};
     auto fut = ss::parallel_for_each(
       upload_set,
@@ -197,7 +201,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidate(
       });
     co_await std::move(fut);
     if (num_candidates) {
-        vlog(archival_log.trace, "Completed S3 upload");
+        vlog(archival_log.debug, "Completed S3 upload");
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }
@@ -211,7 +215,7 @@ ss::future<bool> ntp_archiver::delete_segment(
     if (!segment) {
         s3::client client(_client_conf);
         auto s3path = _remote.get_remote_segment_path(sname);
-        vlog(archival_log.trace, "Delete segment \"{}\" from S3", s3path());
+        vlog(archival_log.debug, "Delete segment \"{}\" from S3", s3path());
         try {
             co_await client.delete_object(_bucket, s3::object_key(s3path()));
             _remote.delete_permanently(sname);
@@ -230,7 +234,7 @@ ss::future<bool> ntp_archiver::delete_segment(
 
 ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
   ss::semaphore& req_limit, storage::log_manager& lm) {
-    vlog(archival_log.trace, "Delete next candidate called");
+    vlog(archival_log.debug, "Delete next candidate called");
     gate_guard guard{_gate};
     // calculate candidate set
     auto candidates = _policy->generate_delete_set(_remote, lm);
@@ -246,7 +250,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
     std::vector<manifest::segment_map::value_type> delete_set;
     std::copy_n(
       candidates->begin(), num_candidates, std::back_inserter(delete_set));
-    vlog(archival_log.trace, "Delete {} elements", delete_set.size());
+    vlog(archival_log.debug, "Delete {} elements", delete_set.size());
     // upload segments in parallel
     batch_result result{};
     auto fut = ss::parallel_for_each(
@@ -262,7 +266,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
       });
     co_await std::move(fut);
     if (num_candidates) {
-        vlog(archival_log.trace, "Completed S3 upload");
+        vlog(archival_log.debug, "Completed S3 delete");
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }
@@ -273,7 +277,7 @@ ss::lw_shared_ptr<storage::segment>
 ntp_archiver::get_segment(segment_name path, storage::log_manager& lm) {
     std::optional<storage::log> log = lm.get(_ntp);
     if (!log) {
-        vlog(archival_log.trace, "log for {} not found", _ntp);
+        vlog(archival_log.debug, "log for {} not found", _ntp);
         return nullptr;
     }
     auto plog = dynamic_cast<storage::disk_log_impl*>(log->get_impl());
@@ -286,7 +290,7 @@ ntp_archiver::get_segment(segment_name path, storage::log_manager& lm) {
                               .filename()
                               .string();
         vlog(
-          archival_log.trace,
+          archival_log.debug,
           "comparing segment names {} and {}",
           segment_path,
           target_path);

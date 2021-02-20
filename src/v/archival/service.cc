@@ -13,6 +13,7 @@
 #include "archival/logger.h"
 #include "archival/ntp_archiver_service.h"
 #include "cluster/partition_manager.h"
+#include "cluster/topic_table.h"
 #include "config/configuration.h"
 #include "config/property.h"
 #include "likely.h"
@@ -30,6 +31,7 @@
 #include <seastar/core/loop.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/smp.hh>
 
 #include <stdexcept>
 
@@ -95,6 +97,7 @@ static ss::sstring get_value_or_throw(
 /// Use shard-local configuration to generate configuration
 ss::future<archival::configuration>
 scheduler_service_impl::get_archival_service_config() {
+    vlog(archival_log.debug, "Generating archival configuration");
     auto secret_key = s3::private_key_str(get_value_or_throw(
       config::shard_local_cfg().archival_storage_s3_secret_key,
       "archival_storage_s3_secret_key"));
@@ -119,29 +122,38 @@ scheduler_service_impl::get_archival_service_config() {
       = config::shard_local_cfg().archival_storage_gc_interval.value(),
       .connection_limit = s3_connection_limit(
         config::shard_local_cfg().archival_storage_max_connections.value())};
+    vlog(archival_log.debug, "Archival configuration generated: {}", cfg);
     co_return std::move(cfg);
 }
 
 scheduler_service_impl::scheduler_service_impl(
   const configuration& conf,
   ss::sharded<storage::api>& api,
-  ss::sharded<cluster::partition_manager>& pm)
+  ss::sharded<cluster::partition_manager>& pm,
+  ss::sharded<cluster::topic_table>& tt)
   : _conf(conf)
   , _partition_manager(pm)
+  , _topic_table(tt)
   , _storage_api(api)
   , _jitter(conf.interval, 1ms)
   , _gc_jitter(conf.gc_interval, 1ms)
   , _conn_limit(conf.connection_limit()) {}
 
+scheduler_service_impl::scheduler_service_impl(
+  ss::sharded<storage::api>& api,
+  ss::sharded<cluster::partition_manager>& pm,
+  ss::sharded<cluster::topic_table>& tt,
+  ss::sharded<archival::configuration>& config)
+  : scheduler_service_impl(config.local(), api, pm, tt) {}
+
 void scheduler_service_impl::rearm_timer() {
     (void)ss::with_gate(_gate, [this] {
-        auto next = _jitter();
         return workflow()
-          .finally([this, next] {
+          .finally([this] {
               if (_gate.is_closed()) {
                   return;
               }
-              _timer.rearm(next);
+              _timer.rearm(_jitter());
           })
           .handle_exception([](std::exception_ptr e) {
               vlog(archival_log.info, "Error in timer callback: {}", e);
@@ -161,11 +173,11 @@ ss::future<> scheduler_service_impl::stop() {
 
 ss::future<> scheduler_service_impl::workflow() {
     static thread_local size_t niter = 0;
-    vlog(archival_log.trace, "Start S3 maintanance cycle #{}", niter);
+    vlog(archival_log.debug, "Start S3 maintanance cycle #{}", niter);
     co_await reconcile_archivers();
     co_await run_uploads();
-    co_await run_cleanup();
-    vlog(archival_log.trace, "Complete S3 maintanance cycle #{}", niter);
+    // co_await run_cleanup();
+    vlog(archival_log.debug, "Complete S3 maintanance cycle #{}", niter);
     niter++;
 }
 
@@ -184,6 +196,7 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
         storage::log_manager& lm = api.log_mgr();
         auto log = lm.get(ntp);
         auto svc = ss::make_lw_shared<ntp_archiver>(log->config(), _conf);
+        // TODO: check that the corresponding topic_manifest is present
         return svc->download_manifest()
           .then([this, svc](bool found) {
               _queue.insert(svc);
@@ -197,6 +210,52 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
                     archival_log.info,
                     "Start archiving new partition {}",
                     svc->get_ntp());
+                  // TODO: refactor, extract method
+                  model::topic_namespace_view view(svc->get_ntp());
+                  auto cfg = _topic_table.local().get_topic_cfg(view);
+                  if (cfg) {
+                      (void)ss::with_gate(
+                        _gate,
+                        [this,
+                         view,
+                         rev = svc->get_revision_id(),
+                         cfg = std::move(cfg)]() mutable {
+                            return ss::with_semaphore(
+                              _conn_limit,
+                              1,
+                              [this, view, rev, cfg = std::move(cfg)] {
+                                  return ss::do_with(
+                                    topic_manifest(*cfg, rev),
+                                    s3::client(_conf.client_config),
+                                    [this, view](
+                                      topic_manifest& tm, s3::client& client) {
+                                        vlog(
+                                          archival_log.error,
+                                          "Uploading topic manifest {}",
+                                          view);
+                                        auto [istr, size_bytes]
+                                          = tm.serialize();
+                                        auto key = tm.get_manifest_path();
+                                        return client
+                                          .put_object(
+                                            _conf.bucket_name,
+                                            s3::object_key(key),
+                                            size_bytes,
+                                            std::move(istr))
+                                          .then([&client] {
+                                              return client.shutdown();
+                                          });
+                                    });
+                              });
+                        })
+                        .handle_exception([](const std::exception_ptr& eptr) {
+                            vlog(
+                              archival_log.error,
+                              "Exception occured during topic manifest upload: "
+                              "{}",
+                              eptr);
+                        });
+                  }
               }
               return ss::now();
           })
@@ -210,7 +269,7 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
               return ss::now();
           });
     });
-}
+} // namespace archival::internal
 
 ss::future<>
 scheduler_service_impl::remove_archivers(std::vector<model::ntp> to_remove) {
@@ -286,7 +345,7 @@ ss::future<> scheduler_service_impl::run_uploads() {
               storage::api& api = _storage_api.local();
               storage::log_manager& lm = api.log_mgr();
               vlog(
-                archival_log.trace,
+                archival_log.debug,
                 "Checking {} for S3 upload candidates",
                 archiver->get_ntp());
               return archiver->upload_next_candidate(_conn_limit, lm)
@@ -337,7 +396,7 @@ ss::future<> scheduler_service_impl::run_cleanup() {
               storage::api& api = _storage_api.local();
               storage::log_manager& lm = api.log_mgr();
               vlog(
-                archival_log.trace,
+                archival_log.debug,
                 "Checking {} for segments that should be removed from S3",
                 next->get_ntp());
               return next->delete_next_candidate(_conn_limit, lm)

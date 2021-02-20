@@ -20,14 +20,17 @@ namespace storage {
 
 class api {
 public:
-    explicit api(
-      kvstore_config kv_conf,
-      log_config log_conf,
-      s3_downloader_configuration dl_conf
-      = {}) noexcept // TODO: remove default value
+    explicit api(kvstore_config kv_conf, log_config log_conf) noexcept
       : _kv_conf(std::move(kv_conf))
       , _log_conf(std::move(log_conf))
-      , _dl_conf(std::move(dl_conf)) {}
+      , _dl_conf{} {}
+
+    /// Provide downloader configuration. 
+    /// Configuration initialization is futurized, so we can't initialize
+    /// it in c-tor (because api c-tor is invoked indirectly by the ss::sharded)
+    void configure_downloader(s3_downloader_configuration cfg) {
+        _dl_conf = std::move(cfg);
+    }
 
     ss::future<> start() {
         _kvstore = std::make_unique<kvstore>(_kv_conf);

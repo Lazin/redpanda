@@ -23,6 +23,8 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/lowres_clock.hh>
 
+#include <map>
+
 namespace archival {
 
 /// Number of simultaneous connections to S3
@@ -46,6 +48,7 @@ struct configuration {
     /// Number of simultaneous S3 uploads
     s3_connection_limit connection_limit;
 };
+
 
 std::ostream& operator<<(std::ostream& o, const configuration& cfg);
 
@@ -78,6 +81,9 @@ public:
 
     /// Get NTP
     const model::ntp& get_ntp() const;
+
+    /// Get revision id
+    model::revision_id get_revision_id() const;
 
     /// Get timestamp
     const ss::lowres_clock::time_point get_last_upload_time() const;

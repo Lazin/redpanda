@@ -72,7 +72,8 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     auto config = get_configuration();
     auto& pm = app.partition_manager;
     auto& api = app.storage;
-    archival::internal::scheduler_service_impl service(config, api, pm);
+    auto& topics = app.controller->get_topics_state();
+    archival::internal::scheduler_service_impl service(config, api, pm, topics);
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(pid0));
     BOOST_REQUIRE(service.contains(pid1));
@@ -96,7 +97,8 @@ FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
     auto config = get_configuration();
     auto& pm = app.partition_manager;
     auto& api = app.storage;
-    archival::internal::scheduler_service_impl service(config, api, pm);
+    auto& topics = app.controller->get_topics_state();
+    archival::internal::scheduler_service_impl service(config, api, pm, topics);
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(ntp));
 
@@ -145,7 +147,8 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
     auto config = get_configuration();
     auto& pm = app.partition_manager;
     auto& api = app.storage;
-    archival::internal::scheduler_service_impl service(config, api, pm);
+    auto& topics = app.controller->get_topics_state();
+    archival::internal::scheduler_service_impl service(config, api, pm, topics);
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(ntp));
 
@@ -214,7 +217,8 @@ FIXTURE_TEST(test_segment_delete, archiver_fixture) {
     auto config = get_configuration();
     auto& pm = app.partition_manager;
     auto& api = app.storage;
-    archival::internal::scheduler_service_impl service(config, api, pm);
+    auto& topics = app.controller->get_topics_state();
+    archival::internal::scheduler_service_impl service(config, api, pm, topics);
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(ntp));
 
