@@ -2,7 +2,7 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "config/configuration.h"
-#include "hashing/murmur.h"
+#include "hashing/xx.h"
 #include "json/json.h"
 #include "s3/error.h"
 #include "storage/logger.h"
@@ -28,6 +28,10 @@ namespace storage {
 s3_downloader::s3_downloader(s3_downloader_configuration config)
   : _conf(std::move(config))
   , _dl_limit(config.num_connections()) {}
+
+s3_downloader::s3_downloader()
+  : _conf(std::nullopt)
+  , _dl_limit(1) {}
 
 s3_downloader::~s3_downloader() {
     vassert(_gate.is_closed(), "S3 downloader is not stopped properly");
@@ -81,25 +85,28 @@ ss::future<> s3_downloader::stop() {
 void s3_downloader::cancel() { _cancel.request_abort(); }
 
 ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
-    vlog(stlog.info, "Check conditions for {} S3 recovery", ntpc.ntp());
-    bool exists = co_await ss::file_exists(ntpc.work_directory());
-    if (exists) {
-        co_return;
+    if (_conf) {
+        vlog(stlog.info, "Check conditions for {} S3 recovery", ntpc.ntp());
+        bool exists = co_await ss::file_exists(ntpc.work_directory());
+        if (exists) {
+            co_return;
+        }
+        if (!ntpc.has_overrides()) {
+            vlog(stlog.info, "No overrides for {} found, skipping", ntpc.ntp());
+            co_return;
+        }
+        auto name = ntpc.get_overrides().manifest_object_name;
+        if (!name.has_value()) {
+            vlog(
+            stlog.info,
+            "No manifest override for {} found, skipping",
+            ntpc.ntp());
+            co_return;
+        }
+        vlog(stlog.info, "Downloading log for {}", ntpc.ntp());
+        co_await download_log(s3::object_key(*name), ntpc);
     }
-    if (!ntpc.has_overrides()) {
-        vlog(stlog.info, "No overrides for {} found, skipping", ntpc.ntp());
-        co_return;
-    }
-    auto name = ntpc.get_overrides().manifest_object_name;
-    if (!name.has_value()) {
-        vlog(
-          stlog.info,
-          "No manifest override for {} found, skipping",
-          ntpc.ntp());
-        co_return;
-    }
-    vlog(stlog.info, "Downloading log for {}", ntpc.ntp());
-    co_await download_log(s3::object_key(*name), ntpc);
+    co_return;
 }
 
 ss::future<> s3_downloader::download_log(
@@ -123,7 +130,7 @@ ss::future<> s3_downloader::download_log(
     }
     co_await ss::max_concurrent_for_each(
       segments,
-      _conf.num_connections(),
+      _conf->num_connections(),
       [this, prefix](const s3_manifest_entry& entry) {
           _cancel.check();
           return download_file(entry, prefix);
@@ -141,7 +148,7 @@ ss::future<> s3_downloader::download_log(
 static ss::sstring make_s3_segment_path(
   const model::ntp& ntp, int32_t rawrev, const ss::sstring& segment) {
     auto path = fmt::format("{}_{}/{}", ntp.path(), rawrev, segment);
-    uint32_t hash = murmurhash3_x86_32(path.data(), path.size());
+    uint32_t hash = xxhash_32(path.data(), path.size());
     return fmt::format("{:08x}/{}", hash, path);
 }
 
@@ -149,7 +156,7 @@ static s3::object_key
 make_partition_manifest_path(const model::ntp& ntp, model::revision_id rev) {
     constexpr uint32_t bitmask = 0xF0000000;
     auto path = fmt::format("{}_{}", ntp.path(), rev());
-    uint32_t hash = bitmask & murmurhash3_x86_32(path.data(), path.size());
+    uint32_t hash = bitmask & xxhash_32(path.data(), path.size());
     return s3::object_key(
       fmt::format("{:08x}/meta/{}_{}/manifest.json", hash, ntp.path(), rev()));
 }
@@ -181,8 +188,8 @@ ss::future<std::vector<s3_manifest_entry>> s3_downloader::download_manifest(
   const s3::object_key& key, const ntp_config& ntp_cfg) {
     vlog(stlog.info, "Downloading manifest {}", key());
     using namespace rapidjson;
-    s3::client cl(_conf.client_config);
-    auto resp = co_await cl.get_object(_conf.bucket, key);
+    s3::client cl(_conf->client_config);
+    auto resp = co_await cl.get_object(_conf->bucket, key);
     auto is = resp->as_input_stream();
     iobuf result;
     auto os = make_iobuf_ref_output_stream(result);
@@ -210,9 +217,9 @@ s3_downloader::download_topic_manifest(const s3::object_key& key) {
     using namespace rapidjson;
     iobuf tmp;
     auto os = make_iobuf_ref_output_stream(tmp);
-    s3::client cl(_conf.client_config);
+    s3::client cl(_conf->client_config);
     try {
-        auto resp = co_await cl.get_object(_conf.bucket, key);
+        auto resp = co_await cl.get_object(_conf->bucket, key);
         auto is = resp->as_input_stream();
         co_await ss::copy(is, os);
     } catch (const s3::rest_error_response& err) {
@@ -264,9 +271,9 @@ open_output_file_stream(const std::filesystem::path& path) {
 
 ss::future<> s3_downloader::download_file(
   const s3_manifest_entry& key, const std::filesystem::path& prefix) {
-    s3::client cl(_conf.client_config);
+    s3::client cl(_conf->client_config);
     auto resp = co_await cl.get_object(
-      _conf.bucket, s3::object_key(key.s3_path));
+      _conf->bucket, s3::object_key(key.s3_path));
     auto is = resp->as_input_stream();
     // parse segment name from S3
     auto localpath = prefix / std::filesystem::path(key.segment);

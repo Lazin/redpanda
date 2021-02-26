@@ -53,13 +53,14 @@ ntp_archiver::ntp_archiver(
     vlog(archival_log.debug, "Create ntp_archiver {}", _ntp.path());
 }
 
-ss::future<> ntp_archiver::stop() { return _gate.close(); }
+ss::future<> ntp_archiver::stop() {
+    _as.request_abort();
+    return _gate.close();
+}
 
 const model::ntp& ntp_archiver::get_ntp() const { return _ntp; }
 
-model::revision_id ntp_archiver::get_revision_id() const {
-    return _rev;
-}
+model::revision_id ntp_archiver::get_revision_id() const { return _rev; }
 
 const ss::lowres_clock::time_point ntp_archiver::get_last_upload_time() const {
     return _last_upload_time;
@@ -69,13 +70,13 @@ const ss::lowres_clock::time_point ntp_archiver::get_last_delete_time() const {
     return _last_delete_time;
 }
 
-ss::future<bool> ntp_archiver::download_manifest() {
+ss::future<download_manifest_result> ntp_archiver::download_manifest() {
     gate_guard guard{_gate};
     auto key = _remote.get_manifest_path();
     vlog(archival_log.debug, "Download manifest {}", key());
     auto path = s3::object_key(key());
-    s3::client client(_client_conf);
-    bool result = true;
+    s3::client client(_client_conf, _as);
+    auto result = download_manifest_result::success;
     try {
         auto resp = co_await client.get_object(_bucket, path);
         co_await _remote.update(resp->as_input_stream());
@@ -86,7 +87,11 @@ ss::future<bool> ntp_archiver::download_manifest() {
             // the first segment and crashed before we were able to upload the
             // manifest. This shouldn't be the problem though. We will just
             // re-upload this segment for once.
-            result = false;
+            result = download_manifest_result::notfound;
+        } else if (err.code() == "SlowDown") {
+            // This can happen when we're dealing with high request rate to the
+            // manifest's prefix. 
+            result = download_manifest_result::slowdown;
         } else {
             throw;
         }
@@ -101,8 +106,9 @@ ss::future<> ntp_archiver::upload_manifest() {
     vlog(archival_log.debug, "Upload manifest {}", key());
     auto path = s3::object_key(key());
     auto [is, size] = _remote.serialize();
-    s3::client client(_client_conf);
-    co_await client.put_object(_bucket, path, size, std::move(is));
+    s3::client client(_client_conf, _as);
+    std::vector<s3::object_tag> tags = {{"rp-type", "partition-manifest"}};
+    co_await client.put_object(_bucket, path, size, std::move(is), tags);
     co_await client.shutdown();
     co_return;
 }
@@ -129,7 +135,7 @@ static bool validate_metadata(
 ss::future<bool> ntp_archiver::upload_segment(
   manifest::segment_map::value_type target, storage::log_manager& lm) {
     vlog(archival_log.debug, "Upload {} segments", target.first);
-    s3::client client(_client_conf);
+    s3::client client(_client_conf, _as);
     const auto& [sname, meta] = target;
     auto segment = get_segment(sname, lm);
     if (segment) {
@@ -142,11 +148,13 @@ ss::future<bool> ntp_archiver::upload_segment(
         auto s3path = _remote.get_remote_segment_path(sname);
         vlog(archival_log.debug, "Uploading segment \"{}\" to S3", s3path());
         try {
+            std::vector<s3::object_tag> tags = {{"rp-type", "segment"}};
             co_await client.put_object(
               _bucket,
               s3::object_key(s3path()),
               segment->size_bytes(),
-              std::move(stream));
+              std::move(stream),
+              tags);
             vlog(
               archival_log.debug, "Completed segment \"{}\" to S3", s3path());
             _remote.add(sname, meta);
@@ -213,7 +221,7 @@ ss::future<bool> ntp_archiver::delete_segment(
     const auto& [sname, meta] = target;
     auto segment = get_segment(sname, lm);
     if (!segment) {
-        s3::client client(_client_conf);
+        s3::client client(_client_conf, _as);
         auto s3path = _remote.get_remote_segment_path(sname);
         vlog(archival_log.debug, "Delete segment \"{}\" from S3", s3path());
         try {

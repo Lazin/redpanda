@@ -49,6 +49,12 @@ struct configuration {
     s3_connection_limit connection_limit;
 };
 
+enum class download_manifest_result {
+    success,
+    notfound,
+    slowdown,
+};
+
 
 std::ostream& operator<<(std::ostream& o, const configuration& cfg);
 
@@ -92,7 +98,7 @@ public:
     /// Download manifest from pre-defined S3 locatnewion
     ///
     /// \return future that returns true if the manifest was found in S3
-    ss::future<bool> download_manifest();
+    ss::future<download_manifest_result> download_manifest();
 
     /// Upload manifest to the pre-defined S3 location
     ss::future<> upload_manifest();
@@ -156,6 +162,7 @@ private:
     /// gets uploaded to the remote location)
     manifest _remote;
     ss::gate _gate;
+    ss::abort_source _as;
     ss::lowres_clock::time_point _last_upload_time;
     ss::lowres_clock::time_point _last_delete_time;
 };

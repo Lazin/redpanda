@@ -15,7 +15,7 @@
 #include "bytes/iobuf_istreambuf.h"
 #include "bytes/iobuf_ostreambuf.h"
 #include "cluster/types.h"
-#include "hashing/murmur.h"
+#include "hashing/xx.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/timestamp.h"
@@ -56,7 +56,7 @@ static remote_manifest_path generate_partition_manifest_path(
     // that S3 bucket contains.
     constexpr uint32_t bitmask = 0xF0000000;
     auto path = fmt::format("{}_{}", ntp.path(), rev());
-    uint32_t hash = bitmask & murmurhash3_x86_32(path.data(), path.size());
+    uint32_t hash = bitmask & xxhash_32(path.data(), path.size());
     return remote_manifest_path(
       fmt::format("{:08x}/meta/{}_{}/manifest.json", hash, ntp.path(), rev()));
 }
@@ -68,7 +68,7 @@ remote_manifest_path manifest::get_manifest_path() const {
 remote_segment_path
 manifest::get_remote_segment_path(const segment_name& name) const {
     auto path = fmt::format("{}_{}/{}", _ntp.path(), _rev(), name());
-    uint32_t hash = murmurhash3_x86_32(path.data(), path.size());
+    uint32_t hash = xxhash_32(path.data(), path.size());
     return remote_segment_path(fmt::format("{:08x}/{}", hash, path));
 }
 
@@ -384,7 +384,7 @@ remote_manifest_path topic_manifest::get_manifest_path() const {
     constexpr uint32_t bitmask = 0xF0000000;
     auto path = fmt::format(
       "{}/{}", _topic_config->tp_ns.ns(), _topic_config->tp_ns.tp());
-    uint32_t hash = bitmask & murmurhash3_x86_32(path.data(), path.size());
+    uint32_t hash = bitmask & xxhash_32(path.data(), path.size());
     return remote_manifest_path(
       fmt::format("{:08x}/meta/{}/topic_manifest.json", hash, path));
 }

@@ -366,20 +366,21 @@ void application::wire_up_services() {
 
     syschecks::systemd_message("Intializing storage services").get();
 
-    // TODO: make s3_config optional, only available if archival is enabled
     construct_service(
       storage,
       kvstore_config_from_global_config(),
       manager_config_from_global_config())
       .get();
-    storage
-      .invoke_on_all([](storage::api& api) {
-          return storage::s3_downloader::make_s3_config().then(
-            [&api](storage::s3_downloader_configuration cfg) {
-                api.configure_downloader(std::move(cfg));
-            });
-      })
-      .get();
+    if (archival_storage_enabled()) {
+        storage
+          .invoke_on_all([](storage::api& api) {
+              return storage::s3_downloader::make_s3_config().then(
+                [&api](storage::s3_downloader_configuration cfg) {
+                    api.configure_downloader(std::move(cfg));
+                });
+          })
+          .get();
+    }
 
     if (coproc_enabled()) {
         auto coproc_supervisor_server_addr

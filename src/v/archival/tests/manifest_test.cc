@@ -46,15 +46,13 @@ static std::string_view complete_manifest_json = R"json({
             "is_compacted": false,
             "size_bytes": 1024,
             "base_offset": 10,
-            "committed_offset": 19,
-            "deleted": false
+            "committed_offset": 19
         },
         "20-1-v1.log": {
             "is_compacted": false,
             "size_bytes": 2048,
             "base_offset": 20,
-            "committed_offset": 29,
-            "deleted": false
+            "committed_offset": 29
         }
     }
 })json";
@@ -99,10 +97,10 @@ SEASTAR_THREAD_TEST_CASE(test_complete_manifest_update) {
     std::map<ss::sstring, manifest::segment_meta> expected = {
       {"10-1-v1.log",
        manifest::segment_meta{
-         false, 1024, model::offset(10), model::offset(19), false}},
+         false, 1024, model::offset(10), model::offset(19)}},
       {"20-1-v1.log",
        manifest::segment_meta{
-         false, 2048, model::offset(20), model::offset(29), false}}};
+         false, 2048, model::offset(20), model::offset(29)}}};
     for (const auto& actual : m) {
         auto it = expected.find(actual.first);
         BOOST_REQUIRE(it != expected.end());
@@ -124,7 +122,6 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_serialization) {
         .size_bytes = 1024,
         .base_offset = model::offset(10),
         .committed_offset = model::offset(19),
-        .is_deleted_locally = false,
       });
     m.add(
       segment_name("20-1-v1.log"),
@@ -133,7 +130,6 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_serialization) {
         .size_bytes = 2048,
         .base_offset = model::offset(20),
         .committed_offset = model::offset(29),
-        .is_deleted_locally = false,
       });
     auto [is, size] = m.serialize();
     iobuf buf;

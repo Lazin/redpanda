@@ -41,8 +41,8 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     auto pid0 = model::ntp(test_ns, topic1, model::partition_id(0));
     auto pid1 = model::ntp(test_ns, topic2, model::partition_id(0));
     std::array<const char*, 2> urls = {
-      "/f0000000/meta/test-namespace/topic_1/0_2/manifest.json",
-      "/80000000/meta/test-namespace/topic_2/0_4/manifest.json",
+      "/10000000/meta/test-namespace/topic_1/0_2/manifest.json",
+      "/60000000/meta/test-namespace/topic_2/0_4/manifest.json",
     };
     ss::sstring manifest_json = R"json({
         "namespace": "test-namespace",
@@ -54,8 +54,7 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
                 "is_compacted": false,
                 "size_bytes": 10,
                 "base_offset": 1,
-                "committed_offset": 2,
-                "deleted": false
+                "committed_offset": 2
             }
         }
     })json";
@@ -77,6 +76,8 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(pid0));
     BOOST_REQUIRE(service.contains(pid1));
+    // Wait until background svc will finish
+    service.stop().get();
 }
 
 FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
@@ -85,7 +86,7 @@ FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
     auto topic = model::topic("topic_2");
     auto ntp = model::ntp(test_ns, topic, model::partition_id(0));
 
-    const char* url = "/a0000000/meta/test-namespace/topic_2/0_2/manifest.json";
+    const char* url = "/50000000/meta/test-namespace/topic_2/0_2/manifest.json";
     set_expectations_and_listen({
       {.url = url, .body = std::nullopt},
     });
@@ -118,9 +119,9 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
     auto ntp = model::ntp(test_ns, topic, model::partition_id(0));
 
     const char* manifest_url
-      = "/e0000000/meta/test-namespace/topic_3/0_2/manifest.json";
-    const char* seg000 = "/83ae5e22/test-namespace/topic_3/0_2/0-0-v1.log";
-    const char* seg100 = "/fdc53a14/test-namespace/topic_3/0_2/100-0-v1.log";
+      = "/c0000000/meta/test-namespace/topic_3/0_2/manifest.json";
+    const char* seg000 = "/e34f82da/test-namespace/topic_3/0_2/0-0-v1.log";
+    const char* seg100 = "/dd2813e1/test-namespace/topic_3/0_2/100-0-v1.log";
     set_expectations_and_listen({
       {.url = manifest_url, .body = std::nullopt},
       {.url = seg000, .body = std::nullopt},
@@ -180,88 +181,3 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
     BOOST_REQUIRE(get_requests().size() == 4);
 }
 
-// Upload segments and then run clean up procedure to delete them
-FIXTURE_TEST(test_segment_delete, archiver_fixture) {
-    wait_for_controller_leadership().get();
-
-    auto topic = model::topic("topic_4");
-    auto ntp = model::ntp(test_ns, topic, model::partition_id(0));
-
-    const char* manifest_url
-      = "/c0000000/meta/test-namespace/topic_4/0_2/manifest.json";
-    const char* seg000 = "/b11b83a3/test-namespace/topic_4/0_2/0-0-v1.log";
-    const char* seg100 = "/c9426ce1/test-namespace/topic_4/0_2/100-0-v1.log";
-    set_expectations_and_listen({
-      {.url = manifest_url, .body = std::nullopt},
-      {.url = seg000, .body = std::nullopt},
-      {.url = seg100, .body = std::nullopt},
-    });
-
-    auto builder = get_started_log_builder(ntp, model::revision_id(2));
-    using namespace storage; // NOLINT
-    (*builder) | add_segment(model::offset(0))
-      | add_random_batch(model::offset(0), 100, maybe_compress_batches::no)
-      | add_segment(model::offset(100))
-      | add_random_batch(model::offset(100), 100, maybe_compress_batches::no)
-      | stop();
-    vlog(
-      arch_svc_log.trace,
-      "{} bytes written to log {}",
-      builder->bytes_written(),
-      ntp.path());
-    builder.reset();
-    add_topic(model::topic_namespace_view(ntp)).get();
-
-    wait_for_partition_leadership(ntp);
-
-    auto config = get_configuration();
-    auto& pm = app.partition_manager;
-    auto& api = app.storage;
-    auto& topics = app.controller->get_topics_state();
-    archival::internal::scheduler_service_impl service(config, api, pm, topics);
-    service.reconcile_archivers().get();
-    BOOST_REQUIRE(service.contains(ntp));
-
-    service.run_uploads().get();
-
-    BOOST_REQUIRE(get_requests().size() == 4);
-    auto get_manifest = get_requests()[0];
-    BOOST_REQUIRE(get_manifest._method == "GET");
-
-    auto put_manifest = get_requests()[3];
-    BOOST_REQUIRE(put_manifest._method == "PUT");
-    verify_manifest_content(put_manifest.content);
-
-    BOOST_REQUIRE(get_targets().count(seg000) == 1);
-    auto put_seg000 = get_targets().find(seg000);
-    BOOST_REQUIRE(put_seg000->second._method == "PUT");
-    verify_segment(
-      ntp, archival::segment_name("0-0-v1.log"), put_seg000->second.content);
-
-    BOOST_REQUIRE(get_targets().count(seg100) == 1);
-    auto put_seg100 = get_targets().find(seg100);
-    BOOST_REQUIRE(put_seg100->second._method == "PUT");
-    verify_segment(
-      ntp, archival::segment_name("100-0-v1.log"), put_seg100->second.content);
-
-    // Forcibly remove log files, this should trigger deletion
-    // of the log segments in S3 (with default policy being used).
-    // 0-0-v1.log will be removed.
-    storage::truncate_prefix_config cfg(
-      model::offset(100), ss::default_priority_class());
-    app.storage.local().log_mgr().get(ntp)->truncate_prefix(cfg).get();
-
-    service.run_cleanup().get();
-
-    BOOST_REQUIRE(get_requests().size() == 6);
-    BOOST_REQUIRE(get_targets().count(seg000) == 2);
-    BOOST_REQUIRE(get_targets().count(seg100) == 1);
-    auto itrange = get_targets().equal_range(seg000);
-    auto it = std::find_if(
-      itrange.first,
-      itrange.second,
-      [](const std::pair<ss::sstring, ss::httpd::request>& kv) {
-          return kv.second._method == "DELETE";
-      });
-    BOOST_REQUIRE(it != itrange.second);
-}

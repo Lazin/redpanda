@@ -32,19 +32,26 @@
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/smp.hh>
+#include <seastar/core/when_all.hh>
 
+#include <exception>
 #include <stdexcept>
 
 using namespace std::chrono_literals;
 
 namespace archival::internal {
 
+ntp_upload_queue::iterator ntp_upload_queue::begin() {
+    return _archivers.begin();
+}
+
+ntp_upload_queue::iterator ntp_upload_queue::end() { return _archivers.end(); }
+
 bool ntp_upload_queue::insert(ntp_upload_queue::value archiver) {
     auto key = archiver->get_ntp();
     auto [it, ok] = _archivers.insert(std::make_pair(
       std::move(key), upload_queue_item{.archiver = std::move(archiver)}));
     _upload_queue.push_back(it->second);
-    _delete_queue.push_back(it->second);
     return ok;
 }
 
@@ -62,13 +69,6 @@ ntp_upload_queue::value ntp_upload_queue::get_upload_candidate() {
     auto& candidate = _upload_queue.front();
     candidate._upl_hook.unlink();
     _upload_queue.push_back(candidate);
-    return candidate.archiver;
-}
-
-ntp_upload_queue::value ntp_upload_queue::get_delete_candidate() {
-    auto& candidate = _delete_queue.front();
-    candidate._del_hook.unlink();
-    _delete_queue.push_back(candidate);
     return candidate.archiver;
 }
 
@@ -137,7 +137,8 @@ scheduler_service_impl::scheduler_service_impl(
   , _storage_api(api)
   , _jitter(conf.interval, 1ms)
   , _gc_jitter(conf.gc_interval, 1ms)
-  , _conn_limit(conf.connection_limit()) {}
+  , _conn_limit(conf.connection_limit())
+  , _stop_limit(conf.connection_limit()) {}
 
 scheduler_service_impl::scheduler_service_impl(
   ss::sharded<storage::api>& api,
@@ -168,7 +169,18 @@ void scheduler_service_impl::start() {
 ss::future<> scheduler_service_impl::stop() {
     vlog(archival_log.info, "Scheduler service stop");
     _timer.cancel();
-    return _gate.close();
+    _as.request_abort();
+    std::vector<ss::future<>> outstanding;
+    for (auto& it : _queue) {
+        auto fut = ss::with_semaphore(
+          _stop_limit, 1, [it] { return it.second.archiver->stop(); });
+        outstanding.emplace_back(std::move(fut));
+    }
+    return ss::do_with(
+      std::move(outstanding), [this](std::vector<ss::future<>>& outstanding) {
+          return ss::when_all_succeed(outstanding.begin(), outstanding.end())
+            .then([this] { return _gate.close(); });
+      });
 }
 
 ss::future<> scheduler_service_impl::workflow() {
@@ -176,7 +188,6 @@ ss::future<> scheduler_service_impl::workflow() {
     vlog(archival_log.debug, "Start S3 maintanance cycle #{}", niter);
     co_await reconcile_archivers();
     co_await run_uploads();
-    // co_await run_cleanup();
     vlog(archival_log.debug, "Complete S3 maintanance cycle #{}", niter);
     niter++;
 }
@@ -185,8 +196,43 @@ ss::lw_shared_ptr<ntp_archiver> scheduler_service_impl::get_upload_candidate() {
     return _queue.get_upload_candidate();
 }
 
-ss::lw_shared_ptr<ntp_archiver> scheduler_service_impl::get_delete_candidate() {
-    return _queue.get_upload_candidate();
+ss::future<> scheduler_service_impl::upload_topic_manifest(
+  model::topic_namespace_view view, model::revision_id rev) {
+    gate_guard gg(_gate);
+    auto cfg = _topic_table.local().get_topic_cfg(view);
+    if (cfg) {
+        try {
+            auto units = co_await ss::get_units(_conn_limit, 1);
+            vlog(archival_log.error, "Uploading topic manifest {}", view);
+            s3::client client(_conf.client_config, _as);
+            topic_manifest tm(*cfg, rev);
+            auto [istr, size_bytes] = tm.serialize();
+            auto key = tm.get_manifest_path();
+            std::vector<s3::object_tag> tags = {{"rp-type", "topic-manifest"}};
+            co_await client.put_object(
+              _conf.bucket_name,
+              s3::object_key(key),
+              size_bytes,
+              std::move(istr),
+              tags);
+            co_await client.shutdown();
+        } catch (const s3::rest_error_response& err) {
+            vlog(
+              archival_log.error,
+              "REST API error occured during topic manifest upload: "
+              "{}, code: {}, request-id: {}, resource: {}",
+              err.message(),
+              err.code(),
+              err.request_id(),
+              err.resource());
+        } catch (...) {
+            vlog(
+              archival_log.error,
+              "Exception occured during topic manifest upload: "
+              "{}",
+              std::current_exception());
+        }
+    }
 }
 
 ss::future<>
@@ -196,9 +242,10 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
         storage::log_manager& lm = api.log_mgr();
         auto log = lm.get(ntp);
         auto svc = ss::make_lw_shared<ntp_archiver>(log->config(), _conf);
-        // TODO: check that the corresponding topic_manifest is present
-        return svc->download_manifest()
-          .then([this, svc](bool found) {
+        // TODO: run download_manifest, if error is 'slowdown', wait a while
+        // and repeat. Use exponential backoff.
+        return svc->download_manifest()  // TODO: handle SlowDown
+          .then([this, svc](download_manifest_result result) {
               _queue.insert(svc);
               if (found) {
                   vlog(
@@ -210,52 +257,8 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
                     archival_log.info,
                     "Start archiving new partition {}",
                     svc->get_ntp());
-                  // TODO: refactor, extract method
                   model::topic_namespace_view view(svc->get_ntp());
-                  auto cfg = _topic_table.local().get_topic_cfg(view);
-                  if (cfg) {
-                      (void)ss::with_gate(
-                        _gate,
-                        [this,
-                         view,
-                         rev = svc->get_revision_id(),
-                         cfg = std::move(cfg)]() mutable {
-                            return ss::with_semaphore(
-                              _conn_limit,
-                              1,
-                              [this, view, rev, cfg = std::move(cfg)] {
-                                  return ss::do_with(
-                                    topic_manifest(*cfg, rev),
-                                    s3::client(_conf.client_config),
-                                    [this, view](
-                                      topic_manifest& tm, s3::client& client) {
-                                        vlog(
-                                          archival_log.error,
-                                          "Uploading topic manifest {}",
-                                          view);
-                                        auto [istr, size_bytes]
-                                          = tm.serialize();
-                                        auto key = tm.get_manifest_path();
-                                        return client
-                                          .put_object(
-                                            _conf.bucket_name,
-                                            s3::object_key(key),
-                                            size_bytes,
-                                            std::move(istr))
-                                          .then([&client] {
-                                              return client.shutdown();
-                                          });
-                                    });
-                              });
-                        })
-                        .handle_exception([](const std::exception_ptr& eptr) {
-                            vlog(
-                              archival_log.error,
-                              "Exception occured during topic manifest upload: "
-                              "{}",
-                              eptr);
-                        });
-                  }
+                  (void)upload_topic_manifest(view, svc->get_revision_id());
               }
               return ss::now();
           })
@@ -377,57 +380,6 @@ ss::future<> scheduler_service_impl::run_uploads() {
         vlog(
           archival_log.error,
           "Failed to upload {} segments out of {}",
-          total.num_failed,
-          total.num_succeded);
-    }
-    co_return;
-}
-
-ss::future<> scheduler_service_impl::run_cleanup() {
-    // Start uploads
-    gate_guard g(_gate);
-    ss::gate upload_gate;
-    ntp_archiver::batch_result total{};
-    int quota = _queue.size();
-    while (_conn_limit.available_units() && quota-- > 0) {
-        auto next = _queue.get_delete_candidate();
-        (void)ss::with_gate(
-          upload_gate, [this, next, &total]() -> ss::future<> {
-              storage::api& api = _storage_api.local();
-              storage::log_manager& lm = api.log_mgr();
-              vlog(
-                archival_log.debug,
-                "Checking {} for segments that should be removed from S3",
-                next->get_ntp());
-              return next->delete_next_candidate(_conn_limit, lm)
-                .then([next, &total](ntp_archiver::batch_result res) {
-                    total.num_failed += res.num_failed;
-                    total.num_succeded += res.num_succeded;
-                    if (res.num_failed != 0) {
-                        vlog(
-                          archival_log.error,
-                          "Failed to delete {} segments out of {} that "
-                          "belonged "
-                          "to {}, check the log for more detail",
-                          res.num_failed,
-                          res.num_succeded,
-                          next->get_ntp());
-                    } else if (res.num_succeded) {
-                        vlog(
-                          archival_log.info,
-                          "{} segments that belonged to {} are deleted",
-                          res.num_succeded,
-                          next->get_ntp());
-                    }
-                    return ss::now();
-                });
-          });
-    }
-    co_await upload_gate.close();
-    if (total.num_failed != 0) {
-        vlog(
-          archival_log.error,
-          "Failed to delete {} segments out of {}",
           total.num_failed,
           total.num_succeded);
     }

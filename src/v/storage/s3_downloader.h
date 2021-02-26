@@ -42,6 +42,7 @@ struct s3_manifest_entry {
 class s3_downloader {
 public:
     explicit s3_downloader(s3_downloader_configuration config);
+    s3_downloader();
     static ss::future<s3_downloader_configuration> make_s3_config();
 
     s3_downloader(const s3_downloader& config) = delete;
@@ -77,7 +78,7 @@ private:
     ss::future<> remove_file(
       const s3_manifest_entry& key, const std::filesystem::path& prefix);
 
-    s3_downloader_configuration _conf;
+    std::optional<s3_downloader_configuration> _conf;
     ss::abort_source _cancel;
     ss::gate _gate;
     ss::semaphore _dl_limit;

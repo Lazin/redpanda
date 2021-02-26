@@ -23,7 +23,7 @@ public:
     explicit api(kvstore_config kv_conf, log_config log_conf) noexcept
       : _kv_conf(std::move(kv_conf))
       , _log_conf(std::move(log_conf))
-      , _dl_conf{} {}
+      , _dl_conf(std::nullopt) {}
 
     /// Provide downloader configuration. 
     /// Configuration initialization is futurized, so we can't initialize
@@ -34,7 +34,11 @@ public:
 
     ss::future<> start() {
         _kvstore = std::make_unique<kvstore>(_kv_conf);
-        _downloader = std::make_unique<s3_downloader>(_dl_conf);
+        if (_dl_conf) {
+            _downloader = std::make_unique<s3_downloader>(*_dl_conf);
+        } else {
+            _downloader = std::make_unique<s3_downloader>();
+        }
         return _kvstore->start().then([this] {
             _log_mgr = std::make_unique<log_manager>(_log_conf, kvs());
         });
@@ -61,7 +65,7 @@ public:
 private:
     kvstore_config _kv_conf;
     log_config _log_conf;
-    s3_downloader_configuration _dl_conf;
+    std::optional<s3_downloader_configuration> _dl_conf;
 
     std::unique_ptr<kvstore> _kvstore;
     std::unique_ptr<log_manager> _log_mgr;

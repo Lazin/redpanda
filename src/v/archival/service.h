@@ -35,15 +35,19 @@ class ntp_upload_queue {
     struct upload_queue_item {
         ss::lw_shared_ptr<ntp_archiver> archiver;
         intrusive_list_hook _upl_hook;
-        intrusive_list_hook _del_hook;
     };
     using hash_map = absl::node_hash_map<model::ntp, upload_queue_item>;
 
 public:
     using value = ss::lw_shared_ptr<ntp_archiver>;
     using key = model::ntp;
+    using iterator = hash_map::iterator;
 
     ntp_upload_queue() = default;
+
+    // Iteration
+    iterator begin();
+    iterator end();
 
     /// Insert new item into the queue
     bool insert(value archiver);
@@ -59,15 +63,11 @@ public:
 
     /// Get next upload candidate
     value get_upload_candidate();
-    /// Get next delete candidate
-    value get_delete_candidate();
 
 private:
     hash_map _archivers;
     intrusive_list<upload_queue_item, &upload_queue_item::_upl_hook>
       _upload_queue;
-    intrusive_list<upload_queue_item, &upload_queue_item::_del_hook>
-      _delete_queue;
 };
 
 template<class FwdIt, class Func>
@@ -87,7 +87,6 @@ void ntp_upload_queue::copy_if(FwdIt out, const Func& pred) const {
 /// - Reconcile working set
 /// - Choose next candidate(s) archiver(s)
 /// - Start configured number of uploads
-/// - Start configured number of deletes
 /// - Re-upload manifest(s)
 /// - Reset timer
 class scheduler_service_impl {
@@ -132,13 +131,9 @@ public:
 
     /// Get next upload or delete candidate
     ss::lw_shared_ptr<ntp_archiver> get_upload_candidate();
-    ss::lw_shared_ptr<ntp_archiver> get_delete_candidate();
 
     /// Run next round of uploads
     ss::future<> run_uploads();
-
-    /// Delete next bunch of segments
-    ss::future<> run_cleanup();
 
     /// \brief Sync ntp-archivers with the content of the partition_manager
     ///
@@ -155,6 +150,7 @@ private:
     /// Remove archivers from the workingset
     ss::future<> remove_archivers(std::vector<model::ntp> to_remove);
     ss::future<> create_archivers(std::vector<model::ntp> to_create);
+    ss::future<> upload_topic_manifest(model::topic_namespace_view view, model::revision_id rev);
 
     configuration _conf;
     ss::sharded<cluster::partition_manager>& _partition_manager;
@@ -165,7 +161,9 @@ private:
     ss::timer<ss::lowres_clock> _timer;
     ss::timer<ss::lowres_clock> _gc_timer;
     ss::gate _gate;
+    ss::abort_source _as;
     ss::semaphore _conn_limit;
+    ss::semaphore _stop_limit;
     ntp_upload_queue _queue;
 };
 
