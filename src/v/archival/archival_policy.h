@@ -13,6 +13,7 @@
 #include "archival/manifest.h"
 #include "model/fundamental.h"
 #include "storage/log_manager.h"
+#include "storage/segment.h"
 
 namespace archival {
 
@@ -69,4 +70,22 @@ std::unique_ptr<archival_policy_base> make_archival_policy(
   delete_policy_selector d,
   model::ntp ntp,
   model::revision_id rev);
+
+struct upload_candidate {
+    ss::lw_shared_ptr<storage::segment> source;
+    ss::sstring exposed_name;
+    model::offset starting_offset;
+};
+
+class archival_policy_v2 {
+public:
+    archival_policy_v2(model::ntp ntp);
+
+    ss::lw_shared_ptr<upload_candidate>
+    generate_upload_set(const manifest& remote, storage::log_manager& lm);
+
+private:
+    model::ntp _ntp;
+};
+
 } // namespace archival

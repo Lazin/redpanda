@@ -11,8 +11,12 @@
 #include "archival/archival_policy.h"
 
 #include "storage/disk_log_impl.h"
+#include "storage/fs_utils.h"
 #include "storage/segment.h"
 #include "storage/segment_set.h"
+#include "storage/version.h"
+
+#include <seastar/core/shared_ptr.hh>
 
 namespace archival {
 
@@ -112,4 +116,56 @@ std::unique_ptr<archival_policy_base> make_archival_policy(
   model::revision_id rev) {
     return std::make_unique<manifest_based_policy_non_compacted>(ntp, rev);
 }
+
+archival_policy_v2::archival_policy_v2(model::ntp ntp)
+  : _ntp(std::move(ntp)) {}
+
+ss::lw_shared_ptr<upload_candidate> archival_policy_v2::generate_upload_set(
+  const manifest& remote, storage::log_manager& lm) {
+    std::optional<storage::log> log = lm.get(_ntp);
+    if (!log) {
+        // TODO: add logging
+        return nullptr;
+    }
+    auto plog = dynamic_cast<storage::disk_log_impl*>(log->get_impl());
+    if (plog == nullptr || plog->segment_count() == 0) {
+        // TODO: add logging
+        return nullptr;
+    }
+    storage::segment_set& set = plog->segments();
+    const auto& ntp_conf = plog->config();
+    auto it = set.lower_bound(remote.get_last_offset());
+    // Invariant: it == set.end() or it->...base_offset() <= remote offset
+    //            it might not be a sealed segment, we have to skip it in this
+    //            case
+    bool closed = !(*it)->has_appender();
+    if (!closed) {
+        // Fast path, next upload candidate is not yet sealed
+        return nullptr;
+    }
+    for (auto i = it; i < set.end(); i++) {
+        auto segment = *i;
+        bool compacted = segment->is_compacted_segment();
+        if (compacted) {
+            continue;
+        }
+        auto base = segment->offsets().base_offset;
+        auto end = segment->offsets().committed_offset;
+        if (end > remote.get_last_offset()) {
+            auto term = segment->offsets().term;
+            auto version
+              = storage::record_version_type::v1; // TODO: extract from segment
+                                                  // itself
+            auto path = storage::segment_path::make_segment_path(
+              ntp_conf, base, term, version);
+            auto result = ss::make_lw_shared<upload_candidate>(upload_candidate{
+              .source = segment,
+              .exposed_name = ss::sstring(path.filename()),
+              .starting_offset = base});
+            return result;
+        }
+    }
+    return nullptr;
+}
+
 } // namespace archival

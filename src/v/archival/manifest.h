@@ -77,6 +77,9 @@ public:
     /// Get NTP
     const model::ntp& get_ntp() const;
 
+    // Get last offset
+    const model::offset get_last_offset() const;
+
     /// Get revision
     model::revision_id get_revision_id() const;
 
@@ -134,6 +137,7 @@ private:
     model::ntp _ntp;
     model::revision_id _rev;
     segment_map _segments;
+    model::offset _last_offset;
 };
 
 class topic_manifest {

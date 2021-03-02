@@ -74,6 +74,8 @@ manifest::get_remote_segment_path(const segment_name& name) const {
 
 const model::ntp& manifest::get_ntp() const { return _ntp; }
 
+const model::offset manifest::get_last_offset() const { return _last_offset; }
+
 model::revision_id manifest::get_revision_id() const { return _rev; }
 
 manifest::const_iterator manifest::begin() const { return _segments.begin(); }
@@ -144,6 +146,7 @@ void manifest::update(const rapidjson::Document& m) {
     auto pt = model::partition_id(m["partition"].GetInt());
     _rev = model::revision_id(m["revision"].GetInt());
     _ntp = model::ntp(ns, tp, pt);
+    _last_offset = model::offset(m["last_offset"].GetInt64());
     segment_map tmp;
     if (m.HasMember("segments")) {
         const auto& s = m["segments"].GetObject();
@@ -187,6 +190,8 @@ void manifest::serialize(std::ostream& out) const {
     w.Int64(_ntp.tp.partition());
     w.Key("revision");
     w.Int64(_rev());
+    w.Key("last_offset");
+    w.Int64(_last_offset());
     if (!_segments.empty()) {
         w.Key("segments");
         w.StartObject();

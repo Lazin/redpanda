@@ -31,6 +31,8 @@
 namespace archival {
 namespace internal {
 
+using namespace std::chrono_literals;
+
 class ntp_upload_queue {
     struct upload_queue_item {
         ss::lw_shared_ptr<ntp_archiver> archiver;
@@ -127,8 +129,6 @@ public:
 
     void rearm_timer();
 
-    ss::future<> workflow();
-
     /// Get next upload or delete candidate
     ss::lw_shared_ptr<ntp_archiver> get_upload_candidate();
 
@@ -165,6 +165,7 @@ private:
     ss::semaphore _conn_limit;
     ss::semaphore _stop_limit;
     ntp_upload_queue _queue;
+    simple_time_jitter<ss::lowres_clock> _backoff{100ms};
 };
 
 } // namespace internal

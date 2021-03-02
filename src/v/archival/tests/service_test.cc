@@ -13,6 +13,7 @@
 #include "archival/tests/service_fixture.h"
 #include "cluster/commands.h"
 #include "storage/types.h"
+#include "test_utils/async.h"
 #include "utils/unresolved_address.h"
 
 #include <seastar/core/deleter.hh>
@@ -40,9 +41,10 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     auto topic2 = model::topic("topic_2");
     auto pid0 = model::ntp(test_ns, topic1, model::partition_id(0));
     auto pid1 = model::ntp(test_ns, topic2, model::partition_id(0));
-    std::array<const char*, 2> urls = {
+    std::array<const char*, 3> urls = {
       "/10000000/meta/test-namespace/topic_1/0_2/manifest.json",
       "/60000000/meta/test-namespace/topic_2/0_4/manifest.json",
+      "/20000000/meta/test-namespace/topic_2/topic_manifest.json",
     };
     ss::sstring manifest_json = R"json({
         "namespace": "test-namespace",
@@ -61,6 +63,7 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     set_expectations_and_listen({
       {.url = urls[0], .body = manifest_json},
       {.url = urls[1], .body = std::nullopt},
+      {.url = urls[2], .body = std::nullopt},
     });
 
     add_topic_with_random_data(pid0, 20);
@@ -76,7 +79,6 @@ FIXTURE_TEST(test_reconciliation_manifest_download, archiver_fixture) {
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(pid0));
     BOOST_REQUIRE(service.contains(pid1));
-    // Wait until background svc will finish
     service.stop().get();
 }
 
@@ -87,8 +89,10 @@ FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
     auto ntp = model::ntp(test_ns, topic, model::partition_id(0));
 
     const char* url = "/50000000/meta/test-namespace/topic_2/0_2/manifest.json";
+    const char* topic_url = "/20000000/meta/test-namespace/topic_2/topic_manifest.json";
     set_expectations_and_listen({
       {.url = url, .body = std::nullopt},
+      {.url = topic_url, .body = std::nullopt},
     });
 
     add_topic_with_random_data(ntp, 20);
@@ -100,6 +104,7 @@ FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
     auto& api = app.storage;
     auto& topics = app.controller->get_topics_state();
     archival::internal::scheduler_service_impl service(config, api, pm, topics);
+
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(ntp));
 
@@ -110,6 +115,7 @@ FIXTURE_TEST(test_reconciliation_drop_ntp, archiver_fixture) {
 
     service.reconcile_archivers().get();
     BOOST_REQUIRE(!service.contains(ntp));
+    service.stop().get();
 }
 
 FIXTURE_TEST(test_segment_upload, archiver_fixture) {
@@ -120,10 +126,12 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
 
     const char* manifest_url
       = "/c0000000/meta/test-namespace/topic_3/0_2/manifest.json";
+    const char* topic_url = "/00000000/meta/test-namespace/topic_3/topic_manifest.json";
     const char* seg000 = "/e34f82da/test-namespace/topic_3/0_2/0-0-v1.log";
     const char* seg100 = "/dd2813e1/test-namespace/topic_3/0_2/100-0-v1.log";
     set_expectations_and_listen({
       {.url = manifest_url, .body = std::nullopt},
+      {.url = topic_url, .body = std::nullopt},
       {.url = seg000, .body = std::nullopt},
       {.url = seg100, .body = std::nullopt},
     });
@@ -150,18 +158,29 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
     auto& api = app.storage;
     auto& topics = app.controller->get_topics_state();
     archival::internal::scheduler_service_impl service(config, api, pm, topics);
+    
     service.reconcile_archivers().get();
     BOOST_REQUIRE(service.contains(ntp));
 
-    service.run_uploads().get();
+    (void)service.run_uploads();
 
-    BOOST_REQUIRE(get_requests().size() == 4);
-    auto get_manifest = get_requests()[0];
-    BOOST_REQUIRE(get_manifest._method == "GET");
+    // 2 partition manifests, 1 topic manifest, 2 segments
+    const size_t num_requests_expected = 5;
+    tests::cooperative_spin_wait_with_timeout(10s, [this] {
+        return get_requests().size() == num_requests_expected;
+    }).get();
+    BOOST_REQUIRE(get_requests().size() == num_requests_expected);
 
-    auto put_manifest = get_requests()[3];
-    BOOST_REQUIRE(put_manifest._method == "PUT");
-    verify_manifest_content(put_manifest.content);
+    auto manifest_req = get_targets().equal_range(manifest_url);
+    BOOST_REQUIRE(manifest_req.first != manifest_req.second);
+    for (auto it = manifest_req.first; it != manifest_req.second; it++) {
+        if (it->second._method == "PUT") {
+            BOOST_REQUIRE(it->second._method == "PUT");
+            verify_manifest_content(it->second.content);
+        } else {
+            BOOST_REQUIRE(it->second._method == "GET");
+        }
+    }
 
     BOOST_REQUIRE(get_targets().count(seg000) == 1);
     auto put_seg000 = get_targets().find(seg000);
@@ -174,10 +193,6 @@ FIXTURE_TEST(test_segment_upload, archiver_fixture) {
     BOOST_REQUIRE(put_seg100->second._method == "PUT");
     verify_segment(
       ntp, archival::segment_name("100-0-v1.log"), put_seg100->second.content);
-
-    // Run uploads second time, since there is no new data nothing should be
-    // sent to s3 imposter
-    service.run_uploads().get();
-    BOOST_REQUIRE(get_requests().size() == 4);
+    service.stop().get();
 }
 

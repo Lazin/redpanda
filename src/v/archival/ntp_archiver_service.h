@@ -52,7 +52,7 @@ struct configuration {
 enum class download_manifest_result {
     success,
     notfound,
-    slowdown,
+    backoff,
 };
 
 

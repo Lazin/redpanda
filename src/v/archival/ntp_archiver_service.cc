@@ -21,6 +21,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/when_all.hh>
 #include <seastar/util/noncopyable_function.hh>
 
 #include <fmt/format.h>
@@ -79,19 +80,22 @@ ss::future<download_manifest_result> ntp_archiver::download_manifest() {
     auto result = download_manifest_result::success;
     try {
         auto resp = co_await client.get_object(_bucket, path);
+        vlog(archival_log.debug, "Receive OK response from {}", path);
         co_await _remote.update(resp->as_input_stream());
     } catch (const s3::rest_error_response& err) {
-        if (err.code() == "NoSuchKey") {
+        if (err.code() == s3::s3_error_code::no_such_key) {
             // This can happen when we're dealing with new partition for which
             // manifest wasn't uploaded. But also, this can appen if we uploaded
             // the first segment and crashed before we were able to upload the
             // manifest. This shouldn't be the problem though. We will just
             // re-upload this segment for once.
+            vlog(archival_log.debug, "NoSuchKey response received {}", path);
             result = download_manifest_result::notfound;
-        } else if (err.code() == "SlowDown") {
+        } else if (err.code() == s3::s3_error_code::slow_down) {
             // This can happen when we're dealing with high request rate to the
             // manifest's prefix. 
-            result = download_manifest_result::slowdown;
+            vlog(archival_log.debug, "SlowDown response received {}", path);
+            result = download_manifest_result::backoff;
         } else {
             throw;
         }
@@ -183,37 +187,35 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidate(
         vlog(archival_log.error, "Failed to generate upload candidates");
         co_return batch_result{};
     }
-    auto num_candidates = std::min(
-      static_cast<ssize_t>(candidates->size()), req_limit.available_units());
+    auto num_candidates = std::min(candidates->size(), req_limit.max_counter());
     if (num_candidates == 0) {
         co_return batch_result{};
     }
-    // NOTE: here consume API is used because we don't want the number of
-    // available semaphore units to change.
-    auto sem_units = ss::consume_units(req_limit, num_candidates);
+    auto sunits = co_await ss::get_units(req_limit, num_candidates);
     std::vector<manifest::segment_map::value_type> upload_set;
     std::copy_n(
       candidates->begin(), num_candidates, std::back_inserter(upload_set));
     vlog(archival_log.debug, "Upload {} elements", upload_set.size());
-    batch_result result{};
-    auto fut = ss::parallel_for_each(
-      upload_set,
-      [this, &lm, &result](manifest::segment_map::value_type target) {
-          return upload_segment(std::move(target), lm).then([&result](bool ok) {
-              if (ok) {
-                  result.num_succeded++;
-              } else {
-                  result.num_failed++;
-              }
-          });
-      });
-    co_await std::move(fut);
+    std::vector<ss::future<bool>> flist;
+    flist.reserve(upload_set.size());
+    for (auto target: upload_set) {
+          flist.emplace_back(upload_segment(std::move(target), lm));
+    }
+    auto results = co_await ss::when_all_succeed(flist.begin(), flist.end());
+    batch_result agg{};
+    for (auto r: results) {
+        if (r) {
+            agg.num_succeded++;
+        } else {
+            agg.num_failed++;
+        }
+    }
     if (num_candidates) {
         vlog(archival_log.debug, "Completed S3 upload");
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }
-    co_return result;
+    co_return agg;
 }
 
 ss::future<bool> ntp_archiver::delete_segment(
@@ -251,7 +253,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
         co_return batch_result{};
     }
     auto num_candidates = std::min(
-      static_cast<ssize_t>(candidates->size()), req_limit.available_units());
+      candidates->size(), req_limit.max_counter());
     if (num_candidates == 0) {
         co_return batch_result{};
     }
@@ -260,25 +262,26 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::delete_next_candidate(
       candidates->begin(), num_candidates, std::back_inserter(delete_set));
     vlog(archival_log.debug, "Delete {} elements", delete_set.size());
     // upload segments in parallel
-    batch_result result{};
-    auto fut = ss::parallel_for_each(
-      delete_set,
-      [this, &lm, &result](manifest::segment_map::value_type target) {
-          return delete_segment(std::move(target), lm).then([&result](bool ok) {
-              if (ok) {
-                  result.num_succeded++;
-              } else {
-                  result.num_failed++;
-              }
-          });
-      });
-    co_await std::move(fut);
+    std::vector<ss::future<bool>> flist;
+    flist.reserve(delete_set.size());
+    for (auto target: delete_set) {
+          flist.emplace_back(delete_segment(std::move(target), lm));
+    }
+    auto results = co_await ss::when_all_succeed(flist.begin(), flist.end());
+    batch_result agg{};
+    for (auto r: results) {
+        if (r) {
+            agg.num_succeded++;
+        } else {
+            agg.num_failed++;
+        }
+    }
     if (num_candidates) {
         vlog(archival_log.debug, "Completed S3 delete");
         co_await upload_manifest();
         _last_upload_time = ss::lowres_clock::now();
     }
-    co_return result;
+    co_return agg;
 }
 
 ss::lw_shared_ptr<storage::segment>
