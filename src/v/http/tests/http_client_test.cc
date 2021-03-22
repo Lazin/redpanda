@@ -16,6 +16,7 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/temporary_buffer.hh>
@@ -38,6 +39,8 @@
 #include <exception>
 #include <initializer_list>
 #include <optional>
+
+using namespace std::chrono_literals;
 
 static const uint16_t httpd_port_number = 8128;
 static const char* httpd_host_name = "127.0.0.1";
@@ -384,6 +387,8 @@ public:
         _server_socket = ss::engine().listen(server_addr, lo);
         (void)ss::with_gate(_gate, [this] {
             return ss::async([this] {
+                // TODO: remove
+                std::cerr << "listen (start accept)" << std::endl;
                 auto [connection, remoteaddr] = _server_socket.accept().get0();
                 _socket = std::move(connection);
                 _fin = _socket.input();
@@ -391,6 +396,8 @@ public:
                 // read request and send response
                 _socket.set_nodelay(true);
                 _socket.set_keepalive(true);
+                // TODO: remove
+                std::cerr << "listen (accepted)" << std::endl;
                 iobuf request = do_read_request();
                 do_send_response();
             });
@@ -406,10 +413,13 @@ public:
 
 private:
     iobuf do_read_request() {
+        // TODO: remove
+        std::cerr << "do_read_request" << std::endl;
+        using namespace std::chrono_literals;
         // Read until _expected_data is fetched
         iobuf buffer;
         int it = 0;
-        const int max_iter = 100;
+        const int max_iter = 1000;
         while (it++ < max_iter) {
             auto tmpbuf = _fin.read().get0();
             buffer.append(std::move(tmpbuf));
@@ -421,6 +431,7 @@ private:
                     return std::move(buffer);
                 }
             }
+            ss::sleep(1ms).get();
         }
         throw std::runtime_error("Can't read request body");
     }
@@ -800,5 +811,35 @@ SEASTAR_TEST_CASE(test_http_via_impostor_no_content_length) {
               std::string expected = ss::sstring(httpd_server_reply);
               BOOST_REQUIRE_EQUAL(expected, actual);
           });
+    });
+}
+
+SEASTAR_TEST_CASE(test_http_cancel_reconnect) {
+    return ss::async([] {
+        auto config = transport_configuration();
+        ss::abort_source as;
+        http::client client(config, as);
+        auto fut = client.get_connected(10s);
+        ss::sleep(10ms).get();
+        BOOST_REQUIRE(fut.failed() == false);
+        BOOST_REQUIRE(fut.available() == false);
+        as.request_abort();
+        auto res = fut.get0();
+        BOOST_REQUIRE(res == http::reconnect_result_t::aborted);
+    });
+}
+
+SEASTAR_TEST_CASE(test_http_reconnect_graceful_shutdown) {
+    return ss::async([] {
+        auto config = transport_configuration();
+        ss::abort_source as;
+        http::client client(config, as);
+        auto fut = client.get_connected(10s);
+        ss::sleep(10ms).get();
+        BOOST_REQUIRE(fut.failed() == false);
+        BOOST_REQUIRE(fut.available() == false);
+        client.stop().get();
+        ss::sleep(10ms).get();
+        BOOST_REQUIRE(fut.get() == http::reconnect_result_t::aborted);
     });
 }
