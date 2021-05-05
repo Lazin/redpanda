@@ -11,6 +11,8 @@
 #include "archival/archival_policy.h"
 #include "archival/ntp_archiver_service.h"
 #include "archival/tests/service_fixture.h"
+#include "cloud_storage/types.h"
+#include "cloud_storage/remote.h"
 #include "cluster/types.h"
 #include "model/metadata.h"
 #include "storage/disk_log_impl.h"
@@ -99,8 +101,8 @@ static storage::ntp_config get_ntp_conf() {
     return storage::ntp_config(manifest_ntp, "base-dir");
 }
 
-static manifest load_manifest(std::string_view v) {
-    manifest m;
+static cloud_storage::manifest load_manifest(std::string_view v) {
+    cloud_storage::manifest m;
     iobuf i;
     i.append(v.data(), v.size());
     auto s = make_iobuf_input_stream(std::move(i));
@@ -126,10 +128,11 @@ compare_json_objects(const std::string_view& lhs, const std::string_view& rhs) {
 FIXTURE_TEST(test_download_manifest, s3_imposter_fixture) { // NOLINT
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    s3::client_pool pool(conf.connection_limit(), conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), pool);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
-    archiver.download_manifest().get();
+    auto res = archiver.download_manifest().get0();
+    BOOST_REQUIRE(res == cloud_storage::download_result::success);
     auto expected = load_manifest(manifest_payload);
     BOOST_REQUIRE(expected == archiver.get_remote_manifest()); // NOLINT
 }
@@ -137,10 +140,10 @@ FIXTURE_TEST(test_download_manifest, s3_imposter_fixture) { // NOLINT
 FIXTURE_TEST(test_upload_manifest, s3_imposter_fixture) { // NOLINT
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    s3::client_pool pool(conf.connection_limit(), conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), pool);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
-    auto pm = const_cast<manifest*>( // NOLINT
+    auto pm = const_cast<cloud_storage::manifest*>( // NOLINT
       &archiver.get_remote_manifest());
     pm->add(
       segment_name("1-2-v1.log"),
@@ -158,7 +161,8 @@ FIXTURE_TEST(test_upload_manifest, s3_imposter_fixture) { // NOLINT
         .base_offset = model::offset(3),
         .committed_offset = model::offset(1004),
       });
-    archiver.upload_manifest().get();
+    auto res = archiver.upload_manifest().get0();
+    BOOST_REQUIRE(res == cloud_storage::upload_result::success);
     auto req = get_requests().front();
     // NOLINTNEXTLINE
     BOOST_REQUIRE(compare_json_objects(req.content, manifest_payload));
@@ -168,8 +172,8 @@ FIXTURE_TEST(test_upload_manifest, s3_imposter_fixture) { // NOLINT
 FIXTURE_TEST(test_upload_segments, archiver_fixture) {
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    s3::client_pool pool(conf.connection_limit(), conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), pool);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
 
     std::vector<segment_desc> segments = {

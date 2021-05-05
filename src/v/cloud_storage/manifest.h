@@ -10,8 +10,8 @@
 
 #pragma once
 
-#include "archival/types.h"
 #include "bytes/iobuf.h"
+#include "cloud_storage/types.h"
 #include "cluster/types.h"
 #include "json/json.h"
 #include "model/fundamental.h"
@@ -28,15 +28,33 @@
 #include <compare>
 #include <iterator>
 
-namespace archival {
+namespace cloud_storage {
 
 struct serialized_json_stream {
     ss::input_stream<char> stream;
     size_t size_bytes;
 };
 
+class base_manifest {
+public:
+    /// Update manifest file from input_stream (remote set)
+    virtual ss::future<> update(ss::input_stream<char>&& is) = 0;
+
+    /// Serialize manifest object
+    ///
+    /// \return asynchronous input_stream with the serialized json
+    virtual serialized_json_stream serialize() const = 0;
+
+
+    /// Manifest object name in S3
+    virtual remote_manifest_path get_manifest_path() const = 0;
+
+    /// Compare two manifests for equality
+    bool operator==(const base_manifest& other) const = default;
+};
+
 /// Manifest file stored in S3
-class manifest final {
+class manifest final : public base_manifest {
 public:
     struct segment_meta {
         bool is_compacted;
@@ -44,8 +62,6 @@ public:
         model::offset base_offset;
         model::offset committed_offset;
 
-        // bool operator==(const segment_meta& other) const = default;
-        // bool operator<(const segment_meta& other) const = default;
         auto operator<=>(const segment_meta&) const = default;
     };
     using key = segment_name;
@@ -60,7 +76,7 @@ public:
     explicit manifest(model::ntp ntp, model::revision_id rev);
 
     /// Manifest object name in S3
-    remote_manifest_path get_manifest_path() const;
+    remote_manifest_path get_manifest_path() const override;
 
     /// Segment file name in S3
     remote_segment_path get_remote_segment_path(const segment_name& name) const;
@@ -99,12 +115,12 @@ public:
     manifest difference(const manifest& remote_set) const;
 
     /// Update manifest file from input_stream (remote set)
-    ss::future<> update(ss::input_stream<char>&& is);
+    ss::future<> update(ss::input_stream<char>&& is) override;
 
     /// Serialize manifest object
     ///
     /// \return asynchronous input_stream with the serialized json
-    serialized_json_stream serialize() const;
+    serialized_json_stream serialize() const override;
 
     /// Serialize manifest object
     ///
@@ -131,7 +147,7 @@ private:
     model::offset _last_offset;
 };
 
-class topic_manifest {
+class topic_manifest final : public base_manifest {
 public:
     /// Create manifest for specific ntp
     explicit topic_manifest(
@@ -141,20 +157,20 @@ public:
     topic_manifest();
 
     /// Update manifest file from input_stream (remote set)
-    ss::future<> update(ss::input_stream<char>&& is);
+    ss::future<> update(ss::input_stream<char>&& is) override;
 
     /// Serialize manifest object
     ///
     /// \return asynchronous input_stream with the serialized json
-    serialized_json_stream serialize() const;
+    serialized_json_stream serialize() const override;
+
+    /// Manifest object name in S3
+    remote_manifest_path get_manifest_path() const override;
 
     /// Serialize manifest object
     ///
     /// \param out output stream that should be used to output the json
     void serialize(std::ostream& out) const;
-
-    /// Manifest object name in S3
-    remote_manifest_path get_manifest_path() const;
 
     /// Return all possible manifest locations
     std::vector<remote_manifest_path> get_partition_manifests() const;
@@ -168,4 +184,4 @@ private:
     model::revision_id _rev;
 };
 
-} // namespace archival
+} // namespace cloud_storage

@@ -9,8 +9,8 @@
  */
 
 #pragma once
-#include "archival/manifest.h"
 #include "archival/ntp_archiver_service.h"
+#include "cloud_storage/manifest.h"
 #include "cluster/partition_manager.h"
 #include "model/fundamental.h"
 #include "s3/client.h"
@@ -22,6 +22,7 @@
 #include "utils/intrusive_list_helpers.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/loop.hh>
 #include <seastar/core/weak_ptr.hh>
 
 #include <absl/container/node_hash_map.h>
@@ -92,6 +93,10 @@ void ntp_upload_queue::copy_if(FwdIt out, const Func& pred) const {
 /// - Re-upload manifest(s)
 /// - Reset timer
 class scheduler_service_impl {
+    static constexpr ss::lowres_clock::duration
+      max_topic_manifest_upload_backoff
+      = 60s;
+
 public:
     /// \brief create scheduler service
     ///
@@ -151,10 +156,13 @@ private:
     ss::future<> remove_archivers(std::vector<model::ntp> to_remove);
     ss::future<> create_archivers(std::vector<model::ntp> to_create);
     ss::future<> upload_topic_manifest(
-      model::topic_namespace_view view, model::revision_id rev);
+      model::topic_namespace topic_ns, model::revision_id rev);
+    /// Adds archiver to the reconciliation loop after fetching its manifest.
+    ss::future<ss::stop_iteration>
+    add_ntp_archiver(ss::lw_shared_ptr<ntp_archiver> archiver);
 
     configuration _conf;
-    s3::client_pool _pool;
+    cloud_storage::remote _remote;
     ss::sharded<cluster::partition_manager>& _partition_manager;
     ss::sharded<cluster::topic_table>& _topic_table;
     ss::sharded<storage::api>& _storage_api;

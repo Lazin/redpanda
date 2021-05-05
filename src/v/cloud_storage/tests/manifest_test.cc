@@ -8,7 +8,7 @@
  * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
  */
 
-#include "archival/manifest.h"
+#include "cloud_storage/manifest.h"
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
 #include "model/metadata.h"
@@ -28,7 +28,7 @@
 #include <chrono>
 #include <exception>
 
-using namespace archival;
+using namespace cloud_storage;
 
 static std::string_view empty_manifest_json = R"json({
     "version": 1,

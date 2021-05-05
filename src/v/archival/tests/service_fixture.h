@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "archival/manifest.h"
+#include "cloud_storage/manifest.h"
 #include "archival/ntp_archiver_service.h"
 #include "cluster/partition_leaders_table.h"
 #include "cluster/types.h"
@@ -128,7 +128,7 @@ public:
 
     /// Verify manifest using log_manager's state,
     /// find matching segments and check the fields.
-    void verify_manifest(const archival::manifest& man);
+    void verify_manifest(const cloud_storage::manifest& man);
 
     /// Verify manifest content using log_manager's state,
     /// find matching segments and check the fields.

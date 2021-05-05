@@ -8,9 +8,8 @@
  * https://github.com/vectorizedio/redpanda/blob/master/licenses/rcl.md
  */
 
-#include "archival/manifest.h"
+#include "cloud_storage/manifest.h"
 
-#include "archival/logger.h"
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_istreambuf.h"
 #include "bytes/iobuf_ostreambuf.h"
@@ -21,7 +20,6 @@
 #include "model/timestamp.h"
 #include "ssx/sformat.h"
 #include "storage/ntp_config.h"
-#include "vlog.h"
 
 #include <seastar/core/coroutine.hh>
 
@@ -37,7 +35,7 @@
 #include <array>
 #include <chrono>
 
-namespace archival {
+namespace cloud_storage {
 
 manifest::manifest()
   : _ntp()
@@ -441,4 +439,4 @@ topic_manifest::get_partition_manifests() const {
     return result;
 }
 
-} // namespace archival
+} // namespace cloud_storage

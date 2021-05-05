@@ -1,16 +1,14 @@
 
 v_cc_library(
-  NAME archival
+  NAME cloud_storage
   SRCS
-    archival_policy.cc
-    service.cc
-    ntp_archiver_service.cc
+    manifest.cc
+    remote.cc
   DEPS
     Seastar::seastar
     v::bytes
     v::http
     v::s3
-    v::cloud_storage
     v::json
     v::model
     v::storage

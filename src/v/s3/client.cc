@@ -22,6 +22,7 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
+#include <seastar/core/gate.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/temporary_buffer.hh>
@@ -515,7 +516,11 @@ client_pool::client_pool(
 
 ss::future<> client_pool::stop() {
     _as.request_abort();
-    return _gate.close();
+    _cvar = {}; // this should break concurrent 'acquire' loop that waits for
+                // the available lease in _cvar.wait()
+    // Wait until all leased objects are returned
+    co_await _gate.close();
+    co_return co_await _cvar.wait([this] { return _pool.size() == _size; });
 }
 
 /// \brief Acquire http client from the pool.
@@ -527,14 +532,18 @@ ss::future<> client_pool::stop() {
 ///         are in use)
 ss::future<client_pool::client_lease> client_pool::acquire() {
     gate_guard guard(_gate);
-    if (_pool.empty()) {
+    while (_pool.empty() && !_gate.is_closed()) {
         if (_policy == client_pool_overdraft_policy::wait_if_empty) {
-            co_await _cvar.wait([this] { return !_pool.empty(); });
+            co_await _cvar.wait();
         } else {
             auto cl = ss::make_shared<client>(_config, _as);
             _pool.emplace_back(std::move(cl));
         }
     }
+    if (_gate.is_closed()) {
+        throw ss::gate_closed_exception();
+    }
+    vassert(!_pool.empty(), "'acquire' invariant is broken");
     auto client = _pool.back();
     _pool.pop_back();
     co_return client_lease{

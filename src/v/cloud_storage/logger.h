@@ -10,19 +10,10 @@
 
 #pragma once
 
-#include "cloud_storage/types.h"
-#include "seastar/core/sstring.hh"
 #include "seastarx.h"
-#include "utils/named_type.h"
 
-#include <filesystem>
+#include <seastar/util/log.hh>
 
-namespace archival {
-
-using cloud_storage::segment_name;
-using cloud_storage::remote_segment_path;
-using cloud_storage::remote_manifest_path;
-using cloud_storage::local_segment_path;
-using cloud_storage::s3_connection_limit;
-
+namespace cloud_storage {
+inline ss::logger cst_log("cloud_storage");
 } // namespace cloud_storage
