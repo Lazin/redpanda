@@ -19,7 +19,10 @@
 #include <seastar/core/sleep.hh>
 #include <seastar/core/timed_out_error.hh>
 
+#include <asm-generic/errno.h>
+
 #include <exception>
+#include <variant>
 
 namespace cloud_storage {
 
@@ -111,8 +114,70 @@ struct backoff_helper {
     simple_time_jitter<ss::lowres_clock> _jitter;
 };
 
-remote::remote(s3_connection_limit limit, const s3::configuration& conf)
-  : _pool(limit(), conf) {}
+enum class error_outcome { retry, fail, notfound };
+
+/// @brief Analyze exception
+/// @return error outcome - retry, fail (with exception), or notfound (can only
+/// be used with download)
+static error_outcome categorize_error(
+  const std::exception_ptr& err,
+  burst_logger& blog,
+  const s3::bucket_name& bucket,
+  const s3::object_key& path) {
+    try {
+        std::rethrow_exception(err);
+    } catch (const s3::rest_error_response& err) {
+        if (err.code() == s3::s3_error_code::no_such_key) {
+            vlog(cst_log.debug, "NoSuchKey response received {}", path);
+            return error_outcome::notfound;
+        } else if (err.code() == s3::s3_error_code::slow_down) {
+            // This can happen when we're dealing with high request rate to
+            // the manifest's prefix. Backoff algorithm should be applied.
+            blog("SlowDown response received {}", path);
+        } else {
+            // Unexpected REST API error, we can't recover from this
+            // because the issue is not temporary (e.g. bucket doesn't
+            // exist)
+            blog(
+              "Accessing {}, unexpected REST API error \"{}\" detected, code: "
+              "{}, request_id: {}, resource: {}",
+              bucket,
+              err.message(),
+              err.code_string(),
+              err.request_id(),
+              err.resource());
+            return error_outcome::fail;
+        }
+    } catch (const std::system_error& cerr) {
+        // The system_error is type erased and not convenient for selective
+        // handling. The following errors should be retried:
+        // - connection refused, timed out or reset by peer
+        // - network temporary unavailable
+        // Shouldn't be retried
+        // - any filesystem error
+        // - broken-pipe
+        // - any other network error (no memory, bad socket, etc)
+        if (auto code = cerr.code(); code.value() != ECONNREFUSED
+                                     && code.value() != ENETUNREACH
+                                     && code.value() != ECONNRESET) {
+            blog("System error {}", cerr);
+            return error_outcome::fail;
+        }
+        blog("System error susceptible for retry {}", cerr.what());
+    } catch (ss::timed_out_error& terr) {
+        // This should happen when the connection pool was disconnected
+        // from the S3 endpoint and subsequent connection attmpts failed.
+        blog("Connection timeout {}", terr.what());
+    }
+    return error_outcome::retry;
+}
+
+remote::remote(
+  s3_connection_limit limit,
+  const s3::configuration& conf,
+  service_probe& probe)
+  : _pool(limit(), conf)
+  , _probe(probe) {}
 
 ss::future<> remote::start() { return ss::now(); }
 
@@ -137,50 +202,42 @@ ss::future<download_result> remote::download_manifest(
     auto [client, deleter] = co_await _pool.acquire();
     auto budget = backoff.get_next();
     while (!_gate.is_closed() && budget) {
+        std::exception_ptr eptr = nullptr;
         try {
-            auto resp = co_await client->get_object(bucket, path);
+            auto resp = co_await client->get_object(bucket, path, timeout);
             vlog(cst_log.debug, "Receive OK response from {}", path);
             co_await manifest.update(resp->as_input_stream());
-            co_return download_result::success;
-        } catch (const s3::rest_error_response& err) {
-            if (err.code() == s3::s3_error_code::no_such_key) {
-                vlog(cst_log.debug, "NoSuchKey response received {}", path);
-                co_return download_result::notfound;
-            } else if (err.code() == s3::s3_error_code::slow_down) {
-                // This can happen when we're dealing with high request rate to
-                // the manifest's prefix. Backoff algorithm should be applied.
-                blog("SlowDown response received {}", path);
-            } else {
-                // Unexpected REST API error, we can't recover from this
-                // because the issue is not temporary (e.g. bucket doesn't
-                // exist)
-                vlog(
-                  cst_log.error,
-                  "Download manifest from {}, unexpected REST API error \"{}\" "
-                  "detected, code: {}, request_id: {}, resource: {}",
-                  bucket,
-                  err.message(),
-                  err.code_string(),
-                  err.request_id(),
-                  err.resource());
-                throw;
+            switch (manifest.get_manifest_type()) {
+            case manifest_type::partition:
+                _probe.partition_manifest_upload();
+                break;
+            case manifest_type::topic:
+                _probe.topic_manifest_upload();
+                break;
             }
-        } catch (const std::system_error& cerr) {
-            // We may see this if connection was broken during the download
-            // (broken pipe error).
-            blog("Transport level error {}", cerr.what());
-        } catch (ss::timed_out_error& terr) {
-            // This should happen when the connection pool was disconnected
-            // from the S3 endpoint and subsequent connection attmpts failed.
-            blog("Connection timeout {}", terr.what());
+            co_return download_result::success;
+        } catch (...) {
+            eptr = std::current_exception();
         }
-        vlog(
-          cst_log.debug,
-          "Downloading manifest from {}, {}ms backoff required",
-          bucket,
-          budget->next_backoff.count());
-        co_await ss::sleep_abortable(budget->next_backoff, _as);
-        budget = backoff.get_next();
+        auto outcome = categorize_error(eptr, blog, bucket, path);
+        switch (outcome) {
+        case error_outcome::retry:
+            vlog(
+              cst_log.debug,
+              "Downloading manifest from {}, {}ms backoff required",
+              bucket,
+              budget->next_backoff.count());
+            _probe.manifest_download_backoff();
+            co_await ss::sleep_abortable(budget->next_backoff, _as);
+            budget = backoff.get_next();
+            break;
+        case error_outcome::fail:
+            blog.log_accumulated_errors("download manifest failure: ");
+            std::rethrow_exception(eptr);
+            break;
+        case error_outcome::notfound:
+            co_return download_result::notfound;
+        }
     }
     vlog(
       cst_log.warn,
@@ -188,7 +245,8 @@ ss::future<download_result> remote::download_manifest(
       "available",
       bucket,
       path);
-    blog.log_accumulated_errors("error suspended during backoff: ");
+    blog.log_accumulated_errors("download manifest failure: ");
+    _probe.failed_manifest_download();
     co_return download_result::timedout;
 }
 
@@ -206,48 +264,45 @@ ss::future<upload_result> remote::upload_manifest(
     auto [client, deleter] = co_await _pool.acquire();
     auto budget = backoff.get_next();
     while (!_gate.is_closed() && budget) {
+        std::exception_ptr eptr = nullptr;
         try {
             auto [is, size] = manifest.serialize();
             co_await client->put_object(
-              bucket, path, size, std::move(is), tags);
+              bucket, path, size, std::move(is), tags, timeout);
             vlog(cst_log.debug, "Successfuly uploaded manifest to {}", path);
-            co_return upload_result::success;
-        } catch (const s3::rest_error_response& err) {
-            if (err.code() != s3::s3_error_code::slow_down) {
-                vlog(
-                  cst_log.error,
-                  "Uploading manifest {} to {}, {} error detected, code: {}, "
-                  "request_id: {}, resource: {}",
-                  path,
-                  bucket,
-                  err.message(),
-                  err.code_string(),
-                  err.request_id(),
-                  err.resource());
-                throw;
-            } else {
-                blog("SlowDown response received during upload");
+            switch (manifest.get_manifest_type()) {
+            case manifest_type::partition:
+                _probe.partition_manifest_upload();
+                break;
+            case manifest_type::topic:
+                _probe.topic_manifest_upload();
+                break;
             }
-        } catch (const std::system_error& err) {
-            blog(
-              "Uploading manifest {} to {}, transport error: {}",
-              path,
-              bucket,
-              err);
-        } catch (const ss::timed_out_error& err) {
-            blog(
-              "Uploading manifest {} to {}, connection timeout: {}",
-              path,
-              bucket,
-              err);
+            co_return upload_result::success;
+        } catch (...) {
+            eptr = std::current_exception();
         }
-        vlog(
-          cst_log.debug,
-          "Uploading manifest {} to {}, {}ms backoff required",
-          path,
-          bucket,
-          budget->next_backoff.count());
-        co_await ss::sleep_abortable(budget->next_backoff, _as);
+        auto outcome = categorize_error(eptr, blog, bucket, path);
+        switch (outcome) {
+        case error_outcome::notfound:
+            // not expected during upload
+            [[fallthrough]];
+        case error_outcome::retry:
+            vlog(
+              cst_log.debug,
+              "Uploading manifest {} to {}, {}ms backoff required",
+              path,
+              bucket,
+              budget->next_backoff.count());
+            _probe.manifest_upload_backoff();
+            co_await ss::sleep_abortable(budget->next_backoff, _as);
+            budget = backoff.get_next();
+            break;
+        case error_outcome::fail:
+            blog.log_accumulated_errors("upload manifest failure: ");
+            std::rethrow_exception(eptr);
+            break;
+        }
     }
     vlog(
       cst_log.warn,
@@ -255,7 +310,8 @@ ss::future<upload_result> remote::upload_manifest(
       "uploaded",
       path,
       bucket);
-    blog.log_accumulated_errors("error suspended during backoff: ");
+    blog.log_accumulated_errors("upload manifest failure: ");
+    _probe.failed_manifest_upload();
     co_return upload_result::timedout;
 }
 
@@ -275,70 +331,115 @@ ss::future<upload_result> remote::upload_segment(
       manifest.get_ntp(),
       exposed_name,
       content_length);
-    auto s3path = manifest.get_remote_segment_path(segment_name(exposed_name));
+    auto s3path = manifest.get_remote_segment_path(exposed_name);
     std::vector<s3::object_tag> tags = {{"rp-type", "segment"}};
     auto budget = backoff.get_next();
     while (!_gate.is_closed() && budget) {
         auto [client, deleter] = co_await _pool.acquire();
         auto stream = reset_str();
+        auto path = s3::object_key(s3path().string());
         vlog(
           cst_log.debug,
           "Uploading segment for {}, path {}",
           manifest.get_ntp(),
           s3path);
+        std::exception_ptr eptr = nullptr;
         try {
             // Segment upload attempt
             co_await client->put_object(
-              bucket,
-              s3::object_key(s3path().string()),
-              content_length,
-              std::move(stream),
-              tags);
+              bucket, path, content_length, std::move(stream), tags, timeout);
+            _probe.successful_upload(content_length);
             co_return upload_result::success;
-        } catch (const s3::rest_error_response& err) {
-            if (err.code() == s3::s3_error_code::slow_down) {
-                blog("SlowDown response received during segment upload");
-            } else {
-                vlog(
-                  cst_log.error,
-                  "Uploading segment for {}, path {}, {} error detected, code: "
-                  "{}, "
-                  "request_id: {}, resource: {}",
-                  manifest.get_ntp(),
-                  s3path,
-                  err.message(),
-                  err.code_string(),
-                  err.request_id(),
-                  err.resource());
-            }
-        } catch (const std::system_error& err) {
-            blog(
-              "Uploading segment {} to {}, transport error: {}",
-              s3path,
-              bucket,
-              err);
-        } catch (const ss::timed_out_error& err) {
-            blog(
-              "Uploading segment {} to {}, connection timeout: {}",
-              s3path,
-              bucket,
-              err);
+        } catch (...) {
+            eptr = std::current_exception();
         }
-        vlog(
-          cst_log.debug,
-          "Uploading segment {} to {}, {}ms backoff remquired",
-          s3path,
-          bucket,
-          budget->next_backoff.count());
-        co_await ss::sleep_abortable(budget->next_backoff, _as);
+        auto outcome = categorize_error(eptr, blog, bucket, path);
+        switch (outcome) {
+        case error_outcome::notfound:
+            // not expected during upload
+            [[fallthrough]];
+        case error_outcome::retry:
+            vlog(
+              cst_log.debug,
+              "Uploading segment {} to {}, {}ms backoff required",
+              path,
+              bucket,
+              budget->next_backoff.count());
+            _probe.upload_backoff();
+            co_await ss::sleep_abortable(budget->next_backoff, _as);
+            budget = backoff.get_next();
+            break;
+        case error_outcome::fail:
+            blog.log_accumulated_errors("upload segment failure: ");
+            std::rethrow_exception(eptr);
+            break;
+        }
     }
     vlog(
       cst_log.warn,
       "Uploading segment {} to {}, backoff quota exceded, segment not uploaded",
       s3path,
       bucket);
-    blog.log_accumulated_errors("error suspended during backoff: ");
+    blog.log_accumulated_errors("upload segment failure: ");
+    _probe.failed_upload(content_length);
     co_return upload_result::timedout;
+}
+
+ss::future<download_result> remote::download_segment(
+  const s3::bucket_name& bucket,
+  const segment_name& name,
+  manifest& manifest,
+  const try_consume_stream& cons_str,
+  ss::lowres_clock::duration timeout) {
+    gate_guard guard{_gate};
+    burst_logger blog;
+    backoff_helper backoff{timeout};
+    auto s3path = manifest.get_remote_segment_path(name);
+    auto path = s3::object_key(s3path().string());
+    vlog(cst_log.debug, "Download segment {}", path);
+    auto [client, deleter] = co_await _pool.acquire();
+    auto budget = backoff.get_next();
+    while (!_gate.is_closed() && budget) {
+        std::exception_ptr eptr = nullptr;
+        try {
+            auto resp = co_await client->get_object(bucket, path, timeout);
+            vlog(cst_log.debug, "Receive OK response from {}", path);
+            uint64_t content_length = co_await cons_str(
+              resp->as_input_stream());
+            _probe.successful_download(content_length);
+            co_return download_result::success;
+        } catch (...) {
+            eptr = std::current_exception();
+        }
+        auto outcome = categorize_error(eptr, blog, bucket, path);
+        switch (outcome) {
+        case error_outcome::retry:
+            vlog(
+              cst_log.debug,
+              "Downloading segment from {}, {}ms backoff required",
+              bucket,
+              budget->next_backoff.count());
+            _probe.download_backoff();
+            co_await ss::sleep_abortable(budget->next_backoff, _as);
+            budget = backoff.get_next();
+            break;
+        case error_outcome::fail:
+            blog.log_accumulated_errors("download segment failure: ");
+            std::rethrow_exception(eptr);
+            break;
+        case error_outcome::notfound:
+            co_return download_result::notfound;
+        }
+    }
+    vlog(
+      cst_log.warn,
+      "Downloading segment from {}, backoff quota exceded, segment at {} not "
+      "available",
+      bucket,
+      path);
+    blog.log_accumulated_errors("download segment failure: ");
+    _probe.failed_download();
+    co_return download_result::timedout;
 }
 
 } // namespace cloud_storage

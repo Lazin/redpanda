@@ -12,6 +12,7 @@
 
 #include "cloud_storage/types.h"
 #include "seastar/core/sstring.hh"
+#include "seastar/util/bool_class.hh"
 #include "seastarx.h"
 #include "utils/named_type.h"
 
@@ -19,10 +20,15 @@
 
 namespace archival {
 
-using cloud_storage::segment_name;
-using cloud_storage::remote_segment_path;
-using cloud_storage::remote_manifest_path;
 using cloud_storage::local_segment_path;
+using cloud_storage::remote_manifest_path;
+using cloud_storage::remote_segment_path;
 using cloud_storage::s3_connection_limit;
+using cloud_storage::segment_name;
 
-} // namespace cloud_storage
+using service_metrics_disabled
+  = ss::bool_class<struct service_metrics_disabled_tag>;
+using per_ntp_metrics_disabled
+  = ss::bool_class<struct per_ntp_metrics_disabled_tag>;
+
+} // namespace archival

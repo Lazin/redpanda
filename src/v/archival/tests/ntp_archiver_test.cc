@@ -128,8 +128,9 @@ compare_json_objects(const std::string_view& lhs, const std::string_view& rhs) {
 FIXTURE_TEST(test_download_manifest, s3_imposter_fixture) { // NOLINT
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
+    service_probe probe(service_metrics_disabled::yes);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config, probe);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote, probe);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
     auto res = archiver.download_manifest().get0();
     BOOST_REQUIRE(res == cloud_storage::download_result::success);
@@ -140,8 +141,9 @@ FIXTURE_TEST(test_download_manifest, s3_imposter_fixture) { // NOLINT
 FIXTURE_TEST(test_upload_manifest, s3_imposter_fixture) { // NOLINT
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
+    service_probe probe(service_metrics_disabled::yes);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config, probe);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote, probe);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
     auto pm = const_cast<cloud_storage::manifest*>( // NOLINT
       &archiver.get_remote_manifest());
@@ -172,8 +174,9 @@ FIXTURE_TEST(test_upload_manifest, s3_imposter_fixture) { // NOLINT
 FIXTURE_TEST(test_upload_segments, archiver_fixture) {
     set_expectations_and_listen(default_expectations);
     auto conf = get_configuration();
-    cloud_storage::remote remote(conf.connection_limit, conf.client_config);
-    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote);
+    service_probe probe(service_metrics_disabled::yes);
+    cloud_storage::remote remote(conf.connection_limit, conf.client_config, probe);
+    archival::ntp_archiver archiver(get_ntp_conf(), get_configuration(), remote, probe);
     auto action = ss::defer([&archiver] { archiver.stop().get(); });
 
     std::vector<segment_desc> segments = {
@@ -229,7 +232,9 @@ FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
     };
     init_storage_api_local(segments);
     auto& lm = get_local_storage_api().log_mgr();
-    archival::archival_policy policy(manifest_ntp);
+    ntp_level_probe ntp_probe(per_ntp_metrics_disabled::yes, manifest_ntp);
+    service_probe svc_probe(service_metrics_disabled::yes);
+    archival::archival_policy policy(manifest_ntp, svc_probe, ntp_probe);
 
     // Every segment should be returned once as we're calling the
     // policy to get next candidate.

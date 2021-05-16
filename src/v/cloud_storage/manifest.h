@@ -35,6 +35,11 @@ struct serialized_json_stream {
     size_t size_bytes;
 };
 
+enum class manifest_type {
+    topic,
+    partition,
+};
+
 class base_manifest {
 public:
     /// Update manifest file from input_stream (remote set)
@@ -48,6 +53,9 @@ public:
 
     /// Manifest object name in S3
     virtual remote_manifest_path get_manifest_path() const = 0;
+
+    /// Get manifest type
+    virtual manifest_type get_manifest_type() const = 0;
 
     /// Compare two manifests for equality
     bool operator==(const base_manifest& other) const = default;
@@ -136,6 +144,8 @@ public:
     /// \return true on success, false on failure (no such segment)
     bool delete_permanently(const segment_name& name);
 
+    manifest_type get_manifest_type() const override { return manifest_type::partition; };
+
 private:
     /// Update manifest content from json document that supposed to be generated
     /// from manifest.json file
@@ -174,6 +184,8 @@ public:
 
     /// Return all possible manifest locations
     std::vector<remote_manifest_path> get_partition_manifests() const;
+
+    manifest_type get_manifest_type() const override { return manifest_type::partition; };
 
 private:
     /// Update manifest content from json document that supposed to be generated

@@ -10,9 +10,10 @@
 
 #pragma once
 #include "archival/archival_policy.h"
+#include "archival/probe.h"
+#include "archival/types.h"
 #include "cloud_storage/manifest.h"
 #include "cloud_storage/remote.h"
-#include "archival/types.h"
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -23,7 +24,9 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/semaphore.hh>
+#include <seastar/core/shared_ptr.hh>
 
+#include <functional>
 #include <map>
 
 namespace archival {
@@ -42,6 +45,10 @@ struct configuration {
     ss::lowres_clock::duration gc_interval;
     /// Number of simultaneous S3 uploads
     s3_connection_limit connection_limit;
+    /// Flag that indicates that service level metrics are disabled
+    service_metrics_disabled svc_metrics_disabled;
+    /// Flag that indicates that ntp-archiver level metrics are disabled
+    per_ntp_metrics_disabled ntp_metrics_disabled;
 };
 
 std::ostream& operator<<(std::ostream& o, const configuration& cfg);
@@ -58,10 +65,11 @@ class ntp_archiver {
     /// Timeout value used for manifest uploads and downloads.
     static constexpr ss::lowres_clock::duration max_backoff_manifest = 10s;
     /// Timeout value used for segment uploads. With small timeout value like
-    /// this we will only run backoff in cases when the connection can't be 
-    /// established or API returns SlowDown responses. The actual segment 
+    /// this we will only run backoff in cases when the connection can't be
+    /// established or API returns SlowDown responses. The actual segment
     /// upload can take more than 10s (depending on the connection).
     static constexpr ss::lowres_clock::duration max_backoff_segment = 10s;
+
 public:
     /// Iterator type used to retrieve candidates for upload
     using back_insert_iterator
@@ -72,10 +80,12 @@ public:
     /// \param ntp is an ntp that archiver is responsible for
     /// \param conf is an S3 client configuration
     /// \param remote is an object used to send/recv data
+    /// \param svc_probe is a service level probe (optional)
     ntp_archiver(
       const storage::ntp_config& ntp,
       const configuration& conf,
-      cloud_storage::remote& remote);
+      cloud_storage::remote& remote,
+      service_probe& svc_probe);
 
     /// Stop archiver.
     ///
@@ -91,6 +101,14 @@ public:
 
     /// Get timestamp
     const ss::lowres_clock::time_point get_last_upload_time() const;
+
+    /// Download manifest from pre-defined S3 locatnewion
+    ///
+    /// \return future that returns true if the manifest was found in S3
+    ss::future<cloud_storage::download_result> download_manifest();
+
+    /// Upload manifest to the pre-defined S3 location
+    ss::future<cloud_storage::upload_result> upload_manifest();
 
     const cloud_storage::manifest& get_remote_manifest() const;
 
@@ -108,21 +126,15 @@ public:
     /// \return future that returns number of uploaded/failed segments
     ss::future<batch_result> upload_next_candidates(storage::log_manager& lm);
 
-    /// Download manifest from pre-defined S3 locatnewion
-    ///
-    /// \return future that returns true if the manifest was found in S3
-    ss::future<cloud_storage::download_result> download_manifest();
-
-    /// Upload manifest to the pre-defined S3 location
-    ss::future<cloud_storage::upload_result> upload_manifest();
-
-
 private:
     /// Upload individual segment to S3.
     ///
     /// \return true on success and false otherwise
-    ss::future<cloud_storage::upload_result> upload_segment(upload_candidate candidate);
+    ss::future<cloud_storage::upload_result>
+    upload_segment(upload_candidate candidate);
 
+    service_probe& _svc_probe;
+    ntp_level_probe _probe;
     model::ntp _ntp;
     model::revision_id _rev;
     cloud_storage::remote& _remote;
@@ -132,7 +144,6 @@ private:
     /// gets uploaded to the remote location)
     cloud_storage::manifest _manifest;
     ss::gate _gate;
-
     ss::abort_source _as;
     ss::semaphore _mutex{1};
     simple_time_jitter<ss::lowres_clock> _backoff{100ms};

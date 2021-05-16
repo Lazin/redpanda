@@ -162,7 +162,6 @@ private:
     add_ntp_archiver(ss::lw_shared_ptr<ntp_archiver> archiver);
 
     configuration _conf;
-    cloud_storage::remote _remote;
     ss::sharded<cluster::partition_manager>& _partition_manager;
     ss::sharded<cluster::topic_table>& _topic_table;
     ss::sharded<storage::api>& _storage_api;
@@ -175,6 +174,8 @@ private:
     ss::semaphore _stop_limit;
     ntp_upload_queue _queue;
     simple_time_jitter<ss::lowres_clock> _backoff{100ms};
+    service_probe _probe;
+    cloud_storage::remote _remote;
 };
 
 } // namespace internal

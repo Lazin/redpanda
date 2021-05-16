@@ -146,7 +146,12 @@ scheduler_service_impl::get_archival_service_config() {
       .interval
       = config::shard_local_cfg().cloud_storage_reconciliation_ms.value(),
       .connection_limit = s3_connection_limit(
-        config::shard_local_cfg().cloud_storage_max_connections.value())};
+        config::shard_local_cfg().cloud_storage_max_connections.value()),
+      .svc_metrics_disabled = service_metrics_disabled(
+        static_cast<bool>(disable_metrics)),
+      .ntp_metrics_disabled = per_ntp_metrics_disabled(
+        static_cast<bool>(disable_metrics)),
+    };
     vlog(archival_log.debug, "Archival configuration generated: {}", cfg);
     co_return cfg;
 }
@@ -157,13 +162,15 @@ scheduler_service_impl::scheduler_service_impl(
   ss::sharded<cluster::partition_manager>& pm,
   ss::sharded<cluster::topic_table>& tt)
   : _conf(conf)
-  , _remote(conf.connection_limit, conf.client_config)
   , _partition_manager(pm)
   , _topic_table(tt)
   , _storage_api(api)
   , _jitter(conf.interval, 1ms)
   , _gc_jitter(conf.gc_interval, 1ms)
-  , _stop_limit(conf.connection_limit()) {}
+  , _stop_limit(conf.connection_limit()) 
+  , _probe(conf.svc_metrics_disabled) 
+  , _remote(conf.connection_limit, conf.client_config, _probe)
+  {}
 
 scheduler_service_impl::scheduler_service_impl(
   ss::sharded<storage::api>& api,
@@ -275,6 +282,7 @@ ss::future<ss::stop_iteration> scheduler_service_impl::add_ntp_archiver(
                 archival_log.info,
                 "Found manifest for partition {}",
                 archiver->get_ntp());
+              _probe.start_archiving_ntp();
               return ss::make_ready_future<ss::stop_iteration>(
                 ss::stop_iteration::yes);
           case cloud_storage::download_result::notfound:
@@ -288,6 +296,7 @@ ss::future<ss::stop_iteration> scheduler_service_impl::add_ntp_archiver(
               (void)upload_topic_manifest(
                 model::topic_namespace(ntp.ns, ntp.tp.topic),
                 archiver->get_revision_id());
+              _probe.start_archiving_ntp();
               return ss::make_ready_future<ss::stop_iteration>(
                 ss::stop_iteration::yes);
           case cloud_storage::download_result::timedout:
@@ -318,7 +327,7 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
                           return ss::now();
                       }
                       auto svc = ss::make_lw_shared<ntp_archiver>(
-                        log->config(), _conf, _remote);
+                        log->config(), _conf, _remote, _probe);
                       return ss::repeat([this, svc = std::move(svc)] {
                           return add_ntp_archiver(svc);
                       });
@@ -344,6 +353,7 @@ scheduler_service_impl::remove_archivers(std::vector<model::ntp> to_remove) {
                        vlog(
                          archival_log.info, "archiver stopped {}", ntp.path());
                        _queue.erase(ntp);
+                       _probe.stop_archiving_ntp();
                    });
              })
       .finally([g = std::move(g)] {});
@@ -463,7 +473,8 @@ ss::future<> scheduler_service_impl::run_uploads() {
                   "Successfuly upload {} segments",
                   total.num_succeded);
             }
-            // TODO: use probe to report num_succeded and num_failed
+            _probe.successful_upload(total.num_succeded);
+            _probe.failed_upload(total.num_failed);
         }
     } catch (const ss::sleep_aborted&) {
         vlog(archival_log.debug, "Upload loop aborted");

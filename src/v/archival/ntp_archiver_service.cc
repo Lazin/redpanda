@@ -51,11 +51,14 @@ std::ostream& operator<<(std::ostream& o, const configuration& cfg) {
 ntp_archiver::ntp_archiver(
   const storage::ntp_config& ntp,
   const configuration& conf,
-  cloud_storage::remote& remote)
-  : _ntp(ntp.ntp())
+  cloud_storage::remote& remote,
+  service_probe& svc_probe)
+  : _svc_probe(svc_probe)
+  , _probe(conf.ntp_metrics_disabled, ntp.ntp())
+  , _ntp(ntp.ntp())
   , _rev(ntp.get_revision())
   , _remote(remote)
-  , _policy(_ntp)
+  , _policy(_ntp, _svc_probe, std::ref(_probe))
   , _bucket(conf.bucket_name)
   , _manifest(_ntp, _rev)
   , _gate() {
@@ -135,6 +138,7 @@ ntp_archiver::upload_next_candidates(storage::log_manager& lm) {
     std::vector<ss::future<cloud_storage::upload_result>> flist;
     std::vector<cloud_storage::manifest::segment_meta> meta;
     std::vector<ss::sstring> names;
+    std::vector<model::offset> deltas;
     for (size_t i = 0; i < _concurrency; i++) {
         vlog(
           archival_log.debug,
@@ -162,7 +166,10 @@ ntp_archiver::upload_next_candidates(storage::log_manager& lm) {
             offset = meta->committed_offset + model::offset(1);
             continue;
         }
-        offset = upload.source->offsets().committed_offset + model::offset(1);
+        auto committed = upload.source->offsets().committed_offset;
+        auto base = upload.source->offsets().base_offset;
+        offset = committed + model::offset(1);
+        deltas.push_back(committed - base);
         flist.emplace_back(upload_segment(upload));
         cloud_storage::manifest::segment_meta m{
           .is_compacted = upload.source->is_compacted_segment(),
@@ -189,6 +196,7 @@ ntp_archiver::upload_next_candidates(storage::log_manager& lm) {
         if (results[i] == cloud_storage::upload_result::timedout) {
             break;
         }
+        _probe.uploaded(deltas[i]);
         _manifest.add(segment_name(names[i]), meta[i]);
     }
     if (total.num_succeded != 0) {

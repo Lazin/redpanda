@@ -11,6 +11,7 @@
 #pragma once
 
 #include "cloud_storage/manifest.h"
+#include "cloud_storage/probe.h"
 #include "cloud_storage/types.h"
 #include "random/simple_time_jitter.h"
 #include "s3/client.h"
@@ -33,11 +34,22 @@ public:
     /// to re-upload and will return all data that needs to be uploaded
     using reset_input_stream = std::function<ss::input_stream<char>()>;
 
+    /// Functor that attempts to consume the input stream. If the connection
+    /// is broken during the download the functor is responsible for he cleanup.
+    /// The functor should be reenterable since it can be called many times.
+    /// On success it should return content_length. On failure it should
+    /// allow the exception from the input_stream to propagate.
+    using try_consume_stream
+      = std::function<ss::future<uint64_t>(ss::input_stream<char>)>;
+
     /// \brief Initialize 'remote'
     ///
     /// \param limit is a number of simultaneous connections
     /// \param conf is an S3 configuration
-    explicit remote(s3_connection_limit limit, const s3::configuration& conf);
+    explicit remote(
+      s3_connection_limit limit,
+      const s3::configuration& conf,
+      service_probe& probe);
 
     /// \brief Start the remote
     ss::future<> start();
@@ -74,7 +86,7 @@ public:
     /// \brief Upload segment to S3
     ///
     /// The method uploads the segment while tolerating some errors. It can
-    /// retry after some errors. 
+    /// retry after some errors.
     /// \param reset_str is a functor that returns an input_stream that returns
     ///                  segment's data
     /// \param exposed_name is a segment's name in S3
@@ -88,12 +100,18 @@ public:
       manifest& manifest,
       ss::lowres_clock::duration timeout);
 
-    // TBD: download
+    ss::future<download_result> download_segment(
+      const s3::bucket_name& bucket,
+      const segment_name& name,
+      manifest& manifest,
+      const try_consume_stream& cons_str,
+      ss::lowres_clock::duration timeout);
 
 private:
     s3::client_pool _pool;
     ss::gate _gate;
     ss::abort_source _as;
+    service_probe& _probe;
 };
 
 } // namespace cloud_storage

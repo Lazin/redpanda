@@ -5,6 +5,7 @@ v_cc_library(
     archival_policy.cc
     service.cc
     ntp_archiver_service.cc
+    probe.cc
   DEPS
     Seastar::seastar
     v::bytes
