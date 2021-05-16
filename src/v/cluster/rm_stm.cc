@@ -38,7 +38,7 @@ static bool is_sequence(int32_t last_seq, int32_t next_seq) {
            || (next_seq == 0 && last_seq == std::numeric_limits<int32_t>::max());
 }
 
-static model::record_batch make_control_batch(
+static model::record_batch make_tx_control_batch(
   model::producer_identity pid, model::control_record_type crt) {
     iobuf key;
     kafka::response_writer w(key);
@@ -49,6 +49,7 @@ static model::record_batch make_control_batch(
       raft::data_batch_type, model::offset(0));
     builder.set_producer_identity(pid.id, pid.epoch);
     builder.set_control_type();
+    builder.set_transactional_type();
     builder.add_raw_kw(
       std::move(key), std::nullopt, std::vector<model::record_header>());
 
@@ -136,7 +137,7 @@ rm_stm::rm_stm(ss::logger& logger, raft::consensus* c)
 }
 
 ss::future<checked<model::term_id, tx_errc>>
-rm_stm::begin_tx(model::producer_identity pid) {
+rm_stm::begin_tx(model::producer_identity pid, model::tx_seq tx_seq) {
     auto is_ready = co_await sync(_sync_timeout);
     if (!is_ready) {
         co_return tx_errc::stale;
@@ -163,11 +164,11 @@ rm_stm::begin_tx(model::producer_identity pid) {
               "Error \"{}\" on replicating pid:{} fencing batch",
               r.error(),
               pid);
-            co_return tx_errc::timeout;
+            co_return tx_errc::unknown_server_error;
         }
         if (!co_await wait_no_throw(
               model::offset(r.value().last_offset()), _sync_timeout)) {
-            co_return tx_errc::timeout;
+            co_return tx_errc::unknown_server_error;
         }
         fence_it = _log_state.fence_pid_epoch.find(pid.get_id());
         if (fence_it == _log_state.fence_pid_epoch.end()) {
@@ -176,7 +177,7 @@ rm_stm::begin_tx(model::producer_identity pid) {
               "Unexpected state: can't find fencing token by id after "
               "replicating {}",
               pid);
-            co_return tx_errc::timeout;
+            co_return tx_errc::unknown_server_error;
         }
     }
     if (pid.get_epoch() != fence_it->second) {
@@ -188,8 +189,9 @@ rm_stm::begin_tx(model::producer_identity pid) {
         co_return tx_errc::fenced;
     }
 
-    auto [_, inserted] = _mem_state.expected.insert(pid);
+    auto [_, inserted] = _mem_state.expected.emplace(pid, tx_seq);
     if (!inserted) {
+        // TODO: https://app.clubhouse.io/vectorized/story/2194
         // tm_stm forgot that it had already begun a transaction
         // (it may happen when it crashes)
         // it's ok we fail this request, a client will abort a
@@ -198,7 +200,7 @@ rm_stm::begin_tx(model::producer_identity pid) {
           clusterlog.error,
           "there is already an ongoing transaction within {} session",
           pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
 
     co_return _mem_state.term;
@@ -218,8 +220,13 @@ ss::future<tx_errc> rm_stm::prepare_tx(
         _mem_state = mem_state{.term = _insync_term};
     }
 
-    if (_log_state.prepared.contains(pid)) {
-        // a local tx was already prepared
+    auto prepared_it = _log_state.prepared.find(pid);
+    if (prepared_it != _log_state.prepared.end()) {
+        if (prepared_it->second.tx_seq != tx_seq) {
+            // current prepare_tx call is stale, rejecting
+            co_return tx_errc::request_rejected;
+        }
+        // a tx was already prepared
         co_return tx_errc::none;
     }
 
@@ -247,17 +254,24 @@ ss::future<tx_errc> rm_stm::prepare_tx(
         // current partition changed leadership since a transaction started
         // there is a chance that not all writes were replicated
         // rejecting a tx to prevent data loss
-        co_return tx_errc::timeout;
+        co_return tx_errc::request_rejected;
     }
 
-    if (!_mem_state.expected.contains(pid)) {
+    auto expected_it = _mem_state.expected.find(pid);
+    if (expected_it == _mem_state.expected.end()) {
         // impossible situation, a transaction coordinator tries
-        // to prepare a transaction whic wasn't started
+        // to prepare a transaction which wasn't started
         vlog(clusterlog.error, "Can't prepare pid:{} - unknown session", pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::request_rejected;
     }
 
-    auto [_, inserted] = _mem_state.has_prepare_applied.try_emplace(pid, false);
+    if (expected_it->second != tx_seq) {
+        // current prepare_tx call is stale, rejecting
+        co_return tx_errc::request_rejected;
+    }
+
+    auto [_, inserted] = _mem_state.preparing.try_emplace(
+      pid, preparing_info{.has_applied = false, .tx_seq = tx_seq});
     if (!inserted) {
         vlog(
           clusterlog.error,
@@ -280,25 +294,25 @@ ss::future<tx_errc> rm_stm::prepare_tx(
           "Error \"{}\" on replicating pid:{} prepare batch",
           r.error(),
           pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
 
     if (!co_await wait_no_throw(
           model::offset(r.value().last_offset()), timeout)) {
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
 
-    auto has_applied_it = _mem_state.has_prepare_applied.find(pid);
-    if (has_applied_it == _mem_state.has_prepare_applied.end()) {
+    auto preparing_it = _mem_state.preparing.find(pid);
+    if (preparing_it == _mem_state.preparing.end()) {
         vlog(
           clusterlog.warn,
           "Can't prepare pid:{} - already aborted or it's an invariant "
           "violation",
           pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
-    auto applied = has_applied_it->second;
-    _mem_state.has_prepare_applied.erase(pid);
+    auto applied = preparing_it->second.has_applied;
+    _mem_state.preparing.erase(pid);
 
     if (!applied) {
         vlog(
@@ -327,7 +341,7 @@ ss::future<tx_errc> rm_stm::commit_tx(
         _mem_state = mem_state{.term = _insync_term};
     }
 
-    if (_mem_state.has_prepare_applied.contains(pid)) {
+    if (_mem_state.preparing.contains(pid)) {
         // it looks like a violation since tm_stm commits only after
         // prepare succeeds but it's a legit rare situation:
         //   * tm_stm failed during prepare
@@ -365,9 +379,7 @@ ss::future<tx_errc> rm_stm::commit_tx(
           prepare_it->second.tx_seq,
           tx_seq);
         co_return tx_errc::none;
-    }
-
-    if (prepare_it->second.tx_seq < tx_seq) {
+    } else if (prepare_it->second.tx_seq < tx_seq) {
         if (_recovery_policy == best_effort) {
             vlog(
               clusterlog.error,
@@ -375,7 +387,7 @@ ss::future<tx_errc> rm_stm::commit_tx(
               "tx_seq:{} exists",
               tx_seq,
               prepare_it->second.tx_seq);
-            co_return tx_errc::timeout;
+            co_return tx_errc::request_rejected;
         } else {
             vassert(
               false,
@@ -386,7 +398,10 @@ ss::future<tx_errc> rm_stm::commit_tx(
         }
     }
 
-    auto batch = make_control_batch(pid, model::control_record_type::tx_commit);
+    // we commit only if a provided tx_seq matches prepared tx_seq
+
+    auto batch = make_tx_control_batch(
+      pid, model::control_record_type::tx_commit);
     auto reader = model::make_memory_record_batch_reader(std::move(batch));
     auto r = co_await _c->replicate(
       _insync_term,
@@ -399,37 +414,94 @@ ss::future<tx_errc> rm_stm::commit_tx(
           "Error \"{}\" on replicating pid:{} commit batch",
           r.error(),
           pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
     if (!co_await wait_no_throw(
           model::offset(r.value().last_offset()), timeout)) {
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
 
     co_return tx_errc::none;
+}
+
+rm_stm::abort_origin rm_stm::get_abort_origin(
+  const model::producer_identity& pid, model::tx_seq tx_seq) const {
+    auto expected_it = _mem_state.expected.find(pid);
+    if (expected_it != _mem_state.expected.end()) {
+        if (tx_seq < expected_it->second) {
+            return abort_origin::past;
+        }
+        if (expected_it->second < tx_seq) {
+            return abort_origin::future;
+        }
+    }
+
+    auto preparing_it = _mem_state.preparing.find(pid);
+    if (preparing_it != _mem_state.preparing.end()) {
+        if (tx_seq < preparing_it->second.tx_seq) {
+            return abort_origin::past;
+        }
+        if (preparing_it->second.tx_seq < tx_seq) {
+            return abort_origin::future;
+        }
+    }
+
+    auto prepared_it = _log_state.prepared.find(pid);
+    if (prepared_it != _log_state.prepared.end()) {
+        if (tx_seq < prepared_it->second.tx_seq) {
+            return abort_origin::past;
+        }
+        if (prepared_it->second.tx_seq < tx_seq) {
+            return abort_origin::future;
+        }
+    }
+
+    return abort_origin::present;
 }
 
 // abort_tx is invoked strictly after a tx is canceled on the tm_stm
 // the purpose of abort is to put tx_range into the list of aborted txes
 // and to fence off the old epoch
 ss::future<tx_errc> rm_stm::abort_tx(
-  model::producer_identity pid, model::timeout_clock::duration timeout) {
+  model::producer_identity pid,
+  model::tx_seq tx_seq,
+  model::timeout_clock::duration timeout) {
     // doesn't make sense to fence off an abort because transaction
     // manager has already decided to abort and acked to a client
 
     auto is_ready = co_await sync(timeout);
     if (!is_ready) {
-        co_return tx_errc::timeout;
+        co_return tx_errc::stale;
     }
     if (_mem_state.term != _insync_term) {
         _mem_state = mem_state{.term = _insync_term};
+    }
+
+    auto origin = get_abort_origin(pid, tx_seq);
+    if (origin == abort_origin::past) {
+        // rejecting a delayed abort command to prevent aborting
+        // a wrong transaction
+        co_return tx_errc::request_rejected;
+    }
+    if (origin == abort_origin::future) {
+        // impossible situation: before transactional coordinator may issue
+        // abort of the current transaction it should begin it and abort all
+        // previous transactions with the same pid
+        vlog(
+          clusterlog.error,
+          "Rejecting abort (pid:{}, tx_seq: {}) because it isn't consistent "
+          "with the current ongoing transaction",
+          pid,
+          tx_seq);
+        co_return tx_errc::request_rejected;
     }
 
     // preventing prepare and replicte once we
     // know we're going to abort tx and abandon pid
     _mem_state.expected.erase(pid);
 
-    auto batch = make_control_batch(pid, model::control_record_type::tx_abort);
+    auto batch = make_tx_control_batch(
+      pid, model::control_record_type::tx_abort);
     auto reader = model::make_memory_record_batch_reader(std::move(batch));
     auto r = co_await _c->replicate(
       _insync_term,
@@ -442,7 +514,7 @@ ss::future<tx_errc> rm_stm::abort_tx(
           "Error \"{}\" on replicating pid:{} abort batch",
           r.error(),
           pid);
-        co_return tx_errc::timeout;
+        co_return tx_errc::unknown_server_error;
     }
 
     // don't need to wait for apply because tx is already aborted on the
@@ -526,7 +598,7 @@ rm_stm::replicate_tx(model::batch_identity bid, model::record_batch_reader br) {
         co_return kafka::error_code::invalid_producer_epoch;
     }
 
-    if (_mem_state.has_prepare_applied.contains(bid.pid)) {
+    if (_mem_state.preparing.contains(bid.pid)) {
         vlog(
           clusterlog.warn,
           "Client keeps producing after initiating a prepare for pid:{}",
@@ -634,13 +706,13 @@ ss::future<std::vector<rm_stm::tx_range>>
 rm_stm::aborted_transactions(model::offset from, model::offset to) {
     std::vector<rm_stm::tx_range> result;
     for (auto& range : _log_state.aborted) {
-        if (range.second.last < from) {
+        if (range.last < from) {
             continue;
         }
-        if (range.second.first > to) {
+        if (range.first > to) {
             continue;
         }
-        result.push_back(range.second);
+        result.push_back(range);
     }
     co_return result;
 }
@@ -748,10 +820,10 @@ void rm_stm::apply_prepare(rm_stm::prepare_marker prepare) {
         return;
     }
 
-    if (_log_state.aborted.contains(pid)) {
-        // during a data race between replicating a prepare record
-        // and an abort record, the abort record won
-        vlog(clusterlog.warn, "Can't prepare an aborted tx (pid:{})", pid);
+    if (!_log_state.ongoing_map.contains(pid)) {
+        // probably there was a race and the tx is already
+        // aborted since it isn't ongoing
+        vlog(clusterlog.warn, "a tx with pid:{} might be already aborted", pid);
         _mem_state.expected.erase(pid);
         return;
     }
@@ -759,11 +831,11 @@ void rm_stm::apply_prepare(rm_stm::prepare_marker prepare) {
     _log_state.prepared.try_emplace(pid, prepare);
     _mem_state.expected.erase(pid);
 
-    auto has_applied_it = _mem_state.has_prepare_applied.find(pid);
-    if (has_applied_it != _mem_state.has_prepare_applied.end()) {
-        // _mem_state.has_prepare_applied may lack pid if
-        // this is processing og the historic prepare
-        has_applied_it->second = true;
+    auto preparing_it = _mem_state.preparing.find(pid);
+    if (preparing_it != _mem_state.preparing.end()) {
+        // _mem_state.preparing may lack pid if
+        // this is processing of the historic prepare
+        preparing_it->second.has_applied = true;
     }
 }
 
@@ -781,36 +853,17 @@ void rm_stm::apply_control(
     // manager already decided a tx's outcome and acked it to the client
 
     if (crt == model::control_record_type::tx_abort) {
-        if (_log_state.aborted.contains(pid)) {
-            // already aborted; but it's fine - a transaction
-            // coordinator may re(abort) a transaction on recovery
-            // or during concurrent init_tx
-            return;
-        }
-
         _log_state.prepared.erase(pid);
         auto offset_it = _log_state.ongoing_map.find(pid);
         if (offset_it != _log_state.ongoing_map.end()) {
-            _log_state.aborted.emplace(pid, offset_it->second);
+            // make a list
+            _log_state.aborted.push_back(offset_it->second);
             _log_state.ongoing_set.erase(offset_it->second.first);
             _log_state.ongoing_map.erase(pid);
         }
 
         _mem_state.forget(pid);
     } else if (crt == model::control_record_type::tx_commit) {
-        if (_log_state.aborted.contains(pid)) {
-            vlog(
-              clusterlog.error,
-              "Commit request with pid:{} came after tx is already aborted",
-              pid);
-            if (_recovery_policy != best_effort) {
-                vassert(
-                  false,
-                  "Commit request with pid:{} came after tx is already aborted",
-                  pid);
-            }
-        }
-
         if (!_log_state.prepared.contains(pid)) {
             // trying to commit a tx which wasn't prepare
 
@@ -868,20 +921,6 @@ void rm_stm::apply_data(model::batch_identity bid, model::offset last_offset) {
     }
 
     if (bid.is_transactional) {
-        if (_log_state.aborted.contains(bid.pid)) {
-            vlog(
-              clusterlog.error,
-              "Adding a record with pid:{} to a tx after it was aborted",
-              bid.pid);
-            if (_recovery_policy != best_effort) {
-                vassert(
-                  false,
-                  "Adding a record with pid:{} to a tx after it was aborted",
-                  bid.pid);
-            }
-            return;
-        }
-
         if (_log_state.prepared.contains(bid.pid)) {
             vlog(
               clusterlog.error,
@@ -934,9 +973,10 @@ void rm_stm::load_snapshot(stm_snapshot_header hdr, iobuf&& tx_ss_buf) {
     for (auto& entry : data.prepared) {
         _log_state.prepared.emplace(entry.pid, entry);
     }
-    for (auto& entry : data.aborted) {
-        _log_state.aborted.emplace(entry.pid, entry);
-    }
+    _log_state.aborted.insert(
+      _log_state.aborted.end(),
+      std::make_move_iterator(data.aborted.begin()),
+      std::make_move_iterator(data.aborted.end()));
     for (auto& entry : data.seqs) {
         auto [seq_it, _] = _log_state.seq_table.try_emplace(entry.pid, entry);
         if (seq_it->second.seq < entry.seq) {
@@ -962,7 +1002,7 @@ stm_snapshot rm_stm::take_snapshot() {
         tx_ss.prepared.push_back(entry.second);
     }
     for (auto& entry : _log_state.aborted) {
-        tx_ss.aborted.push_back(entry.second);
+        tx_ss.aborted.push_back(entry);
     }
     for (auto& entry : _log_state.seq_table) {
         tx_ss.seqs.push_back(entry.second);

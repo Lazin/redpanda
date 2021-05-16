@@ -80,6 +80,18 @@ path_type_map = {
         },
         "MemberId": ("kafka::member_id", "string"),
     },
+    "AddPartitionsToTxnRequestData": {
+        "Topics": {
+            "Partitions": ("model::partition_id", "int32")
+        }
+    },
+    "AddPartitionsToTxnResponseData": {
+        "Results": {
+            "Results": {
+                "PartitionIndex": ("model::partition_id", "int32")
+            }
+        }
+    },
     "TxnOffsetCommitRequestData": {
         "Topics": {
             "Partitions": {
@@ -214,6 +226,7 @@ path_type_map = {
     },
     "FetchRequestData": {
         "MaxWaitMs": ("std::chrono::milliseconds", "int32"),
+        "IsolationLevel": ("model::isolation_level", "int8"),
         "Topics": {
             "FetchPartitions": {
                 "PartitionIndex": ("model::partition_id", "int32"),
@@ -351,6 +364,9 @@ STRUCT_TYPES = [
     "MetadataRequestTopic",
     "MetadataResponseTopic",
     "MetadataResponsePartition",
+    "AddPartitionsToTxnTopic",
+    "AddPartitionsToTxnTopicResult",
+    "AddPartitionsToTxnPartitionResult",
     "TxnOffsetCommitRequestTopic",
     "TxnOffsetCommitResponseTopic",
     "TxnOffsetCommitResponsePartition",
@@ -716,7 +732,6 @@ namespace kafka {
 
 class request_reader;
 class response_writer;
-class request_context;
 class response;
 
 {% for struct in struct.structs() %}
@@ -826,7 +841,11 @@ writer.write({{ fname }});
 {
     auto tmp = reader.{{ decoder }};
     if (tmp) {
+{%- if named_type == "kafka::produce_request_record_data" %}
+        {{ fname }} = {{ named_type }}(std::move(*tmp), version);
+{%- else %}
         {{ fname }} = {{ named_type }}(std::move(*tmp));
+{%- endif %}
     }
 }
 {%- else %}
@@ -866,7 +885,7 @@ void {{ struct.name }}::decode(iobuf buf, [[maybe_unused]] api_version version) 
 void {{ struct.name }}::encode(response_writer&, api_version) {}
 void {{ struct.name }}::decode(request_reader&, api_version) {}
 {%- else %}
-void {{ struct.name }}::encode(const request_context&, response&) {}
+void {{ struct.name }}::encode(response_writer&, api_version&) {}
 void {{ struct.name }}::decode(iobuf, api_version) {}
 {%- endif %}
 {%- endif %}

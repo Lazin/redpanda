@@ -27,7 +27,7 @@ import LogService from "../utilities/Logging";
  */
 class Repository {
   private logger = LogService.createLogger("FileManager");
-
+  private wasmLogger = LogService.createLogger("coproc");
   constructor() {
     this.handles = new Map();
   }
@@ -132,10 +132,10 @@ class Repository {
     const results: ProcessBatchReplyItem[] = [];
     if (resultRecordBatch.size === 0) {
       /*
-       Coprocessor returns a empty Map, in this case, it responses to
-       empty process batch replay to Redpanda in order to avoid, send this
-       request again.
-      */
+             Coprocessor returns a empty Map, in this case, it responses to
+             empty process batch replay to Redpanda in order to avoid, send this
+             request again.
+            */
 
       results.push(this.createEmptyProcessBatchReplay(handle, requestItem));
     } else {
@@ -189,7 +189,7 @@ class Repository {
           }
           try {
             return handle.coprocessor
-              .apply(createRecordBatch(recordBatch))
+              .apply(createRecordBatch(recordBatch), this.wasmLogger)
               .then((resultMap) =>
                 this.validateResultApply(
                   requestItem,

@@ -20,6 +20,8 @@
 #include "cluster/security_frontend.h"
 #include "cluster/service.h"
 #include "cluster/topics_frontend.h"
+#include "cluster/tx_gateway.h"
+#include "cluster/tx_gateway_frontend.h"
 #include "config/configuration.h"
 #include "config/endpoint_tls_config.h"
 #include "config/seed_server.h"
@@ -31,8 +33,10 @@
 #include "kafka/server/queue_depth_monitor.h"
 #include "kafka/server/quota_manager.h"
 #include "model/metadata.h"
-#include "pandaproxy/configuration.h"
-#include "pandaproxy/proxy.h"
+#include "pandaproxy/rest/configuration.h"
+#include "pandaproxy/rest/proxy.h"
+#include "pandaproxy/schema_registry/configuration.h"
+#include "pandaproxy/schema_registry/service.h"
 #include "platform/stop_signal.h"
 #include "raft/service.h"
 #include "redpanda/admin_server.h"
@@ -62,10 +66,31 @@
 #include <exception>
 #include <vector>
 
-application::application(ss::sstring logger_name)
-  : _log(std::move(logger_name)){
+static void set_local_kafka_client_config(
+  std::optional<kafka::client::configuration>& client_config,
+  const config::configuration& config) {
+    client_config.emplace();
+    const auto& kafka_api = config.kafka_api.value();
+    vassert(!kafka_api.empty(), "There are no kafka_api listeners");
+    client_config->brokers.set_value(
+      std::vector<unresolved_address>{kafka_api[0].address});
+    const auto& kafka_api_tls = config::shard_local_cfg().kafka_api_tls.value();
+    auto tls_it = std::find_if(
+      kafka_api_tls.begin(),
+      kafka_api_tls.end(),
+      [&kafka_api](const config::endpoint_tls_config& tls) {
+          return tls.name == kafka_api[0].name;
+      });
+    if (tls_it != kafka_api_tls.end()) {
+        client_config->broker_tls.set_value(tls_it->config);
+    }
+}
 
-  };
+application::application(ss::sstring logger_name)
+  : _log(std::move(logger_name))
+  , _rm_group_proxy(std::ref(rm_group_frontend)){
+
+    };
 
 static void log_system_resources(
   ss::logger& log, const boost::program_options::variables_map& cfg) {
@@ -140,6 +165,8 @@ int application::run(int ac, char** av) {
 void application::initialize(
   std::optional<YAML::Node> proxy_cfg,
   std::optional<YAML::Node> proxy_client_cfg,
+  std::optional<YAML::Node> schema_reg_cfg,
+  std::optional<YAML::Node> schema_reg_client_cfg,
   std::optional<scheduling_groups> groups) {
     if (config::shard_local_cfg().enable_pid_file()) {
         syschecks::pidfile_create(config::shard_local_cfg().pidfile_path());
@@ -164,6 +191,13 @@ void application::initialize(
 
     if (proxy_client_cfg) {
         _proxy_client_config.emplace(*proxy_client_cfg);
+    }
+    if (schema_reg_cfg) {
+        _schema_reg_config.emplace(*schema_reg_cfg);
+    }
+
+    if (schema_reg_client_cfg) {
+        _schema_reg_client_config.emplace(*schema_reg_client_cfg);
     }
 }
 
@@ -236,25 +270,23 @@ void application::hydrate_config(const po::variables_map& cfg) {
         if (config["pandaproxy_client"]) {
             _proxy_client_config.emplace(config["pandaproxy_client"]);
         } else {
-            _proxy_client_config.emplace();
-            const auto& kafka_api = config::shard_local_cfg().kafka_api.value();
-            vassert(!kafka_api.empty(), "There are no kafka_api listeners");
-            _proxy_client_config->brokers.set_value(
-              std::vector<unresolved_address>{kafka_api[0].address});
-            const auto& kafka_api_tls
-              = config::shard_local_cfg().kafka_api_tls.value();
-            if (!kafka_api_tls.empty()) {
-                vassert(
-                  kafka_api[0].name == kafka_api_tls[0].name,
-                  "pandaproxy_client.broker_tls could not be inferred from "
-                  "kafka_api_tls: {}",
-                  kafka_api_tls);
-                _proxy_client_config->broker_tls.set_value(
-                  kafka_api_tls[0].config);
-            }
+            set_local_kafka_client_config(
+              _proxy_client_config, config::shard_local_cfg());
         }
         _proxy_config->for_each(config_printer("pandaproxy"));
         _proxy_client_config->for_each(config_printer("pandaproxy_client"));
+    }
+    if (config["schema_registry"]) {
+        _schema_reg_config.emplace(config["schema_registry"]);
+        if (config["schema_registry_client"]) {
+            _schema_reg_client_config.emplace(config["schema_registry_client"]);
+        } else {
+            set_local_kafka_client_config(
+              _schema_reg_client_config, config::shard_local_cfg());
+        }
+        _schema_reg_config->for_each(config_printer("schema_registry"));
+        _schema_reg_client_config->for_each(
+          config_printer("schema_registry_client"));
     }
 }
 
@@ -314,7 +346,8 @@ static storage::kvstore_config kvstore_config_from_global_config() {
       storage::debug_sanitize_files::no);
 }
 
-static storage::log_config manager_config_from_global_config() {
+static storage::log_config
+manager_config_from_global_config(scheduling_groups& sgs) {
     return storage::log_config(
       storage::log_config::storage_type::disk,
       config::shard_local_cfg().data_directory().as_sstring(),
@@ -333,7 +366,8 @@ static storage::log_config manager_config_from_global_config() {
         .min_size = config::shard_local_cfg().reclaim_min_size(),
         .max_size = config::shard_local_cfg().reclaim_max_size(),
       },
-      config::shard_local_cfg().readers_cache_eviction_timeout_ms());
+      config::shard_local_cfg().readers_cache_eviction_timeout_ms(),
+      sgs.compaction_sg());
 }
 
 // add additional services in here
@@ -347,7 +381,24 @@ void application::wire_up_services() {
           _proxy,
           to_yaml(*_proxy_config),
           smp_service_groups.proxy_smp_sg(),
+          // TODO: Improve memory budget for services
+          // https://github.com/vectorizedio/redpanda/issues/1392
+          memory_groups::kafka_total_memory(),
           std::reference_wrapper(_proxy_client))
+          .get();
+    }
+    if (_schema_reg_config) {
+        construct_service(
+          _schema_registry_client, to_yaml(*_schema_reg_client_config))
+          .get();
+        construct_service(
+          _schema_registry,
+          to_yaml(*_schema_reg_config),
+          smp_service_groups.proxy_smp_sg(),
+          // TODO: Improve memory budget for services
+          // https://github.com/vectorizedio/redpanda/issues/1392
+          memory_groups::kafka_total_memory(),
+          std::reference_wrapper(_schema_registry_client))
           .get();
     }
 }
@@ -364,7 +415,7 @@ void application::wire_up_redpanda_services() {
     construct_service(shard_table).get();
 
     syschecks::systemd_message("Intializing storage services").get();
-    auto log_cfg = manager_config_from_global_config();
+    auto log_cfg = manager_config_from_global_config(_scheduling_groups);
     log_cfg.reclaim_opts.background_reclaimer_sg
       = _scheduling_groups.cache_background_reclaim_sg();
     construct_service(storage, kvstore_config_from_global_config(), log_cfg)
@@ -526,6 +577,52 @@ void application::wire_up_redpanda_services() {
       std::ref(controller))
       .get();
 
+    syschecks::systemd_message("Creating group resource manager frontend")
+      .get();
+    construct_service(
+      rm_group_frontend,
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      controller.get(),
+      std::ref(coordinator_ntp_mapper),
+      std::ref(group_router))
+      .get();
+
+    syschecks::systemd_message("Creating partition resource manager frontend")
+      .get();
+    construct_service(
+      rm_partition_frontend,
+      smp_service_groups.raft_smp_sg(),
+      std::ref(partition_manager),
+      std::ref(shard_table),
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      controller.get())
+      .get();
+
+    syschecks::systemd_message("Creating tx coordinator frontend").get();
+    // usually it'a an anti-pattern to let the same object be accessed
+    // from different cores without precautionary measures like foreign
+    // ptr. we treat exceptions on the case by case basis validating the
+    // access patterns, sharing sharded service with only `.local()' uses
+    // is a safe bet, sharing _rm_group_proxy is fine because it wraps
+    // sharded service with only `.local()' access
+    construct_service(
+      tx_gateway_frontend,
+      smp_service_groups.raft_smp_sg(),
+      std::ref(partition_manager),
+      std::ref(shard_table),
+      std::ref(metadata_cache),
+      std::ref(_raft_connection_cache),
+      std::ref(controller->get_partition_leaders()),
+      controller.get(),
+      std::ref(id_allocator_frontend),
+      &_rm_group_proxy,
+      std::ref(rm_partition_frontend))
+      .get();
+
     ss::sharded<rpc::server_configuration> kafka_cfg;
     kafka_cfg.start(ss::sstring("kafka_rpc")).get();
     kafka_cfg
@@ -588,7 +685,7 @@ void application::wire_up_redpanda_services() {
 
 ss::future<> application::set_proxy_config(ss::sstring name, std::any val) {
     return _proxy.invoke_on_all(
-      [name{std::move(name)}, val{std::move(val)}](pandaproxy::proxy& p) {
+      [name{std::move(name)}, val{std::move(val)}](pandaproxy::rest::proxy& p) {
           p.config().get(name).set_value(val);
       });
 }
@@ -601,7 +698,7 @@ bool application::archival_storage_enabled() {
 ss::future<>
 application::set_proxy_client_config(ss::sstring name, std::any val) {
     return _proxy.invoke_on_all(
-      [name{std::move(name)}, val{std::move(val)}](pandaproxy::proxy& p) {
+      [name{std::move(name)}, val{std::move(val)}](pandaproxy::rest::proxy& p) {
           p.client_config().get(name).set_value(val);
       });
 }
@@ -612,11 +709,21 @@ void application::start() {
     }
 
     if (_proxy_config) {
-        _proxy.invoke_on_all(&pandaproxy::proxy::start).get();
+        _proxy.invoke_on_all(&pandaproxy::rest::proxy::start).get();
         vlog(
           _log.info,
           "Started Pandaproxy listening at {}",
           _proxy_config->pandaproxy_api());
+    }
+
+    if (_schema_reg_config) {
+        _schema_registry
+          .invoke_on_all(&pandaproxy::schema_registry::service::start)
+          .get();
+        vlog(
+          _log.info,
+          "Started Schema Registry listening at {}",
+          _schema_reg_config->schema_registry_api());
     }
 
     vlog(_log.info, "Successfully started Redpanda!");
@@ -663,6 +770,14 @@ void application::start_redpanda() {
             _scheduling_groups.raft_sg(),
             smp_service_groups.raft_smp_sg(),
             std::ref(id_allocator_frontend));
+          // _rm_group_proxy is wrap around a sharded service with only
+          // `.local()' access so it's ok to share without foreign_ptr
+          proto->register_service<cluster::tx_gateway>(
+            _scheduling_groups.raft_sg(),
+            smp_service_groups.raft_smp_sg(),
+            std::ref(tx_gateway_frontend),
+            &_rm_group_proxy,
+            std::ref(rm_partition_frontend));
           proto->register_service<
             raft::service<cluster::partition_manager, cluster::shard_table>>(
             _scheduling_groups.raft_sg(),
@@ -728,13 +843,13 @@ void application::start_redpanda() {
             partition_manager,
             coordinator_ntp_mapper,
             fetch_session_cache,
-            std::ref(id_allocator_frontend),
+            id_allocator_frontend,
             controller->get_credential_store(),
             controller->get_authorizer(),
             controller->get_security_frontend(),
-            qdc_config,
-            controller->get_api());
-
+            controller->get_api(),
+            tx_gateway_frontend,
+            qdc_config);
           s.set_protocol(std::move(proto));
       })
       .get();
