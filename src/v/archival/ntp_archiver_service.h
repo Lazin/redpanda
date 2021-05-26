@@ -67,6 +67,11 @@ std::ostream& operator<<(std::ostream& o, const configuration& cfg);
 /// generation of per-ntp candidate set. The actual file uploads are
 /// handled by 'archiver_service'.
 class ntp_archiver {
+    /// Timeout value used for manifest uploads and downloads.
+    static constexpr ss::lowres_clock::duration manifest_upload_timeout = 10s;
+    /// Timeout value used for segment uploads.
+    static constexpr ss::lowres_clock::duration segment_upload_timeout = 30s;
+
 public:
     /// Iterator type used to retrieve candidates for upload
     using back_insert_iterator

@@ -94,6 +94,10 @@ void ntp_upload_queue::copy_if(FwdIt out, const Func& pred) const {
 /// - Re-upload manifest(s)
 /// - Reset timer
 class scheduler_service_impl {
+    static constexpr ss::lowres_clock::duration
+      max_topic_manifest_upload_backoff
+      = 60s;
+
 public:
     /// \brief create scheduler service
     ///
