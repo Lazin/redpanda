@@ -486,7 +486,16 @@ void application::wire_up_redpanda_services() {
     auto log_cfg = manager_config_from_global_config(_scheduling_groups);
     log_cfg.reclaim_opts.background_reclaimer_sg
       = _scheduling_groups.cache_background_reclaim_sg();
+
     construct_service(storage, kvstore_config_from_global_config(), log_cfg)
+      .get();
+    storage
+      .invoke_on_all([](storage::api& api) {
+          return storage::s3_downloader::make_s3_config().then(
+            [&api](storage::s3_downloader_configuration cfg) {
+                api.configure_downloader(std::move(cfg));
+            });
+      })
       .get();
 
     if (coproc_enabled()) {

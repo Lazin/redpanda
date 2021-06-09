@@ -38,6 +38,8 @@ public:
         tristate<std::chrono::milliseconds> retention_time{std::nullopt};
         // if set, log will not use batch cache
         with_cache cache_enabled = with_cache::yes;
+        // if set the value will be used during parititon recovery
+        std::optional<ss::sstring> recovery_source;
 
         friend std::ostream&
         operator<<(std::ostream&, const default_overrides&);

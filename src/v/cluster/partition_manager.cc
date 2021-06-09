@@ -36,18 +36,30 @@ ss::future<consensus_ptr> partition_manager::manage(
   storage::ntp_config ntp_cfg,
   raft::group_id group,
   std::vector<model::broker> initial_nodes) {
-    return _storage.log_mgr()
-      .manage(std::move(ntp_cfg))
-      .then([this, group, nodes = std::move(initial_nodes)](
-              storage::log&& log) mutable {
-          return _raft_manager.local()
-            .create_group(group, std::move(nodes), log)
-            .then([this, log, group](ss::lw_shared_ptr<raft::consensus> c) {
-                auto p = ss::make_lw_shared<partition>(c);
-                _ntp_table.emplace(log.config().ntp(), p);
-                _raft_table.emplace(group, p);
-                _manage_watchers.notify(p->ntp(), p);
-                return p->start().then([c] { return c; });
+    return ss::do_with(
+      std::move(ntp_cfg),
+      [this, group, initial_nodes = std::move(initial_nodes)](
+        storage::ntp_config& ntp_cfg) mutable {
+          return _storage.downloader().download_log(ntp_cfg).then(
+            [this,
+             &ntp_cfg,
+             group,
+             initial_nodes = std::move(initial_nodes)]() mutable {
+                return _storage.log_mgr()
+                  .manage(std::move(ntp_cfg))
+                  .then([this, group, nodes = std::move(initial_nodes)](
+                          storage::log&& log) mutable {
+                      return _raft_manager.local()
+                        .create_group(group, std::move(nodes), log)
+                        .then([this, log, group](
+                                ss::lw_shared_ptr<raft::consensus> c) {
+                            auto p = ss::make_lw_shared<partition>(c);
+                            _ntp_table.emplace(log.config().ntp(), p);
+                            _raft_table.emplace(group, p);
+                            _manage_watchers.notify(p->ntp(), p);
+                            return p->start().then([c] { return c; });
+                        });
+                  });
             });
       });
 }

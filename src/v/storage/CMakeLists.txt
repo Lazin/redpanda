@@ -32,6 +32,7 @@ v_cc_library(
     readers_cache.cc
     backlog_controller.cc
     compaction_controller.cc
+    tiered_storage.cc
   DEPS
     Seastar::seastar
     v::bytes
@@ -42,6 +43,8 @@ v_cc_library(
     v::syschecks
     v::compression
     v::rprandom
+    v::s3
+    v::cloud_storage
     absl::flat_hash_map
     absl::btree
     Roaring::roaring

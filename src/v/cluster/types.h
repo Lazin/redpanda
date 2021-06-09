@@ -309,6 +309,7 @@ struct topic_properties {
     std::optional<size_t> segment_size;
     tristate<size_t> retention_bytes;
     tristate<std::chrono::milliseconds> retention_duration;
+    std::optional<ss::sstring> recovery_source;
 
     bool is_compacted() const;
     bool has_overrides() const;

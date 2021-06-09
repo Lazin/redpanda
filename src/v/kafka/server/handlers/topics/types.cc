@@ -9,6 +9,7 @@
 
 #include "kafka/server/handlers/topics/types.h"
 
+#include "cluster/types.h"
 #include "config/configuration.h"
 #include "model/compression.h"
 #include "model/fundamental.h"
@@ -95,6 +96,8 @@ cluster::topic_configuration to_cluster_type(const creatable_topic& t) {
     cfg.properties.retention_duration
       = get_tristate_value<std::chrono::milliseconds>(
         config_entries, topic_property_retention_duration);
+    cfg.properties.recovery_source = get_config_value<ss::sstring>(
+      config_entries, topic_property_recovery_source);
 
     return cfg;
 }
