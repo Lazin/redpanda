@@ -40,7 +40,7 @@ static constexpr std::array<std::string_view, 8> supported_configs{
    "compaction.strategy",
    "retention.bytes",
    "retention.ms",
-   "recovery.topic_manifest_path"}};
+   "recovery.source"}};
 
 bool is_supported(std::string_view name) {
     return std::any_of(

@@ -41,7 +41,7 @@ public:
     /// On success it should return content_length. On failure it should
     /// allow the exception from the input_stream to propagate.
     using try_consume_stream
-      = std::function<ss::future<uint64_t>(ss::input_stream<char>)>;
+      = std::function<ss::future<uint64_t>(uint64_t, ss::input_stream<char>)>;
 
     /// \brief Initialize 'remote'
     ///
@@ -65,10 +65,12 @@ public:
     /// Method downloads the manifest and handles backpressure and
     /// errors. It retries multiple times until timeout excedes.
     /// \param bucket is a bucket name
+    /// \param key is an object key of the manifest
     /// \param manifest is a manifest to download
     /// \return future that returns success code
     ss::future<download_result> download_manifest(
       const s3::bucket_name& bucket,
+      const remote_manifest_path& key,
       base_manifest& manifest,
       retry_chain_node& parent);
 
@@ -109,7 +111,7 @@ public:
     ss::future<download_result> download_segment(
       const s3::bucket_name& bucket,
       const segment_name& name,
-      manifest& manifest,
+      const manifest& manifest,
       const try_consume_stream& cons_str,
       retry_chain_node& parent);
 

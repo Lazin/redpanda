@@ -152,6 +152,15 @@ public:
     /// Return range with all available ntps
     bool contains(const model::ntp& ntp) const { return _queue.contains(ntp); }
 
+    /// Get remote that service uses
+    cloud_storage::remote& get_remote();
+
+    /// Get configured connection limit
+    size_t get_connection_limit();
+
+    /// Get configured bucket
+    s3::bucket_name get_bucket();
+
 private:
     /// Remove archivers from the workingset
     ss::future<> remove_archivers(std::vector<model::ntp> to_remove);
@@ -207,6 +216,15 @@ public:
 
     /// Generate configuration
     using internal::scheduler_service_impl::get_archival_service_config;
+
+    /// Get remote that service uses
+    using internal::scheduler_service_impl::get_remote;
+
+    /// Get configured connection limit
+    using internal::scheduler_service_impl::get_connection_limit;
+
+    /// Get configured bucket
+    using internal::scheduler_service_impl::get_bucket;
 };
 
 } // namespace archival

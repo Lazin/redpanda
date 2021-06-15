@@ -71,6 +71,8 @@ class ntp_archiver {
     static constexpr ss::lowres_clock::duration manifest_upload_timeout = 10s;
     /// Timeout value used for segment uploads.
     static constexpr ss::lowres_clock::duration segment_upload_timeout = 30s;
+    /// Timeout value used for manifest uploads and downloads.
+    static constexpr ss::lowres_clock::duration initial_backoff_duration = 100ms;
 
 public:
     /// Iterator type used to retrieve candidates for upload
