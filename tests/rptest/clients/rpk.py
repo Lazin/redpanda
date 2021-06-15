@@ -37,6 +37,15 @@ class RpkTool:
         cmd += ["--partitions", str(partitions)]
         return self._run_api(cmd)
 
+    def create_topic_advanced(self, topic, partitions, replicas, config):
+        cfg = [f"{k}:{v}" for k, v in config.items()]
+        cmd = ["topic", "create", topic]
+        cmd += ["--partitions", str(partitions)]
+        cmd += ["--replicas", str(replicas)]
+        for it in cfg:
+            cmd += ["--topic-config", it]
+        return self._run_api(cmd)
+
     def list_topics(self):
         cmd = ["topic", "list"]
 
@@ -107,10 +116,7 @@ class RpkTool:
         return self._execute(cmd)
 
     def _run_api(self, cmd, stdin=None, timeout=30):
-        cmd = [
-            self._rpk_binary(), "api", "--brokers",
-            self._redpanda.brokers(1)
-        ] + cmd
+        cmd = [ self._rpk_binary() ] + cmd  + [ "--brokers", self._redpanda.brokers() ]
         return self._execute(cmd, stdin=stdin, timeout=timeout)
 
     def _execute(self, cmd, stdin=None, timeout=30):

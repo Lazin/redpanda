@@ -11,32 +11,34 @@
 
 #pragma once
 
+#include "s3/client.h"
 #include "seastarx.h"
 #include "storage/kvstore.h"
 #include "storage/log_manager.h"
 #include "storage/tiered_storage.h"
 
+#include <seastar/core/shared_ptr.hh>
+
 namespace storage {
 
 class api {
 public:
-    api(kvstore_config kv_conf, log_config log_conf) noexcept
+    api(
+      kvstore_config kv_conf, log_config log_conf, size_t max_conn = 3) noexcept
       : _kv_conf(std::move(kv_conf))
-      , _log_conf(std::move(log_conf)) {}
+      , _log_conf(std::move(log_conf))
+      , _max_s3_connections(max_conn)
+      , _downloader(std::make_unique<topic_downloader>(_max_s3_connections)) {}
 
     ss::future<> start() {
         _kvstore = std::make_unique<kvstore>(_kv_conf);
-        _downloader = std::make_unique<s3_downloader>(_dl_conf);
         return _kvstore->start().then([this] {
             _log_mgr = std::make_unique<log_manager>(_log_conf, kvs());
         });
     }
 
-    /// Provide downloader configuration.
-    /// Configuration initialization is futurized, so we can't initialize
-    /// it in c-tor (because api c-tor is invoked indirectly by the ss::sharded)
-    void configure_downloader(s3_downloader_configuration cfg) {
-        _dl_conf = std::move(cfg);
+    void set_remote(s3::bucket_name bucket, cloud_storage::remote& remote) {
+        _downloader->set_remote(std::move(bucket), &remote);
     }
 
     ss::future<> stop() {
@@ -55,16 +57,16 @@ public:
 
     kvstore& kvs() { return *_kvstore; }
     log_manager& log_mgr() { return *_log_mgr; }
-    s3_downloader& downloader() { return *_downloader; }
+    topic_downloader& downloader() { return *_downloader; }
 
 private:
     kvstore_config _kv_conf;
     log_config _log_conf;
-    s3_downloader_configuration _dl_conf;
+    size_t _max_s3_connections;
 
     std::unique_ptr<kvstore> _kvstore;
     std::unique_ptr<log_manager> _log_mgr;
-    std::unique_ptr<s3_downloader> _downloader;
+    std::unique_ptr<topic_downloader> _downloader;
 };
 
 } // namespace storage

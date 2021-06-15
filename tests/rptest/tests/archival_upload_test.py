@@ -118,9 +118,12 @@ def _parse_manifest_segment(manifest, sname, meta, remote_set, logger):
 
 
 class ArchivalTest(RedpandaTest):
-    topics = tuple([TopicSpec(name=f'panda-topic-{ix}',
-                        partition_count=10,
-                        replication_factor=3) for ix in range(0, 10)])
+    topics = (TopicSpec(name=f'panda-topic-0',
+                        partition_count=4,
+                        replication_factor=3),
+              TopicSpec(name=f'panda-topic-1',
+                        partition_count=4,
+                        replication_factor=1))
 
     GLOBAL_S3_BUCKET = "s3_bucket"
     GLOBAL_S3_REGION = "s3_region"
@@ -144,7 +147,7 @@ class ArchivalTest(RedpandaTest):
         if self.real_thing:
             extra_rp_conf = dict(
                 developer_mode=True,
-                disable_metrics=False,
+                disable_metrics=True,
                 cloud_storage_enabled=True,
                 cloud_storage_access_key=self.s3_access_key,
                 cloud_storage_secret_key=self.s3_secret_key,
@@ -162,7 +165,7 @@ class ArchivalTest(RedpandaTest):
             self.s3_secret_key = ArchivalTest.MINIO_SECRET_KEY
             extra_rp_conf = dict(
                 developer_mode=True,
-                disable_metrics=False,
+                disable_metrics=True,
                 cloud_storage_enabled=True,
                 cloud_storage_access_key=ArchivalTest.MINIO_ACCESS_KEY,
                 cloud_storage_secret_key=ArchivalTest.MINIO_SECRET_KEY,

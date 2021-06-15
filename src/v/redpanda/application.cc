@@ -487,15 +487,12 @@ void application::wire_up_redpanda_services() {
     log_cfg.reclaim_opts.background_reclaimer_sg
       = _scheduling_groups.cache_background_reclaim_sg();
 
-    construct_service(storage, kvstore_config_from_global_config(), log_cfg)
-      .get();
-    storage
-      .invoke_on_all([](storage::api& api) {
-          return storage::s3_downloader::make_s3_config().then(
-            [&api](storage::s3_downloader_configuration cfg) {
-                api.configure_downloader(std::move(cfg));
-            });
-      })
+    construct_service(
+      storage,
+      kvstore_config_from_global_config(),
+      log_cfg,
+      static_cast<size_t>(
+        config::shard_local_cfg().cloud_storage_max_connections()))
       .get();
 
     if (coproc_enabled()) {
@@ -574,6 +571,15 @@ void application::wire_up_redpanda_services() {
           std::ref(configs))
           .get();
         configs.stop().get();
+
+        // co-initialize storage to enable data recovery and tiered-storage
+        storage
+          .invoke_on_all([this](storage::api& api) {
+              api.set_remote(
+                archival_scheduler.local().get_bucket(),
+                archival_scheduler.local().get_remote());
+          })
+          .get();
     }
     // group membership
     syschecks::systemd_message("Creating partition manager").get();

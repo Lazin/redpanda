@@ -1,4 +1,4 @@
-#include "storage/s3_downloader.h"
+#include "storage/topic_downloader.h"
 
 #include "bytes/iobuf_istreambuf.h"
 #include "config/configuration.h"
@@ -25,15 +25,15 @@
 
 namespace storage {
 
-s3_downloader::s3_downloader(s3_downloader_configuration config)
+topic_downloader::topic_downloader(topic_downloader_configuration config)
   : _conf(std::move(config))
   , _dl_limit(config.num_connections()) {}
 
-s3_downloader::s3_downloader()
+topic_downloader::topic_downloader()
   : _conf(std::nullopt)
   , _dl_limit(1) {}
 
-s3_downloader::~s3_downloader() {
+topic_downloader::~topic_downloader() {
     vassert(_gate.is_closed(), "S3 downloader is not stopped properly");
 }
 
@@ -51,19 +51,19 @@ static ss::sstring get_value_or_throw(
     return *opt;
 }
 
-ss::future<s3_downloader_configuration> s3_downloader::make_s3_config() {
+ss::future<topic_downloader_configuration> topic_downloader::make_s3_config() {
     auto secret_key = s3::private_key_str(get_value_or_throw(
-      config::shard_local_cfg().archival_storage_s3_secret_key,
+      config::shard_local_cfg().cloud_storage_secret_key,
       "archival_storage_s3_secret_key"));
     auto access_key = s3::public_key_str(get_value_or_throw(
-      config::shard_local_cfg().archival_storage_s3_access_key,
+      config::shard_local_cfg().cloud_storage_access_key,
       "archival_storage_s3_access_key"));
     auto region = s3::aws_region_name(get_value_or_throw(
-      config::shard_local_cfg().archival_storage_s3_region,
+      config::shard_local_cfg().cloud_storage_region,
       "archival_storage_s3_region"));
     auto s3_conf = co_await s3::configuration::make_configuration(
       access_key, secret_key, region);
-    s3_downloader_configuration dlconf{
+    topic_downloader_configuration dlconf{
       .client_config = std::move(s3_conf),
       .bucket = s3::bucket_name(get_value_or_throw(
         config::shard_local_cfg().archival_storage_s3_bucket,
@@ -74,7 +74,7 @@ ss::future<s3_downloader_configuration> s3_downloader::make_s3_config() {
     co_return std::move(dlconf);
 }
 
-ss::future<> s3_downloader::stop() {
+ss::future<> topic_downloader::stop() {
     if (!_cancel.abort_requested()) {
         // Just in case something is running in the background
         _cancel.request_abort();
@@ -82,9 +82,9 @@ ss::future<> s3_downloader::stop() {
     return _gate.close();
 }
 
-void s3_downloader::cancel() { _cancel.request_abort(); }
+void topic_downloader::cancel() { _cancel.request_abort(); }
 
-ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
+ss::future<> topic_downloader::download_log(const ntp_config& ntpc) {
     if (_conf) {
         vlog(stlog.info, "Check conditions for {} S3 recovery", ntpc.ntp());
         bool exists = co_await ss::file_exists(ntpc.work_directory());
@@ -109,7 +109,7 @@ ss::future<> s3_downloader::download_log(const ntp_config& ntpc) {
     co_return;
 }
 
-ss::future<> s3_downloader::download_log(
+ss::future<> topic_downloader::download_log(
   const s3::object_key& manifest_key, const ntp_config& ntpc) {
     auto prefix = std::filesystem::path(ntpc.work_directory());
     auto partitions = co_await download_topic_manifest(manifest_key);
@@ -184,7 +184,7 @@ static std::vector<s3_manifest_entry> parse_segments(
     return segments;
 }
 
-ss::future<std::vector<s3_manifest_entry>> s3_downloader::download_manifest(
+ss::future<std::vector<s3_manifest_entry>> topic_downloader::download_manifest(
   const s3::object_key& key, const ntp_config& ntp_cfg) {
     vlog(stlog.info, "Downloading manifest {}", key());
     using namespace rapidjson;
@@ -212,7 +212,7 @@ ss::future<std::vector<s3_manifest_entry>> s3_downloader::download_manifest(
 }
 
 ss::future<std::vector<s3::object_key>>
-s3_downloader::download_topic_manifest(const s3::object_key& key) {
+topic_downloader::download_topic_manifest(const s3::object_key& key) {
     vlog(stlog.info, "Downloading topic manifest {}", key());
     using namespace rapidjson;
     iobuf tmp;
@@ -269,7 +269,7 @@ open_output_file_stream(const std::filesystem::path& path) {
     co_return std::move(stream);
 }
 
-ss::future<> s3_downloader::download_file(
+ss::future<> topic_downloader::download_file(
   const s3_manifest_entry& key, const std::filesystem::path& prefix) {
     s3::client cl(_conf->client_config);
     auto resp = co_await cl.get_object(
@@ -291,7 +291,7 @@ ss::future<> s3_downloader::download_file(
     co_return;
 }
 
-ss::future<> s3_downloader::remove_file(
+ss::future<> topic_downloader::remove_file(
   const s3_manifest_entry& key, const std::filesystem::path& prefix) {
     vlog(stlog.info, "removing file {}", prefix.string());
     auto localpath = prefix / std::filesystem::path(key.segment);

@@ -383,17 +383,23 @@ scheduler_service_impl::remove_archivers(std::vector<model::ntp> to_remove) {
 }
 
 ss::future<> scheduler_service_impl::reconcile_archivers() {
+    /*TODO: remove*/vlog(archival_log.debug, "Running reconciliation loop");
     gate_guard g(_gate);
     cluster::partition_manager& pm = _partition_manager.local();
     storage::api& api = _storage_api.local();
     storage::log_manager& lm = api.log_mgr();
     auto snapshot = lm.get_all_ntps();
+    /*TODO: remove*/for (const auto& s: snapshot) { vlog(archival_log.debug, "Snapshot ntp: {}", s.path());}
+    /*TODO: remove*/for (const auto& s: _queue) { vlog(archival_log.debug, "Queue ntp: {}", s.first.path());}
     std::vector<model::ntp> to_remove;
     std::vector<model::ntp> to_create;
     // find ntps that exist in _svc_per_ntp but no longer present in log_manager
     _queue.copy_if(
       std::back_inserter(to_remove), [&snapshot, &pm](const model::ntp& ntp) {
           auto p = pm.get(ntp);
+          /*TODO: remove*/ss::sstring t = "null";
+          /*TODO: remove*/if (p) { t = p->is_leader() ? "leader" : "not-leader"; }
+          /*TODO: remove*/vlog(archival_log.debug, "...queue check for {} - {}", ntp.path(), t);
           return !snapshot.contains(ntp) || !p || !p->is_leader();
       });
     // find new ntps that present in the snapshot only
@@ -403,6 +409,9 @@ ss::future<> scheduler_service_impl::reconcile_archivers() {
       std::back_inserter(to_create),
       [this, &pm](const model::ntp& ntp) {
           auto p = pm.get(ntp);
+          /*TODO: remove*/ss::sstring t = "null";
+          /*TODO: remove*/if (p) { t = p->is_leader() ? "leader" : "not-leader"; }
+          /*TODO: remove*/vlog(archival_log.debug, "...snapshot check for {} - {}", ntp.path(), t);
           return ntp.ns != model::redpanda_ns && !_queue.contains(ntp) && p
                  && p->is_leader();
       });
@@ -428,6 +437,18 @@ ss::future<> scheduler_service_impl::reconcile_archivers() {
               archival_log.error, "{} Failed to create archivers", _rtcnode());
         }
     }
+}
+
+cloud_storage::remote& scheduler_service_impl::get_remote() {
+    return _remote;
+}
+
+size_t scheduler_service_impl::get_connection_limit() {
+    return _conf.connection_limit();
+}
+
+s3::bucket_name scheduler_service_impl::get_bucket() {
+    return _conf.bucket_name;
 }
 
 ss::future<> scheduler_service_impl::run_uploads() {
