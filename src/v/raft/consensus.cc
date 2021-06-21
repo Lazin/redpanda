@@ -904,11 +904,12 @@ ss::future<std::error_code> consensus::replace_configuration(
       });
 }
 
-ss::future<> consensus::start() {
+ss::future<> consensus::start(bool logs_recovered) {
     vlog(_ctxlog.info, "Starting");
-    return _op_lock.with([this] {
+    return _op_lock.with([this, logs_recovered] {
         read_voted_for();
-
+        /*TODO: remove*/ vlog(
+          _ctxlog.info, "Starting with revision {}", _self.revision());
         return _configuration_manager
           .start(is_initial_state(), _self.revision())
           .then([this] { return hydrate_snapshot(); })
@@ -917,13 +918,17 @@ ss::future<> consensus::start() {
                 _ctxlog.debug,
                 "Starting raft bootstrap from {}",
                 _configuration_manager.get_highest_known_offset());
+              /*TODO: remove*/ vlog(
+                _ctxlog.info,
+                "Starting raft bootstrap with revision {}",
+                _self.revision());
               return details::read_bootstrap_state(
                 _log,
                 details::next_offset(
                   _configuration_manager.get_highest_known_offset()),
                 _as);
           })
-          .then([this](configuration_bootstrap_state st) {
+          .then([this, logs_recovered](configuration_bootstrap_state st) {
               auto lstats = _log.offsets();
               // if log term is newer than the one comming from voted_for state,
               // we reset voted_for state
@@ -931,6 +936,11 @@ ss::future<> consensus::start() {
                   _term = lstats.dirty_offset_term;
                   _voted_for = {};
               }
+              /*TODO: remove*/ vlog(
+                _ctxlog.info,
+                "Recovered, config revision: {}, _self revision: {}",
+                st.config().revision_id(),
+                _self.revision());
               /**
                * The configuration manager state may be divereged from the log
                * state, as log is flushed lazily, we have to make sure that the
@@ -944,7 +954,7 @@ ss::future<> consensus::start() {
                * We read some batches from the log and have to update the
                * configuration manager.
                */
-              if (st.config_batches_seen() > 0) {
+              if (logs_recovered == false && st.config_batches_seen() > 0) {
                   f = f.then([this, st = std::move(st)]() mutable {
                       return _configuration_manager.add(
                         st.prev_log_index(), st.release_config());

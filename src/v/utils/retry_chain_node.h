@@ -329,42 +329,20 @@ private:
     std::variant<std::monostate, retry_chain_node*, ss::abort_source*> _parent;
 };
 
-class retry_chain_log final {
+/// Logger that adds context from retry_chain_node to the output
+class retry_chain_logger final {
 public:
-    retry_chain_log(ss::logger& log, retry_chain_node& node)
+    /// Make logger that adds retry_chain_node id to every message
+    retry_chain_logger(ss::logger& log, retry_chain_node& node)
       : _log(log)
       , _node(node) {}
-
-    retry_chain_log(
+    /// Make logger that adds retry_chain_node id and custom string
+    /// to every message
+    retry_chain_logger(
       ss::logger& log, retry_chain_node& node, ss::sstring context)
       : _log(log)
       , _node(node)
       , _ctx(std::move(context)) {}
-
-    template<typename... Args>
-    void error(const char* format, Args&&... args) {
-        log(ss::log_level::error, format, std::forward<Args>(args)...);
-    }
-    template<typename... Args>
-    void warn(const char* format, Args&&... args) {
-        log(ss::log_level::warn, format, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    void info(const char* format, Args&&... args) {
-        log(ss::log_level::info, format, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    void debug(const char* format, Args&&... args) {
-        log(ss::log_level::debug, format, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    void trace(const char* format, Args&&... args) {
-        log(ss::log_level::trace, format, std::forward<Args>(args)...);
-    }
-
     template<typename... Args>
     void log(ss::log_level lvl, const char* format, Args&&... args) {
         if (_log.is_enabled(lvl)) {
@@ -378,6 +356,26 @@ public:
                 _log.log(lvl, "{}", _node(format, std::forward<Args>(args)...));
             }
         }
+    }
+    template<typename... Args>
+    void error(const char* format, Args&&... args) {
+        log(ss::log_level::error, format, std::forward<Args>(args)...);
+    }
+    template<typename... Args>
+    void warn(const char* format, Args&&... args) {
+        log(ss::log_level::warn, format, std::forward<Args>(args)...);
+    }
+    template<typename... Args>
+    void info(const char* format, Args&&... args) {
+        log(ss::log_level::info, format, std::forward<Args>(args)...);
+    }
+    template<typename... Args>
+    void debug(const char* format, Args&&... args) {
+        log(ss::log_level::debug, format, std::forward<Args>(args)...);
+    }
+    template<typename... Args>
+    void trace(const char* format, Args&&... args) {
+        log(ss::log_level::trace, format, std::forward<Args>(args)...);
     }
 
 private:

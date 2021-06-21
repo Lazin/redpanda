@@ -93,7 +93,7 @@ public:
       std::optional<std::reference_wrapper<recovery_throttle>>);
 
     /// Initial call. Allow for internal state recovery
-    ss::future<> start();
+    ss::future<> start(bool logs_recovered = false);
 
     /// Stop all communications.
     ss::future<> stop();

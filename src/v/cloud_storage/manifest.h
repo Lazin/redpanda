@@ -192,6 +192,10 @@ public:
         return manifest_type::partition;
     };
 
+    model::revision_id get_revision() const noexcept {
+        return _rev;
+    }
+
 private:
     /// Update manifest content from json document that supposed to be generated
     /// from manifest.json file

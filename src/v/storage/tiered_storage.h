@@ -43,7 +43,8 @@ public:
     /// The 'ntp_config' should have corresponding override. If override
     /// is not set nothing will happen and the returned future will be
     /// ready (not in failed state).
-    ss::future<> download_log(const ntp_config& ntp_cfg);
+    /// \return true if log was actually downloaded, false otherwise
+    ss::future<bool> download_log(const ntp_config& ntp_cfg);
 
 private:
     /// Download full log based on manifest data
@@ -61,6 +62,11 @@ private:
 
     ss::future<std::vector<cloud_storage::remote_manifest_path>>
     download_topic_manifest(const cloud_storage::remote_manifest_path& key);
+
+    /// Find all candidate partition manifests
+    ss::future<std::vector<cloud_storage::remote_manifest_path>>
+    find_matching_partition_manifests(
+      cloud_storage::topic_manifest& manifest, const ntp_config& cfg);
 
     ss::future<> download_file(
       const cloud_storage::segment_name& target,

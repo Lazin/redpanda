@@ -110,12 +110,12 @@ ss::future<result<raft::replicate_result>> partition::replicate(
     }
 }
 
-ss::future<> partition::start() {
+ss::future<> partition::start(bool logs_recovered) {
     auto ntp = _raft->ntp();
 
     _probe.setup_metrics(ntp);
 
-    auto f = _raft->start();
+    auto f = _raft->start(logs_recovered);
 
     if (is_id_allocator_topic(ntp)) {
         return f.then([this] { return _id_allocator_stm->start(); });

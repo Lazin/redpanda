@@ -439,4 +439,21 @@ ss::future<download_result> remote::download_segment(
     co_return download_result::timedout;
 }
 
+ss::future<> remote::list_objects(
+  const list_objects_consumer& cons,
+  const s3::bucket_name& bucket,
+  const std::optional<s3::object_key>& prefix) {
+    auto [client, deleter] = co_await _pool.acquire();
+    std::optional<s3::object_key> last_key;
+    s3::client::list_bucket_result res{
+      .is_truncated = false, .prefix = {}, .contents = {}};
+    while (res.is_truncated) {
+        auto res = co_await client->list_objects_v2(bucket, prefix, last_key);
+        // TODO: feed the content to the user supplied callback
+        // for x in res.content -> cons(x.key, x.last_modified, x.size_bytes)
+        // TODO: update last_key
+        throw "not implemented";
+    }
+}
+
 } // namespace cloud_storage

@@ -75,7 +75,8 @@ static const std::vector<s3_imposter_fixture::expectation>
   default_expectations({
     s3_imposter_fixture::expectation{
       .url = "/" + manifest_url, .body = ss::sstring(manifest_payload)},
-    s3_imposter_fixture::expectation{.url = "/" + segment_url, .body = "segment1"},
+    s3_imposter_fixture::expectation{
+      .url = "/" + segment_url, .body = "segment1"},
   });
 
 static manifest load_manifest_from_str(std::string_view v) {
