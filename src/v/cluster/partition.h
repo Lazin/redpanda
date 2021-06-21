@@ -36,7 +36,7 @@ public:
     explicit partition(consensus_ptr r);
 
     raft::group_id group() const { return _raft->group(); }
-    ss::future<> start();
+    ss::future<> start(bool logs_recovered = false);
     ss::future<> stop();
 
     ss::future<result<raft::replicate_result>>

@@ -91,7 +91,7 @@ public:
       storage::api&);
 
     /// Initial call. Allow for internal state recovery
-    ss::future<> start();
+    ss::future<> start(bool logs_recovered = false);
 
     /// Stop all communications.
     ss::future<> stop();

@@ -1,11 +1,10 @@
-#include "storage/topic_downloader.h"
-
 #include "bytes/iobuf_istreambuf.h"
 #include "config/configuration.h"
 #include "hashing/xx.h"
 #include "json/json.h"
 #include "s3/error.h"
 #include "storage/logger.h"
+#include "storage/topic_downloader.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file.hh>

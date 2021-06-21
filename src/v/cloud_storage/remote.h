@@ -19,6 +19,7 @@
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/loop.hh>
 
 namespace cloud_storage {
 
@@ -42,6 +43,12 @@ public:
     /// allow the exception from the input_stream to propagate.
     using try_consume_stream
       = std::function<ss::future<uint64_t>(uint64_t, ss::input_stream<char>)>;
+
+    /// Functor that should be provided by user when list_objects api is called.
+    /// It receives every key that matches the query as well as it's modifiation
+    /// time and size in bytes.
+    using list_objects_consumer = std::function<ss::stop_iteration(
+      ss::sstring, std::chrono::system_clock::time_point, size_t)>;
 
     /// \brief Initialize 'remote'
     ///
@@ -114,6 +121,11 @@ public:
       const manifest& manifest,
       const try_consume_stream& cons_str,
       retry_chain_node& parent);
+
+    ss::future<> list_objects(
+      const list_objects_consumer& cons,
+      const s3::bucket_name& bucktet,
+      const std::optional<s3::object_key>& prefix);
 
 private:
     s3::client_pool _pool;

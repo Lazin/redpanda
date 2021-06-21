@@ -44,20 +44,43 @@ ss::future<consensus_ptr> partition_manager::manage(
             [this,
              &ntp_cfg,
              group,
-             initial_nodes = std::move(initial_nodes)]() mutable {
+             initial_nodes = std::move(initial_nodes)](bool logs_recovered) mutable {
+                vlog(
+                  clusterlog.info,
+                  "Log download complete, ntp: {}, rev: {}",
+                  ntp_cfg.ntp(),
+                  ntp_cfg.get_revision());
                 return _storage.log_mgr()
                   .manage(std::move(ntp_cfg))
-                  .then([this, group, nodes = std::move(initial_nodes)](
+                  .then([this, group, nodes = std::move(initial_nodes), logs_recovered](
                           storage::log&& log) mutable {
+                      vlog(
+                        clusterlog.info,
+                        "Log created manage completed, ntp: {}, rev: {}, {} "
+                        "segments, {} bytes",
+                        log.config().ntp(),
+                        log.config().get_revision(),
+                        log.segment_count(),
+                        log.size_bytes());
                       return _raft_manager.local()
                         .create_group(group, std::move(nodes), log)
-                        .then([this, log, group](
+                        .then([this, log, group, logs_recovered](
                                 ss::lw_shared_ptr<raft::consensus> c) {
+                            vlog(
+                              clusterlog.info,
+                              "Consensus created rev: {}",
+                              c->config().revision_id());
                             auto p = ss::make_lw_shared<partition>(c);
+                            vlog(
+                              clusterlog.info,
+                              "Partition created, ntp: {}, rev: {}-{}",
+                              p->get_ntp_config().ntp(),
+                              p->get_ntp_config().get_revision(),
+                              p->get_revision_id());
                             _ntp_table.emplace(log.config().ntp(), p);
                             _raft_table.emplace(group, p);
                             _manage_watchers.notify(p->ntp(), p);
-                            return p->start().then([c] { return c; });
+                            return p->start(logs_recovered).then([c] { return c; });
                         });
                   });
             });
