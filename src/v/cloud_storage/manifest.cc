@@ -78,6 +78,13 @@ remote_manifest_path manifest::get_manifest_path() const {
 
 remote_segment_path
 manifest::get_remote_segment_path(const segment_name& name) const {
+    if (name().find('/') != ss::sstring::npos) {
+        // The 'name' contains full path instead of a log segment file name.
+        // For instance, '6fab5988/kafka/redpanda-test/5_6/80651-2-v1.log'
+        // instead of just '80651-2-v1.log'. This can happen if the manifest was
+        // generated during recovery process.
+        return remote_segment_path(std::filesystem::path(name()));
+    }
     auto path = ssx::sformat("{}_{}/{}", _ntp.path(), _rev(), name());
     uint32_t hash = xxhash_32(path.data(), path.size());
     return remote_segment_path(fmt::format("{:08x}/{}", hash, path));

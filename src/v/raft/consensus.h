@@ -93,6 +93,8 @@ public:
       std::optional<std::reference_wrapper<recovery_throttle>>);
 
     /// Initial call. Allow for internal state recovery
+    ///
+    /// \param logs_recovered set to true if the logs were downloaded from S3
     ss::future<> start(bool logs_recovered = false);
 
     /// Stop all communications.

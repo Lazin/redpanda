@@ -40,6 +40,26 @@ enum class manifest_type {
     partition,
 };
 
+/// Selected prefixes used to store manifest files
+static constexpr std::array<std::string_view, 16> manifest_prefixes = {{
+    "00000000",
+    "10000000",
+    "20000000",
+    "30000000",
+    "40000000",
+    "50000000",
+    "60000000",
+    "70000000",
+    "80000000",
+    "90000000",
+    "a0000000",
+    "b0000000",
+    "c0000000",
+    "d0000000",
+    "e0000000",
+    "f0000000",
+}};
+
 class base_manifest {
 public:
     virtual ~base_manifest() = default;
@@ -194,6 +214,10 @@ public:
 
     model::revision_id get_revision() const noexcept {
         return _rev;
+    }
+
+    void set_revision(model::revision_id id) noexcept {
+        _rev = id;
     }
 
 private:

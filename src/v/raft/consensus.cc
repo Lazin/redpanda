@@ -908,8 +908,6 @@ ss::future<> consensus::start(bool logs_recovered) {
     vlog(_ctxlog.info, "Starting");
     return _op_lock.with([this, logs_recovered] {
         read_voted_for();
-        /*TODO: remove*/ vlog(
-          _ctxlog.info, "Starting with revision {}", _self.revision());
         return _configuration_manager
           .start(is_initial_state(), _self.revision())
           .then([this] { return hydrate_snapshot(); })
@@ -918,10 +916,6 @@ ss::future<> consensus::start(bool logs_recovered) {
                 _ctxlog.debug,
                 "Starting raft bootstrap from {}",
                 _configuration_manager.get_highest_known_offset());
-              /*TODO: remove*/ vlog(
-                _ctxlog.info,
-                "Starting raft bootstrap with revision {}",
-                _self.revision());
               return details::read_bootstrap_state(
                 _log,
                 details::next_offset(
@@ -936,11 +930,6 @@ ss::future<> consensus::start(bool logs_recovered) {
                   _term = lstats.dirty_offset_term;
                   _voted_for = {};
               }
-              /*TODO: remove*/ vlog(
-                _ctxlog.info,
-                "Recovered, config revision: {}, _self revision: {}",
-                st.config().revision_id(),
-                _self.revision());
               /**
                * The configuration manager state may be divereged from the log
                * state, as log is flushed lazily, we have to make sure that the
@@ -952,7 +941,10 @@ ss::future<> consensus::start(bool logs_recovered) {
 
               /**
                * We read some batches from the log and have to update the
-               * configuration manager.
+               * configuration manager. If the log was downloaded from S3
+               * we should skip the step. Because the log could be produced
+               * on another machine its configuration batches contain data
+               * that doesn't make any sense in the local cluster.
                */
               if (logs_recovered == false && st.config_batches_seen() > 0) {
                   f = f.then([this, st = std::move(st)]() mutable {

@@ -59,9 +59,17 @@ private:
     ss::future<cloud_storage::manifest> download_manifest(
       const cloud_storage::remote_manifest_path& path,
       const ntp_config& ntp_cfg);
+    
+    struct recovery_material {
+        std::vector<cloud_storage::remote_manifest_path> paths;
+        cloud_storage::topic_manifest topic_manifest;
+    };
 
-    ss::future<std::vector<cloud_storage::remote_manifest_path>>
-    download_topic_manifest(const cloud_storage::remote_manifest_path& key);
+    /// Locate all data needed to recover single partition
+    ss::future<recovery_material>
+    find_recovery_material(
+      const cloud_storage::remote_manifest_path& key,
+      const ntp_config& ntp_cfg);
 
     /// Find all candidate partition manifests
     ss::future<std::vector<cloud_storage::remote_manifest_path>>

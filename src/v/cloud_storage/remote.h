@@ -46,9 +46,9 @@ public:
 
     /// Functor that should be provided by user when list_objects api is called.
     /// It receives every key that matches the query as well as it's modifiation
-    /// time and size in bytes.
+    /// time, size in bytes, and etag.
     using list_objects_consumer = std::function<ss::stop_iteration(
-      ss::sstring, std::chrono::system_clock::time_point, size_t)>;
+      ss::sstring, std::chrono::system_clock::time_point, size_t, ss::sstring)>;
 
     /// \brief Initialize 'remote'
     ///
@@ -122,10 +122,12 @@ public:
       const try_consume_stream& cons_str,
       retry_chain_node& parent);
 
-    ss::future<> list_objects(
+    ss::future<download_result> list_objects(
       const list_objects_consumer& cons,
       const s3::bucket_name& bucktet,
-      const std::optional<s3::object_key>& prefix);
+      const std::optional<s3::object_key>& prefix,
+  const std::optional<size_t>& max_keys,
+      retry_chain_node& parent);
 
 private:
     s3::client_pool _pool;
