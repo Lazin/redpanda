@@ -94,7 +94,8 @@ ss::future<cloud_storage::download_result>
 ntp_archiver::download_manifest(retry_chain_node& parent) {
     gate_guard guard{_gate};
     retry_chain_node fib(_manifest_upload_timeout, _initial_backoff, &parent);
-    vlog(archival_log.debug, "{} Downloading manifest for {}", fib(), _ntp);
+    retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
+    vlog(ctxlog.debug, "Downloading manifest for {}", _ntp);
     auto path = _manifest.get_manifest_path();
     auto key = cloud_storage::remote_manifest_path(
       std::filesystem::path(std::move(path)));
@@ -105,7 +106,8 @@ ss::future<cloud_storage::upload_result>
 ntp_archiver::upload_manifest(retry_chain_node& parent) {
     gate_guard guard{_gate};
     retry_chain_node fib(_manifest_upload_timeout, _initial_backoff, &parent);
-    vlog(archival_log.debug, "{} Uploading manifest for {}", fib(), _ntp);
+    retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
+    vlog(ctxlog.debug, "Uploading manifest for {}", _ntp);
     co_return co_await _remote.upload_manifest(_bucket, _manifest, fib);
 }
 
@@ -113,10 +115,10 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
   upload_candidate candidate, retry_chain_node& parent) {
     gate_guard guard{_gate};
     retry_chain_node fib(_segment_upload_timeout, _initial_backoff, &parent);
+    retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
     vlog(
-      archival_log.debug,
-      "{} Uploading segment for {}, exposed name {} offset {}, length {}",
-      fib(),
+      ctxlog.debug,
+      "Uploading segment for {}, exposed name {} offset {}, length {}",
       _ntp,
       candidate.exposed_name,
       candidate.starting_offset,
@@ -138,13 +140,10 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
 
 ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
   storage::log_manager& lm, retry_chain_node& parent) {
+    retry_chain_logger ctxlog(archival_log, parent, _ntp.path());
     gate_guard guard{_gate};
     auto mlock = co_await ss::get_units(_mutex, 1);
-    vlog(
-      archival_log.debug,
-      "{} Uploading next candidates called for {}",
-      parent(),
-      _ntp);
+    vlog(ctxlog.debug, "Uploading next candidates called for {}", _ntp);
     ntp_archiver::batch_result total{};
     // We have to increment last offset to guarantee progress.
     // The manifest's last offset contains committed_offset of the
@@ -160,18 +159,14 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
     std::vector<model::offset> deltas;
     for (size_t i = 0; i < _concurrency; i++) {
         vlog(
-          archival_log.debug,
-          "{} Uploading next candidates for {}, trying offset {}",
-          parent(),
+          ctxlog.debug,
+          "Uploading next candidates for {}, trying offset {}",
           _ntp,
           offset);
         auto upload = _policy.get_next_candidate(offset, lm);
         if (upload.source.get() == nullptr) {
             vlog(
-              archival_log.debug,
-              "{} Uploading next candidates for {}, ...skip",
-              parent(),
-              _ntp);
+              ctxlog.debug, "Uploading next candidates for {}, ...skip", _ntp);
             break;
         }
         if (_manifest.contains(upload.exposed_name)) {
@@ -179,9 +174,8 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
             // manifest doesn't match the actual data because it was uploaded by
             // different cluster or altered). We can just skip the segment.
             vlog(
-              archival_log.warn,
-              "{} Uploading next candidates for {}, attempt to re-upload {}",
-              parent(),
+              ctxlog.warn,
+              "Uploading next candidates for {}, attempt to re-upload {}",
               _ntp,
               upload);
             const auto& meta = _manifest.get(upload.exposed_name);
@@ -204,9 +198,8 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
     }
     if (flist.empty()) {
         vlog(
-          archival_log.debug,
-          "{} Uploading next candidates for {}, no uploads started ...skip",
-          parent(),
+          ctxlog.debug,
+          "Uploading next candidates for {}, no uploads started ...skip",
           _ntp);
         co_return total;
     }
@@ -223,17 +216,12 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
     }
     if (total.num_succeded != 0) {
         vlog(
-          archival_log.debug,
-          "{} Uploading next candidates for {}, re-uploading manifest file",
-          parent(),
+          ctxlog.debug,
+          "Uploading next candidates for {}, re-uploading manifest file",
           _ntp);
         auto res = co_await upload_manifest(parent);
         if (res != cloud_storage::upload_result::success) {
-            vlog(
-              archival_log.debug,
-              "{} Manifest upload for {} failed",
-              parent(),
-              _ntp);
+            vlog(ctxlog.debug, "Manifest upload for {} failed", _ntp);
         }
         _last_upload_time = ss::lowres_clock::now();
     }
