@@ -169,3 +169,13 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_difference) {
         BOOST_REQUIRE(c.size() == 0);
     }
 }
+
+SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing_long) {
+    std::filesystem::path path = "b0000000/meta/kafka/redpanda-test/4_2/manifest.json";
+    auto res = cloud_storage::get_manifest_path_components(path);
+    BOOST_REQUIRE(res->_origin == path);
+    BOOST_REQUIRE(res->_ns() == "kafka");
+    BOOST_REQUIRE(res->_topic() == "redpanda-test");
+    BOOST_REQUIRE(res->_part() == 4);
+    BOOST_REQUIRE(res->_rev() == 2);
+}

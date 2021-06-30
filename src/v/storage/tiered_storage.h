@@ -59,15 +59,14 @@ private:
     ss::future<cloud_storage::manifest> download_manifest(
       const cloud_storage::remote_manifest_path& path,
       const ntp_config& ntp_cfg);
-    
+
     struct recovery_material {
         std::vector<cloud_storage::remote_manifest_path> paths;
         cloud_storage::topic_manifest topic_manifest;
     };
 
     /// Locate all data needed to recover single partition
-    ss::future<recovery_material>
-    find_recovery_material(
+    ss::future<recovery_material> find_recovery_material(
       const cloud_storage::remote_manifest_path& key,
       const ntp_config& ntp_cfg);
 
@@ -76,10 +75,20 @@ private:
     find_matching_partition_manifests(
       cloud_storage::topic_manifest& manifest, const ntp_config& cfg);
 
-    ss::future<> download_file(
+    ss::future<std::filesystem::path> download_file(
       const cloud_storage::segment_name& target,
       const cloud_storage::manifest& manifest,
       const std::filesystem::path& prefix);
+
+    // ss::future<> download_log_with_capped_size(
+    //   const cloud_storage::manifest& manifest,
+    //   const std::filesystem::path& prefix,
+    //   size_t max_size);
+
+    // ss::future<> download_log_with_capped_time(
+    //   const cloud_storage::manifest& manifest,
+    //   const std::filesystem::path& prefix,
+    //   ss::lowres_clock::time_point time_boundary);
 
     s3::bucket_name _bucket;
     cloud_storage::remote* _remote;

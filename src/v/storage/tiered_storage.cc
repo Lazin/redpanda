@@ -30,14 +30,13 @@
 #include <rapidjson/rapidjson.h>
 #include <rapidjson/writer.h>
 
-#include <charconv>
 #include <exception>
 
 namespace storage {
 using namespace std::chrono_literals;
 
 static constexpr ss::lowres_clock::duration download_timeout = 300s;
-static constexpr ss::lowres_clock::duration initial_backoff  = 200ms;
+static constexpr ss::lowres_clock::duration initial_backoff = 200ms;
 
 /// Partition that we're trying to fetch from S3 is missing
 class missing_partition_exception final : public std::exception {
@@ -58,8 +57,6 @@ private:
 
 // TODO:
 // - initialize optionally (remote & bucket)
-// - scan s3 bucket for manifest partitions instead of computing the locations
-// - all manifests with revision <= topic revision are part of the topic
 
 topic_downloader::topic_downloader(size_t max_concurrency)
   : _root(_cancel)
@@ -130,148 +127,89 @@ ss::future<bool> topic_downloader::download_log(const ntp_config& ntpc) {
     co_return false;
 }
 
-struct manifest_path_components {
-    std::filesystem::path _origin;
-    model::ns _ns;
-    model::topic _topic;
-    model::partition_id _part;
-    model::revision_id _rev;
-};
-
-std::ostream& operator<<(std::ostream& s, const manifest_path_components& c) {
-    fmt::print(
-      s, "{{{}: {}-{}-{}-{}}}", c._origin, c._ns, c._topic, c._part, c._rev);
-    return s;
-}
-
-struct segment_path_components : manifest_path_components {
-    cloud_storage::segment_name _name;
-};
-
-std::ostream& operator<<(std::ostream& s, const segment_path_components& c) {
-    fmt::print(
-      s,
-      "{{{}: {}-{}-{}-{}-{}}}",
-      c._origin,
-      c._ns,
-      c._topic,
-      c._part,
-      c._rev,
-      c._name);
-    return s;
-}
-
-static bool same_ntp(const manifest_path_components& c, const model::ntp& ntp) {
+static bool same_ntp(
+  const cloud_storage::manifest_path_components& c, const model::ntp& ntp) {
     return c._ns == ntp.ns && c._topic == ntp.tp.topic
            && c._part == ntp.tp.partition;
 }
 
-static bool parse_partition_and_revision(
-  std::string_view s, manifest_path_components& comp) {
-    auto pos = s.find('_');
-    if (pos == std::string_view::npos) {
-        // Invalid segment file name
-        return false;
-    }
-    uint64_t res = 0;
-    // parse first component
-    auto sv = s.substr(0, pos);
-    auto e = std::from_chars(sv.data(), sv.data() + sv.size(), res);
-    if (e.ec != std::errc()) {
-        return false;
-    }
-    comp._part = model::partition_id(res);
-    // parse second component
-    sv = s.substr(pos + 1);
-    e = std::from_chars(sv.data(), sv.data() + sv.size(), res);
-    if (e.ec != std::errc()) {
-        return false;
-    }
-    comp._rev = model::revision_id(res);
-    return true;
-}
+// // Predicate used to exclude data that doesn't match the retention policy
+// using segment_predicate = std::function<bool(
+//   size_t segment_size, ss::lowres_clock::time_point upate_time)>;
 
-std::optional<manifest_path_components>
-get_manifest_path_components(const std::filesystem::path& path) {
-    // example: b0000000/meta/kafka/redpanda-test/4_2/manifest.json
-    enum {
-        ix_prefix,
-        ix_meta,
-        ix_namespace,
-        ix_topic,
-        ix_part_rev,
-        ix_file_name,
-        total_components
-    };
-    manifest_path_components res;
-    int ix = 0;
-    for (const auto& c : path) {
-        ss::sstring p = c.string();
-        switch (ix++) {
-        case ix_prefix:
-            break;
-        case ix_namespace:
-            res._ns = model::ns(std::move(p));
-            break;
-        case ix_topic:
-            res._topic = model::topic(std::move(p));
-            break;
-        case ix_part_rev:
-            if (!parse_partition_and_revision(p, res)) {
-                return std::nullopt;
-            }
-            break;
-        case ix_file_name:
-            if (p != "manifest.json") {
-                return std::nullopt;
-            }
-            break;
-        }
-    }
-    if (ix == total_components) {
-        return res;
-    }
-    return std::nullopt;
-}
+// // Parameters used to exclude data based on total size.
+// struct size_bound_deletion_parameters {
+//     size_t retention_bytes;
+// };
 
-std::optional<segment_path_components>
-get_segment_path_components(const std::filesystem::path& path) {
-    enum {
-        ix_prefix,
-        ix_namespace,
-        ix_topic,
-        ix_part_rev,
-        ix_segment_name,
-        total_components
-    };
-    segment_path_components res;
-    int ix = 0;
-    for (const auto& c : path) {
-        ss::sstring p = c.string();
-        switch (ix++) {
-        case ix_prefix:
-            break;
-        case ix_namespace:
-            res._ns = model::ns(std::move(p));
-            break;
-        case ix_topic:
-            res._topic = model::topic(std::move(p));
-            break;
-        case ix_part_rev:
-            if (!parse_partition_and_revision(p, res)) {
-                return std::nullopt;
-            }
-            break;
-        case ix_segment_name:
-            res._name = cloud_storage::segment_name(std::move(p));
-            break;
-        }
-    }
-    if (ix == total_components) {
-        return res;
-    }
-    return std::nullopt;
-}
+// // Parameters used to exclude data based on time.
+// struct time_bound_deletion_parameters {
+//     std::chrono::milliseconds retention_duration;
+// };
+
+// /// Retention policy that should be used during recovery
+// // using retention = std::variant<
+// //   std::monostate,
+// //   size_bound_deletion_parameters,
+// //   time_bound_deletion_parameters>;
+
+// static retention
+// get_retention_policy(const ntp_config::default_overrides& prop) {
+//     auto flags = prop.cleanup_policy_bitflags;
+//     if (
+//       flags
+//       && (flags.value() & model::cleanup_policy_bitflags::deletion)
+//            == model::cleanup_policy_bitflags::deletion) {
+//         if (prop.retention_bytes.has_value()) {
+//             return
+//             size_bound_deletion_parameters{prop.retention_bytes.value()};
+//         } else if (prop.retention_time.has_value()) {
+//             return
+//             time_bound_deletion_parameters{prop.retention_time.value()};
+//         }
+//     }
+//     return std::monostate();
+// }
+
+// static segment_predicate get_segment_predicate(const ntp_config& ntpc) {
+//     struct ret_visitor {
+//         ss::lowres_clock::time_point _time;
+//         size_t& _acc_size;
+//         bool operator()(const time_bound_deletion_parameters& p) const {
+//             auto now = ss::lowres_clock::now();
+//             auto delta = now - _time;
+//             return p.retention_duration > delta;
+//         }
+//         bool operator()(const size_bound_deletion_parameters& p) const {
+//             return _acc_size < p.retention_bytes;
+//         }
+//         bool operator()(std::monostate) const { return false; }
+//     };
+
+//     if (ntpc.has_overrides()) {
+//         const auto& overrides = ntpc.get_overrides();
+//         auto retention = get_retention_policy(overrides);
+
+//         size_t acc_size = 0;
+//         return [retention, acc_size](
+//                  size_t segment_size,
+//                  ss::lowres_clock::time_point upate_time) mutable {
+//             acc_size += segment_size;
+//             ret_visitor v{
+//               ._time = upate_time,
+//               ._acc_size = acc_size,
+//             };
+//             return std::visit(v, retention);
+//         };
+//     }
+//     return [](size_t, ss::lowres_clock::time_point update_time) {
+//         // NOTE: 2-weeks default value is used if we don't have any policy
+//         set constexpr static ss::lowres_clock::duration
+//         default_retention_time = 14*24*60*60s; auto now =
+//         ss::lowres_clock::now(); auto delta = now - update_time; return delta
+//         < default_retention_time;
+//     };
+// }
 
 // entry point for the whole thing
 ss::future<> topic_downloader::download_log(
@@ -307,9 +245,7 @@ ss::future<> topic_downloader::download_log(
             auto path = manifest.get_remote_segment_path(segm.first);
             offset_map.insert_or_assign(
               segm.second.base_offset,
-              segment{
-                  .full_path = path().native(),
-                  .meta = segm.second});
+              segment{.full_path = path().native(), .meta = segm.second});
         }
     }
     cloud_storage::manifest target(ntpc.ntp(), ntpc.get_revision());
@@ -320,7 +256,8 @@ ss::future<> topic_downloader::download_log(
         // To create a compound manifest we need to add full names (e.g.
         // 6fab5988/kafka/redpanda-test/5_6/80651-2-v1.log). Otherwise the
         // information in the manifest won't be suffecient.
-        target.add(cloud_storage::segment_name(kv.second.full_path), kv.second.meta);
+        target.add(
+          cloud_storage::segment_name(kv.second.full_path), kv.second.meta);
     }
     // Here the partition manifest 'target' may contain segments
     // that have different revision ids inside the path.
@@ -361,6 +298,21 @@ ss::future<> topic_downloader::download_log(
     co_return;
 }
 
+// ss::future<> topic_downloader::download_log_with_capped_size(
+//   const cloud_storage::manifest& manifest,
+//   const std::filesystem::path& prefix,
+//   size_t ) {
+//     // Sort by offset
+//     return ss::with_gate(_gate, [this, &manifest, prefix] {
+//         return ss::parallel_for_each(
+//           manifest, [this, &manifest, prefix](const auto& kv) {
+//               return ss::with_semaphore(_sem, 1, [this, kv, &manifest, prefix] {
+//                   return download_file(kv.first, manifest, prefix);
+//               });
+//           });
+//     });
+// }
+
 ss::future<> topic_downloader::download_log(
   const cloud_storage::manifest& manifest,
   const std::filesystem::path& prefix) {
@@ -368,7 +320,8 @@ ss::future<> topic_downloader::download_log(
         return ss::parallel_for_each(
           manifest, [this, &manifest, prefix](const auto& kv) {
               return ss::with_semaphore(_sem, 1, [this, kv, &manifest, prefix] {
-                  return download_file(kv.first, manifest, prefix);
+                  return download_file(kv.first, manifest, prefix)
+                    .discard_result();
               });
           });
     });
@@ -423,7 +376,7 @@ topic_downloader::find_matching_partition_manifests(
                       size_t,
                       const ss::sstring&) {
         std::filesystem::path path(key);
-        auto res = get_manifest_path_components(path);
+        auto res = cloud_storage::get_manifest_path_components(path);
         if (res.has_value() && same_ntp(*res, ntp) && res->_rev >= topic_rev) {
             vlog(ctxlog.debug, "Found matching manifest path: {}", *res);
             all_manifests.emplace_back(
@@ -448,7 +401,7 @@ open_output_file_stream(const std::filesystem::path& path) {
     co_return std::move(stream);
 }
 
-ss::future<> topic_downloader::download_file(
+ss::future<std::filesystem::path> topic_downloader::download_file(
   const cloud_storage::segment_name& target,
   const cloud_storage::manifest& manifest,
   const std::filesystem::path& prefix) {
@@ -484,6 +437,8 @@ ss::future<> topic_downloader::download_file(
         // it shouldn't prevent us from restoring the remaining data
         vlog(ctxlog.error, "Failed segment download for {}", target);
     }
+
+    co_return prefix / std::filesystem::path(target()).filename();
 }
 
 } // namespace storage

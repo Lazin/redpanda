@@ -33,9 +33,207 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 
 namespace cloud_storage {
+
+std::ostream& operator<<(std::ostream& s, const manifest_path_components& c) {
+    fmt::print(
+      s, "{{{}: {}-{}-{}-{}}}", c._origin, c._ns, c._topic, c._part, c._rev);
+    return s;
+}
+
+std::ostream& operator<<(std::ostream& s, const segment_path_components& c) {
+    fmt::print(
+      s,
+      "{{{}: {}-{}-{}-{}-{}}}",
+      c._origin,
+      c._ns,
+      c._topic,
+      c._part,
+      c._rev,
+      c._name);
+    return s;
+}
+
+static bool parse_partition_and_revision(
+  std::string_view s, manifest_path_components& comp) {
+    auto pos = s.find('_');
+    if (pos == std::string_view::npos) {
+        // Invalid segment file name
+        return false;
+    }
+    uint64_t res = 0;
+    // parse first component
+    auto sv = s.substr(0, pos);
+    auto e = std::from_chars(sv.data(), sv.data() + sv.size(), res);
+    if (e.ec != std::errc()) {
+        return false;
+    }
+    comp._part = model::partition_id(res);
+    // parse second component
+    sv = s.substr(pos + 1);
+    e = std::from_chars(sv.data(), sv.data() + sv.size(), res);
+    if (e.ec != std::errc()) {
+        return false;
+    }
+    comp._rev = model::revision_id(res);
+    return true;
+}
+
+std::optional<manifest_path_components>
+get_manifest_path_components(const std::filesystem::path& path) {
+    // example: b0000000/meta/kafka/redpanda-test/4_2/manifest.json
+    enum {
+        ix_prefix,
+        ix_meta,
+        ix_namespace,
+        ix_topic,
+        ix_part_rev,
+        ix_file_name,
+        total_components
+    };
+    manifest_path_components res;
+    int ix = 0;
+    for (const auto& c : path) {
+        ss::sstring p = c.string();
+        switch (ix++) {
+        case ix_prefix:
+            break;
+        case ix_namespace:
+            res._ns = model::ns(std::move(p));
+            break;
+        case ix_topic:
+            res._topic = model::topic(std::move(p));
+            break;
+        case ix_part_rev:
+            if (!parse_partition_and_revision(p, res)) {
+                return std::nullopt;
+            }
+            break;
+        case ix_file_name:
+            if (p != "manifest.json") {
+                return std::nullopt;
+            }
+            break;
+        }
+    }
+    if (ix == total_components) {
+        return res;
+    }
+    return std::nullopt;
+}
+
+/// Parse segment file name
+/// \return offset and success flag
+static std::tuple<model::offset, bool>
+parse_base_offset(const std::filesystem::path& path) {
+    static constexpr auto bad_result = std::make_tuple(model::offset(), false);
+    auto stem = path.stem().string();
+    // parse offset component
+    auto ix_off = stem.find('-');
+    if (ix_off == std::string::npos) {
+        return bad_result;
+    }
+    int64_t off = 0;
+    auto eo = std::from_chars(stem.data(), stem.data() + ix_off, off);
+    if (eo.ec != std::errc()) {
+        return bad_result;
+    }
+    return std::make_tuple(model::offset(off), true);
+}
+
+/// Parse segment file name
+/// \return offset, term id, and success flag
+static std::tuple<model::offset, model::term_id, bool>
+parse_segment_name(const std::filesystem::path& path) {
+    static constexpr auto bad_result = std::make_tuple(
+      model::offset(), model::term_id(), false);
+    auto stem = path.stem().string();
+    // parse offset component
+    auto ix_off = stem.find('-');
+    if (ix_off == std::string::npos) {
+        return bad_result;
+    }
+    int64_t off = 0;
+    auto eo = std::from_chars(stem.data(), stem.data() + ix_off, off);
+    if (eo.ec != std::errc()) {
+        return bad_result;
+    }
+    // parse term id
+    auto ix_term = stem.find('-', ix_off + 1);
+    if (ix_term == std::string::npos) {
+        return bad_result;
+    }
+    int64_t term = 0;
+    auto et = std::from_chars(
+      stem.data() + ix_off + 1, stem.data() + ix_term, term);
+    if (et.ec != std::errc()) {
+        return bad_result;
+    }
+    return std::make_tuple(model::offset(off), model::term_id(term), true);
+}
+
+std::optional<segment_path_components>
+get_segment_path_components(const std::filesystem::path& path) {
+    enum {
+        ix_prefix,
+        ix_namespace,
+        ix_topic,
+        ix_part_rev,
+        ix_segment_name,
+        total_components
+    };
+    segment_path_components res = {};
+    if (path.has_root_path() == false) {
+        // Shortcut, we're dealing with the segment name from manifest
+        auto [off, term, ok] = parse_segment_name(path);
+        if (!ok) {
+            return std::nullopt;
+        }
+        res._origin = path;
+        res._name = segment_name(path.string());
+        res._base_offset = off;
+        res._term = term;
+        return res;
+    }
+    int ix = 0;
+    for (const auto& c : path) {
+        ss::sstring p = c.string();
+        switch (ix++) {
+        case ix_prefix:
+            break;
+        case ix_namespace:
+            res._ns = model::ns(std::move(p));
+            break;
+        case ix_topic:
+            res._topic = model::topic(std::move(p));
+            break;
+        case ix_part_rev:
+            if (!parse_partition_and_revision(p, res)) {
+                return std::nullopt;
+            }
+            break;
+        case ix_segment_name:
+            res._name = cloud_storage::segment_name(std::move(p));
+            break;
+        }
+    }
+    if (ix == total_components) {
+        return res;
+    }
+    return std::nullopt;
+}
+
+bool manifest::offset_order::operator()(
+  const segment_name& lhs, const segment_name& rhs) const {
+    auto [lhs_off, lhs_ok] = parse_base_offset(std::filesystem::path(lhs()));
+    auto [rhs_off, rhs_ok] = parse_base_offset(std::filesystem::path(rhs()));
+    vassert(lhs_ok, "Invalid segment name {}", lhs);
+    vassert(rhs_ok, "Invalid segment name {}", rhs);
+    return lhs_off < rhs_off;
+}
 
 manifest::manifest()
   : _ntp()
@@ -99,6 +297,14 @@ model::revision_id manifest::get_revision_id() const { return _rev; }
 manifest::const_iterator manifest::begin() const { return _segments.begin(); }
 
 manifest::const_iterator manifest::end() const { return _segments.end(); }
+
+manifest::const_reverse_iterator manifest::rbegin() const {
+    return _segments.rbegin();
+}
+
+manifest::const_reverse_iterator manifest::rend() const {
+    return _segments.rend();
+}
 
 size_t manifest::size() const { return _segments.size(); }
 
