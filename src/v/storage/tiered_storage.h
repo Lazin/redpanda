@@ -22,16 +22,16 @@ namespace storage {
 
 /// Data recovery provider is used to download topic segments from S3 (or
 /// compatible storage) during topic re-creation process
-class data_recovery_provider {
+class partition_recovery_manager {
 public:
-    data_recovery_provider() = default;
+    partition_recovery_manager() = default;
 
-    data_recovery_provider(const data_recovery_provider&) = delete;
-    data_recovery_provider(data_recovery_provider&&) = delete;
-    data_recovery_provider& operator=(const data_recovery_provider&) = delete;
-    data_recovery_provider& operator=(data_recovery_provider&&) = delete;
+    partition_recovery_manager(const partition_recovery_manager&) = delete;
+    partition_recovery_manager(partition_recovery_manager&&) = delete;
+    partition_recovery_manager& operator=(const partition_recovery_manager&) = delete;
+    partition_recovery_manager& operator=(partition_recovery_manager&&) = delete;
 
-    ~data_recovery_provider();
+    ~partition_recovery_manager();
 
     ss::future<> stop();
 
@@ -48,29 +48,27 @@ public:
 
 private:
     s3::bucket_name _bucket;
-    cloud_storage::remote* _remote;
-    ss::abort_source _cancel;
+    cloud_storage::remote* _remote{nullptr};
     ss::gate _gate;
     retry_chain_node _root;
 };
 
 /// Topic downloader is used to download topic segments from S3 (or compatible
 /// storage) during topic re-creation
-class topic_downloader {
+class partition_downloader {
 public:
-    topic_downloader(
+    partition_downloader(
       const ntp_config& ntpc,
       cloud_storage::remote* remote,
       s3::bucket_name bucket,
-      ss::abort_source& as_root,
       ss::gate& gate_root,
       retry_chain_node& parent);
 
-    topic_downloader(const topic_downloader&) = delete;
-    topic_downloader(topic_downloader&&) = delete;
-    topic_downloader& operator=(const topic_downloader&) = delete;
-    topic_downloader& operator=(topic_downloader&&) = delete;
-    ~topic_downloader() = default;
+    partition_downloader(const partition_downloader&) = delete;
+    partition_downloader(partition_downloader&&) = delete;
+    partition_downloader& operator=(const partition_downloader&) = delete;
+    partition_downloader& operator=(partition_downloader&&) = delete;
+    ~partition_downloader() = default;
 
     /// Download full log based on manifest data.
     /// The 'ntp_config' should have corresponding override. If override
@@ -88,7 +86,7 @@ private:
       const std::filesystem::path& prefix);
 
     ss::future<cloud_storage::manifest>
-    download_manifest(const cloud_storage::remote_manifest_path& path) const;
+    download_manifest(const cloud_storage::remote_manifest_path& path);
 
     struct recovery_material {
         std::vector<cloud_storage::remote_manifest_path> paths;
@@ -96,14 +94,12 @@ private:
     };
 
     /// Locate all data needed to recover single partition
-    ss::future<recovery_material> find_recovery_material(
-      const cloud_storage::remote_manifest_path& key,
-      const ntp_config& ntp_cfg) const;
+    ss::future<recovery_material>
+    find_recovery_material(const cloud_storage::remote_manifest_path& key);
 
     /// Find all candidate partition manifests
     ss::future<std::vector<cloud_storage::remote_manifest_path>>
-    find_matching_partition_manifests(
-      cloud_storage::topic_manifest& manifest, const ntp_config& cfg);
+    find_matching_partition_manifests(cloud_storage::topic_manifest& manifest);
 
     ss::future<std::filesystem::path> download_file(
       const cloud_storage::segment_name& target,
@@ -117,25 +113,22 @@ private:
 
     using offset_map_t = absl::btree_map<model::offset, segment>;
 
-    ss::future<offset_map_t>
-    build_offset_map(const recovery_material& mat) const;
+    ss::future<offset_map_t> build_offset_map(const recovery_material& mat);
 
     ss::future<> download_log_with_capped_size(
-      offset_map_t offset_map,
+      const offset_map_t& offset_map,
       const cloud_storage::manifest& manifest,
       const std::filesystem::path& prefix,
-      size_t max_size,
-      retry_chain_logger& ctxlog);
+      size_t max_size);
 
     ss::future<> download_log_with_capped_time(
-      offset_map_t offset_map,
+      const offset_map_t& offset_map,
       const std::filesystem::path& prefix,
       ss::lowres_clock::duration time_boundary);
 
     const ntp_config& _ntpc;
     s3::bucket_name _bucket;
     cloud_storage::remote* _remote;
-    ss::abort_source& _cancel;
     ss::gate& _gate;
     retry_chain_node _rtcnode;
     retry_chain_logger _ctxlog;

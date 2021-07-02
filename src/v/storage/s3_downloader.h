@@ -18,7 +18,7 @@ namespace storage {
 using s3_max_attempts = named_type<size_t, struct s3_max_attempts_tag>;
 using s3_max_connections = named_type<size_t, struct s3_max_connections_tag>;
 
-struct topic_downloader_configuration {
+struct partition_downloader_configuration {
     s3::configuration client_config;
     s3::bucket_name bucket;
     s3_max_attempts num_retries;
@@ -39,18 +39,18 @@ struct s3_manifest_entry {
 /// local locations. It can download everything in a batch
 /// and handle errors (re-downloads files), fails if we ran
 /// out of space, etc.
-class topic_downloader {
+class partition_downloader {
 public:
-    explicit topic_downloader(topic_downloader_configuration config);
-    topic_downloader();
-    static ss::future<topic_downloader_configuration> make_s3_config();
+    explicit partition_downloader(partition_downloader_configuration config);
+    partition_downloader();
+    static ss::future<partition_downloader_configuration> make_s3_config();
 
-    topic_downloader(const topic_downloader& config) = delete;
-    topic_downloader(topic_downloader&& config) = delete;
-    topic_downloader& operator=(const topic_downloader& config) = delete;
-    topic_downloader& operator=(topic_downloader&& config) = delete;
+    partition_downloader(const partition_downloader& config) = delete;
+    partition_downloader(partition_downloader&& config) = delete;
+    partition_downloader& operator=(const partition_downloader& config) = delete;
+    partition_downloader& operator=(partition_downloader&& config) = delete;
 
-    ~topic_downloader();
+    ~partition_downloader();
 
     ss::future<> stop();
 
@@ -78,7 +78,7 @@ private:
     ss::future<> remove_file(
       const s3_manifest_entry& key, const std::filesystem::path& prefix);
 
-    std::optional<topic_downloader_configuration> _conf;
+    std::optional<partition_downloader_configuration> _conf;
     ss::abort_source _cancel;
     ss::gate _gate;
     ss::semaphore _dl_limit;

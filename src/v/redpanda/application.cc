@@ -500,12 +500,7 @@ void application::wire_up_redpanda_services() {
     log_cfg.reclaim_opts.background_reclaimer_sg
       = _scheduling_groups.cache_background_reclaim_sg();
 
-    construct_service(
-      storage,
-      kvstore_config_from_global_config(),
-      log_cfg,
-      static_cast<size_t>(
-        config::shard_local_cfg().cloud_storage_max_connections()))
+    construct_service(storage, kvstore_config_from_global_config(), log_cfg)
       .get();
 
     if (coproc_enabled()) {

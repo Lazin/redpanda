@@ -23,12 +23,10 @@ namespace storage {
 
 class api {
 public:
-    api(
-      kvstore_config kv_conf, log_config log_conf, size_t max_conn = 3) noexcept
+    api(kvstore_config kv_conf, log_config log_conf) noexcept
       : _kv_conf(std::move(kv_conf))
       , _log_conf(std::move(log_conf))
-      , _max_s3_connections(max_conn)
-      , _downloader(std::make_unique<topic_downloader>(_max_s3_connections)) {}
+      , _recovery_mgr(std::make_unique<partition_recovery_manager>()) {}
 
     ss::future<> start() {
         _kvstore = std::make_unique<kvstore>(_kv_conf);
@@ -38,7 +36,7 @@ public:
     }
 
     void set_remote(s3::bucket_name bucket, cloud_storage::remote& remote) {
-        _downloader->set_remote(std::move(bucket), &remote);
+        _recovery_mgr->set_remote(std::move(bucket), &remote);
     }
 
     ss::future<> stop() {
@@ -46,8 +44,8 @@ public:
         if (_log_mgr) {
             f = _log_mgr->stop();
         }
-        if (_downloader) {
-            f = f.then([this] { return _downloader->stop(); });
+        if (_recovery_mgr) {
+            f = f.then([this] { return _recovery_mgr->stop(); });
         }
         if (_kvstore) {
             f = f.then([this] { return _kvstore->stop(); });
@@ -57,16 +55,15 @@ public:
 
     kvstore& kvs() { return *_kvstore; }
     log_manager& log_mgr() { return *_log_mgr; }
-    topic_downloader& downloader() { return *_downloader; }
+    partition_recovery_manager& downloader() { return *_recovery_mgr; }
 
 private:
     kvstore_config _kv_conf;
     log_config _log_conf;
-    size_t _max_s3_connections;
 
     std::unique_ptr<kvstore> _kvstore;
     std::unique_ptr<log_manager> _log_mgr;
-    std::unique_ptr<topic_downloader> _downloader;
+    std::unique_ptr<partition_recovery_manager> _recovery_mgr;
 };
 
 } // namespace storage
