@@ -95,6 +95,7 @@ get_manifest_path_components(const std::filesystem::path& path) {
         total_components
     };
     manifest_path_components res;
+    res._origin = path;
     int ix = 0;
     for (const auto& c : path) {
         ss::sstring p = c.string();
@@ -127,8 +128,8 @@ get_manifest_path_components(const std::filesystem::path& path) {
 
 /// Parse segment file name
 /// \return offset and success flag
-static std::tuple<model::offset, bool>
-parse_base_offset(const std::filesystem::path& path) {
+std::tuple<model::offset, bool>
+get_base_offset(const std::filesystem::path& path) {
     static constexpr auto bad_result = std::make_tuple(model::offset(), false);
     auto stem = path.stem().string();
     // parse offset component
@@ -185,14 +186,14 @@ get_segment_path_components(const std::filesystem::path& path) {
         ix_segment_name,
         total_components
     };
-    segment_path_components res = {};
-    if (path.has_root_path() == false) {
+    segment_path_components res;
+    res._origin = path;
+    if (path.has_parent_path() == false) {
         // Shortcut, we're dealing with the segment name from manifest
         auto [off, term, ok] = parse_segment_name(path);
         if (!ok) {
             return std::nullopt;
         }
-        res._origin = path;
         res._name = segment_name(path.string());
         res._base_offset = off;
         res._term = term;
@@ -220,19 +221,17 @@ get_segment_path_components(const std::filesystem::path& path) {
             break;
         }
     }
-    if (ix == total_components) {
-        return res;
+    if (ix != total_components) {
+        return std::nullopt;
     }
-    return std::nullopt;
-}
-
-bool manifest::offset_order::operator()(
-  const segment_name& lhs, const segment_name& rhs) const {
-    auto [lhs_off, lhs_ok] = parse_base_offset(std::filesystem::path(lhs()));
-    auto [rhs_off, rhs_ok] = parse_base_offset(std::filesystem::path(rhs()));
-    vassert(lhs_ok, "Invalid segment name {}", lhs);
-    vassert(rhs_ok, "Invalid segment name {}", rhs);
-    return lhs_off < rhs_off;
+    auto [off, term, ok] = parse_segment_name(path);
+    if (!ok) {
+        return std::nullopt;
+    }
+    res._base_offset = off;
+    res._term = term;
+    res._is_full = true;
+    return res;
 }
 
 manifest::manifest()

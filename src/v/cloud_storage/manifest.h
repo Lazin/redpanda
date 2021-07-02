@@ -66,6 +66,10 @@ get_manifest_path_components(const std::filesystem::path& path);
 std::optional<segment_path_components>
 get_segment_path_components(const std::filesystem::path& path);
 
+/// Parse base offset from the segment path or segment name
+std::tuple<model::offset, bool>
+get_base_offset(const std::filesystem::path& path);
+
 struct serialized_json_stream {
     ss::input_stream<char> stream;
     size_t size_bytes;

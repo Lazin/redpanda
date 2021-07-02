@@ -11,6 +11,7 @@
 #include "s3/error.h"
 #include "storage/logger.h"
 #include "storage/ntp_config.h"
+#include "utils/gate_guard.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/file.hh>
@@ -31,6 +32,7 @@
 #include <rapidjson/writer.h>
 
 #include <exception>
+#include <variant>
 
 namespace storage {
 using namespace std::chrono_literals;
@@ -55,74 +57,92 @@ private:
     ss::sstring _msg;
 };
 
-// TODO:
-// - initialize optionally (remote & bucket)
-
-topic_downloader::topic_downloader(size_t max_concurrency)
-  : _root(_cancel)
-  , _sem{max_concurrency} {}
-
-topic_downloader::~topic_downloader() {
+data_recovery_provider::~data_recovery_provider() {
     vassert(_gate.is_closed(), "S3 downloader is not stopped properly");
 }
 
-void topic_downloader::set_remote(
-  s3::bucket_name bucket, cloud_storage::remote* remote) {
-    _remote = remote;
-    _bucket = std::move(bucket);
-}
-
-ss::future<> topic_downloader::stop() {
+ss::future<> data_recovery_provider::stop() {
     _cancel.request_abort();
     co_await _gate.close();
 }
 
-void topic_downloader::cancel() { _cancel.request_abort(); }
+void data_recovery_provider::set_remote(
+  s3::bucket_name bucket, cloud_storage::remote* remote) {
+    _bucket = std::move(bucket);
+    _remote = remote;
+}
 
-ss::future<bool> topic_downloader::download_log(const ntp_config& ntpc) {
+void data_recovery_provider::cancel() { _cancel.request_abort(); }
+
+/// Download full log based on manifest data.
+/// The 'ntp_config' should have corresponding override. If override
+/// is not set nothing will happen and the returned future will be
+/// ready (not in failed state).
+/// \return true if log was actually downloaded, false otherwise
+ss::future<bool>
+data_recovery_provider::download_log(const ntp_config& ntp_cfg) {
     if (_remote) {
-        retry_chain_logger ctxlog(stlog, _root, ntpc.ntp().path());
-        vlog(ctxlog.debug, "Check conditions for {} S3 recovery", ntpc.ntp());
-        if (!ntpc.has_overrides()) {
-            vlog(
-              ctxlog.debug, "No overrides for {} found, skipping", ntpc.ntp());
-            co_return false;
-        }
-        // TODO (evgeny): check the condition differently
-        bool exists = co_await ss::file_exists(ntpc.work_directory());
-        if (exists) {
-            co_return false;
-        }
-        auto name = ntpc.get_overrides().recovery_source;
-        if (!name.has_value()) {
-            vlog(
-              ctxlog.debug,
-              "No manifest override for {} found, skipping",
-              ntpc.ntp());
-            co_return false;
-        }
-        vlog(ctxlog.info, "Downloading log for {}", ntpc.ntp());
-        try {
-            co_await download_log(
-              cloud_storage::remote_manifest_path(std::filesystem::path(*name)),
-              ntpc);
-            co_return true;
-        } catch (...) {
-            // We can get here if the parttion manifest is missing (or some
-            // other failure is preventing us from recovering the partition). In
-            // this case the exception can't be propagated since the partition
-            // manager will retry and it will create an infinite loop.
-            //
-            // The only possible solution here is to discard the exception and
-            // continue with normal partition creation process.
-            //
-            // Normally, this will happen when one of the partitions doesn't
-            // have any data.
-            vlog(
-              ctxlog.error,
-              "Error during log recovery: {}",
-              std::current_exception());
-        }
+        topic_downloader downloader(
+          ntp_cfg, _remote, _bucket, _cancel, _gate, _root);
+        co_return co_await downloader.download_log();
+    }
+    co_return false;
+}
+
+topic_downloader::topic_downloader(
+  const ntp_config& ntpc,
+  cloud_storage::remote* remote,
+  s3::bucket_name bucket,
+  ss::abort_source& as_root,
+  ss::gate& gate_root,
+  retry_chain_node& parent)
+  : _ntpc(ntpc)
+  , _bucket(std::move(bucket))
+  , _remote(remote)
+  , _cancel(as_root)
+  , _gate(gate_root)
+  , _rtcnode(download_timeout, initial_backoff, &parent)
+  , _ctxlog(stlog, _rtcnode, ntpc.ntp().path()) {}
+
+ss::future<bool> topic_downloader::download_log() {
+    vlog(_ctxlog.debug, "Check conditions for S3 recovery");
+    if (!_ntpc.has_overrides()) {
+        vlog(_ctxlog.debug, "No overrides for {} found, skipping", _ntpc.ntp());
+        co_return false;
+    }
+    // TODO (evgeny): maybe check the condition differently
+    bool exists = co_await ss::file_exists(_ntpc.work_directory());
+    if (exists) {
+        co_return false;
+    }
+    auto name = _ntpc.get_overrides().recovery_source;
+    if (!name.has_value()) {
+        vlog(
+          _ctxlog.debug,
+          "No manifest override for {} found, skipping",
+          _ntpc.ntp());
+        co_return false;
+    }
+    vlog(_ctxlog.info, "Downloading log for {}", _ntpc.ntp());
+    try {
+        co_await download_log(
+          cloud_storage::remote_manifest_path(std::filesystem::path(*name)));
+        co_return true;
+    } catch (...) {
+        // We can get here if the parttion manifest is missing (or some
+        // other failure is preventing us from recovering the partition). In
+        // this case the exception can't be propagated since the partition
+        // manager will retry and it will create an infinite loop.
+        //
+        // The only possible solution here is to discard the exception and
+        // continue with normal partition creation process.
+        //
+        // Normally, this will happen when one of the partitions doesn't
+        // have any data.
+        vlog(
+          _ctxlog.error,
+          "Error during log recovery: {}",
+          std::current_exception());
     }
     co_return false;
 }
@@ -133,107 +153,59 @@ static bool same_ntp(
            && c._part == ntp.tp.partition;
 }
 
-// // Predicate used to exclude data that doesn't match the retention policy
-// using segment_predicate = std::function<bool(
-//   size_t segment_size, ss::lowres_clock::time_point upate_time)>;
+// Parameters used to exclude data based on total size.
+struct size_bound_deletion_parameters {
+    size_t retention_bytes;
+};
 
-// // Parameters used to exclude data based on total size.
-// struct size_bound_deletion_parameters {
-//     size_t retention_bytes;
-// };
+// Parameters used to exclude data based on time.
+struct time_bound_deletion_parameters {
+    std::chrono::milliseconds retention_duration;
+};
 
-// // Parameters used to exclude data based on time.
-// struct time_bound_deletion_parameters {
-//     std::chrono::milliseconds retention_duration;
-// };
+// Retention policy that should be used during recovery
+using retention = std::variant<
+  std::monostate,
+  size_bound_deletion_parameters,
+  time_bound_deletion_parameters>;
 
-// /// Retention policy that should be used during recovery
-// // using retention = std::variant<
-// //   std::monostate,
-// //   size_bound_deletion_parameters,
-// //   time_bound_deletion_parameters>;
+std::ostream& operator<<(std::ostream& o, const retention& r) {
+    if (std::holds_alternative<std::monostate>(r)) {
+        fmt::print(o, "{{none}}");
+    } else if (std::holds_alternative<size_bound_deletion_parameters>(r)) {
+        auto p = std::get<size_bound_deletion_parameters>(r);
+        fmt::print(o, "{{size-bytes: {}}}", p.retention_bytes);
+    } else if (std::holds_alternative<time_bound_deletion_parameters>(r)) {
+        auto p = std::get<time_bound_deletion_parameters>(r);
+        fmt::print(o, "{{time-ms: {}}}", p.retention_duration.count());
+    }
+    return o;
+}
 
-// static retention
-// get_retention_policy(const ntp_config::default_overrides& prop) {
-//     auto flags = prop.cleanup_policy_bitflags;
-//     if (
-//       flags
-//       && (flags.value() & model::cleanup_policy_bitflags::deletion)
-//            == model::cleanup_policy_bitflags::deletion) {
-//         if (prop.retention_bytes.has_value()) {
-//             return
-//             size_bound_deletion_parameters{prop.retention_bytes.value()};
-//         } else if (prop.retention_time.has_value()) {
-//             return
-//             time_bound_deletion_parameters{prop.retention_time.value()};
-//         }
-//     }
-//     return std::monostate();
-// }
+static retention
+get_retention_policy(const ntp_config::default_overrides& prop) {
+    auto flags = prop.cleanup_policy_bitflags;
+    if (
+      flags
+      && (flags.value() & model::cleanup_policy_bitflags::deletion)
+           == model::cleanup_policy_bitflags::deletion) {
+        if (prop.retention_bytes.has_value()) {
+            return size_bound_deletion_parameters{prop.retention_bytes.value()};
+        } else if (prop.retention_time.has_value()) {
+            return time_bound_deletion_parameters{prop.retention_time.value()};
+        }
+    }
+    return std::monostate();
+}
 
-// static segment_predicate get_segment_predicate(const ntp_config& ntpc) {
-//     struct ret_visitor {
-//         ss::lowres_clock::time_point _time;
-//         size_t& _acc_size;
-//         bool operator()(const time_bound_deletion_parameters& p) const {
-//             auto now = ss::lowres_clock::now();
-//             auto delta = now - _time;
-//             return p.retention_duration > delta;
-//         }
-//         bool operator()(const size_bound_deletion_parameters& p) const {
-//             return _acc_size < p.retention_bytes;
-//         }
-//         bool operator()(std::monostate) const { return false; }
-//     };
-
-//     if (ntpc.has_overrides()) {
-//         const auto& overrides = ntpc.get_overrides();
-//         auto retention = get_retention_policy(overrides);
-
-//         size_t acc_size = 0;
-//         return [retention, acc_size](
-//                  size_t segment_size,
-//                  ss::lowres_clock::time_point upate_time) mutable {
-//             acc_size += segment_size;
-//             ret_visitor v{
-//               ._time = upate_time,
-//               ._acc_size = acc_size,
-//             };
-//             return std::visit(v, retention);
-//         };
-//     }
-//     return [](size_t, ss::lowres_clock::time_point update_time) {
-//         // NOTE: 2-weeks default value is used if we don't have any policy
-//         set constexpr static ss::lowres_clock::duration
-//         default_retention_time = 14*24*60*60s; auto now =
-//         ss::lowres_clock::now(); auto delta = now - update_time; return delta
-//         < default_retention_time;
-//     };
-// }
-
-// entry point for the whole thing
-ss::future<> topic_downloader::download_log(
-  const cloud_storage::remote_manifest_path& manifest_key,
-  const ntp_config& ntpc) {
-    retry_chain_node caller(download_timeout, initial_backoff, &_root);
-    retry_chain_logger ctxlog(stlog, caller, ntpc.ntp().path());
-    auto prefix = std::filesystem::path(ntpc.work_directory());
-    vlog(
-      ctxlog.info,
-      "The target path: {}, ntp-config revision: {}",
-      prefix,
-      ntpc.get_revision());
-    auto mat = co_await find_recovery_material(manifest_key, ntpc);
+ss::future<topic_downloader::offset_map_t>
+topic_downloader::build_offset_map(const recovery_material& mat) const {
     // We have multiple versions of the same partition here, some segments
     // may overlap so we need to deduplicate. Also, to take retention into
     // account.
-    struct segment {
-        ss::sstring full_path;
-        cloud_storage::manifest::segment_meta meta;
-    };
-    absl::btree_map<model::offset, segment> offset_map;
+    offset_map_t offset_map;
     for (const auto& p : mat.paths) {
-        auto manifest = co_await download_manifest(p, ntpc);
+        auto manifest = co_await download_manifest(p);
         for (const auto& segm : manifest) {
             if (offset_map.contains(segm.second.base_offset)) {
                 auto committed = offset_map.at(segm.second.base_offset)
@@ -248,7 +220,23 @@ ss::future<> topic_downloader::download_log(
               segment{.full_path = path().native(), .meta = segm.second});
         }
     }
-    cloud_storage::manifest target(ntpc.ntp(), ntpc.get_revision());
+    co_return std::move(offset_map);
+}
+
+// entry point for the whole thing
+ss::future<> topic_downloader::download_log(
+  const cloud_storage::remote_manifest_path& manifest_key) {
+    auto prefix = std::filesystem::path(_ntpc.work_directory());
+    auto retention = get_retention_policy(_ntpc.get_overrides());
+    vlog(
+      _ctxlog.info,
+      "The target path: {}, ntp-config revision: {}, retention: {}",
+      prefix,
+      _ntpc.get_revision(),
+      retention);
+    auto mat = co_await find_recovery_material(manifest_key, _ntpc);
+    auto offset_map = co_await build_offset_map(mat);
+    cloud_storage::manifest target(_ntpc.ntp(), _ntpc.get_revision());
     for (const auto& kv : offset_map) {
         // Original manifests contain short names (e.g. 1029-4-v1.log).
         // This is because they belong to the same revision and the details are
@@ -262,11 +250,23 @@ ss::future<> topic_downloader::download_log(
     // Here the partition manifest 'target' may contain segments
     // that have different revision ids inside the path.
     if (target.size() == 0) {
-        throw missing_partition_exception(ntpc);
+        throw missing_partition_exception(_ntpc);
     }
-    co_await download_log(target, prefix);
+    if (std::holds_alternative<std::monostate>(retention)) {
+        co_await download_log(target, prefix);
+    } else if (std::holds_alternative<size_bound_deletion_parameters>(
+                 retention)) {
+        auto r = std::get<size_bound_deletion_parameters>(retention);
+        co_await download_log_with_capped_size(
+          std::move(offset_map), target, prefix, r.retention_bytes);
+    } else if (std::holds_alternative<time_bound_deletion_parameters>(
+                 retention)) {
+        auto r = std::get<time_bound_deletion_parameters>(retention);
+        co_await download_log_with_capped_time(
+          std::move(offset_map), prefix, r.retention_duration);
+    }
     auto upl_result = co_await _remote->upload_manifest(
-      _bucket, target, caller);
+      _bucket, target, _rtcnode);
     // If the manifest upload fails we can't continue
     // since it will damage the data in S3. The archival subsystem
     // will pick new partition after the leader will be elected. Then
@@ -280,17 +280,16 @@ ss::future<> topic_downloader::download_log(
 
     // Upload topic manifest for re-created topic (here we don't prevent
     // other partitions of the same topic to read old topic manifest if the
-    // revision is different). If the revision is the same there is no need
-    // to re-upload the topic manifest. The old one is valid for new topic.
-    if (mat.topic_manifest.get_revision() != ntpc.get_revision()) {
-        mat.topic_manifest.set_revision(ntpc.get_revision());
+    // revision is different).
+    if (mat.topic_manifest.get_revision() != _ntpc.get_revision()) {
+        mat.topic_manifest.set_revision(_ntpc.get_revision());
         upl_result = co_await _remote->upload_manifest(
-          _bucket, mat.topic_manifest, caller);
+          _bucket, mat.topic_manifest, _rtcnode);
         if (upl_result != cloud_storage::upload_result::success) {
             // That's probably fine since the archival subsystem will
             // re-upload topic manifest eventually.
             vlog(
-              ctxlog.warn,
+              _ctxlog.warn,
               "Failed to upload new topic manifest {} after recovery",
               target.get_manifest_path());
         }
@@ -298,20 +297,42 @@ ss::future<> topic_downloader::download_log(
     co_return;
 }
 
-// ss::future<> topic_downloader::download_log_with_capped_size(
-//   const cloud_storage::manifest& manifest,
-//   const std::filesystem::path& prefix,
-//   size_t ) {
-//     // Sort by offset
-//     return ss::with_gate(_gate, [this, &manifest, prefix] {
-//         return ss::parallel_for_each(
-//           manifest, [this, &manifest, prefix](const auto& kv) {
-//               return ss::with_semaphore(_sem, 1, [this, kv, &manifest, prefix] {
-//                   return download_file(kv.first, manifest, prefix);
-//               });
-//           });
-//     });
-// }
+ss::future<> topic_downloader::download_log_with_capped_size(
+  absl::btree_map<model::offset, segment> offset_map,
+  const cloud_storage::manifest& manifest,
+  const std::filesystem::path& prefix,
+  size_t max_size,
+  retry_chain_logger& ctxlog) {
+    vlog(ctxlog.info, "Starting log download with size limit at {}", max_size);
+    gate_guard guard(_gate);
+    size_t total_size = 0;
+    for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
+        const auto& meta = it->second.meta;
+        if (total_size > max_size) {
+            vlog(
+              ctxlog.debug,
+              "Max size {} reached, skipping {}",
+              total_size,
+              it->second.full_path);
+            break;
+        } else {
+            vlog(
+              ctxlog.debug,
+              "Downloading {}, total log size {}",
+              it->second.full_path,
+              total_size);
+        }
+        auto fname = cloud_storage::segment_name(
+          std::filesystem::path(it->second.full_path).filename().string());
+        co_await download_file(fname, manifest, prefix);
+        total_size += meta.size_bytes;
+    }
+}
+
+ss::future<> topic_downloader::download_log_with_capped_time(
+  offset_map_t offset_map,
+  const std::filesystem::path& prefix,
+  ss::lowres_clock::duration time_boundary) {}
 
 ss::future<> topic_downloader::download_log(
   const cloud_storage::manifest& manifest,
@@ -319,26 +340,21 @@ ss::future<> topic_downloader::download_log(
     return ss::with_gate(_gate, [this, &manifest, prefix] {
         return ss::parallel_for_each(
           manifest, [this, &manifest, prefix](const auto& kv) {
-              return ss::with_semaphore(_sem, 1, [this, kv, &manifest, prefix] {
-                  return download_file(kv.first, manifest, prefix)
-                    .discard_result();
-              });
+              return download_file(kv.first, manifest, prefix).discard_result();
           });
     });
 }
 
 ss::future<cloud_storage::manifest> topic_downloader::download_manifest(
-  const cloud_storage::remote_manifest_path& key, const ntp_config& ntp_cfg) {
-    retry_chain_node caller(download_timeout, initial_backoff, &_root);
-    retry_chain_logger ctxlog(stlog, caller, ntp_cfg.ntp().path());
+  const cloud_storage::remote_manifest_path& key) const {
     vlog(
-      ctxlog.info,
+      _ctxlog.info,
       "Downloading manifest {}, rev {}",
-      ntp_cfg.ntp().path(),
-      ntp_cfg.get_revision());
-    cloud_storage::manifest manifest(ntp_cfg.ntp(), ntp_cfg.get_revision());
+      _ntpc.ntp().path(),
+      _ntpc.get_revision());
+    cloud_storage::manifest manifest(_ntpc.ntp(), _ntpc.get_revision());
     auto result = co_await _remote->download_manifest(
-      _bucket, key, manifest, caller);
+      _bucket, key, manifest, _rtcnode);
     if (result != cloud_storage::download_result::success) {
         throw missing_partition_exception(ntp_cfg);
     }
@@ -347,7 +363,8 @@ ss::future<cloud_storage::manifest> topic_downloader::download_manifest(
 
 ss::future<topic_downloader::recovery_material>
 topic_downloader::find_recovery_material(
-  const cloud_storage::remote_manifest_path& key, const ntp_config& ntp_cfg) {
+  const cloud_storage::remote_manifest_path& key,
+  const ntp_config& ntp_cfg) const {
     retry_chain_node caller(download_timeout, initial_backoff, &_root);
     retry_chain_logger ctxlog(stlog, caller);
     vlog(ctxlog.info, "Downloading topic manifest {}", key);
