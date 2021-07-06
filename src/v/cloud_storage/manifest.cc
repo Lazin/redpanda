@@ -381,11 +381,16 @@ void manifest::update(const rapidjson::Document& m) {
             auto coffs = it->value["committed_offset"].GetInt64();
             auto boffs = it->value["base_offset"].GetInt64();
             auto size_bytes = it->value["size_bytes"].GetInt64();
+            model::timestamp max_timestamp = model::timestamp::missing();
+            if (it->value.HasMember("max_timestamp")) {
+                max_timestamp = model::timestamp(it->value["max_timestamp"].GetInt64());
+            }
             segment_meta meta{
               .is_compacted = it->value["is_compacted"].GetBool(),
               .size_bytes = static_cast<size_t>(size_bytes),
               .base_offset = model::offset(boffs),
               .committed_offset = model::offset(coffs),
+              .max_timestamp = max_timestamp,
             };
             tmp.insert(std::make_pair(name, meta));
         }
@@ -435,6 +440,10 @@ void manifest::serialize(std::ostream& out) const {
             w.Int64(meta.committed_offset());
             w.Key("base_offset");
             w.Int64(meta.base_offset());
+            if (meta.max_timestamp != model::timestamp::missing()) {
+                w.Key("max_timestamp");
+                w.Int64(meta.max_timestamp.value());
+            }
             w.EndObject();
         }
         w.EndObject();

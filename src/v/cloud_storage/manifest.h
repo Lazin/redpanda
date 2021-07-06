@@ -130,6 +130,7 @@ public:
         size_t size_bytes;
         model::offset base_offset;
         model::offset committed_offset;
+        model::timestamp max_timestamp;
 
         auto operator<=>(const segment_meta&) const = default;
     };

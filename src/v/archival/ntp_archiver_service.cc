@@ -237,6 +237,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
           .size_bytes = upload.content_length,
           .base_offset = upload.starting_offset,
           .committed_offset = upload.source->offsets().committed_offset,
+          .max_timestamp = upload.source->index().max_timestamp(),
         };
         meta.emplace_back(m);
         names.emplace_back(upload.exposed_name);

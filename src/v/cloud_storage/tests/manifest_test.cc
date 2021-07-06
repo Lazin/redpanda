@@ -56,7 +56,8 @@ static constexpr std::string_view complete_manifest_json = R"json({
             "is_compacted": false,
             "size_bytes": 2048,
             "base_offset": 20,
-            "committed_offset": 29
+            "committed_offset": 29,
+            "max_timestamp": 1234567890
         }
     }
 })json";
@@ -104,7 +105,11 @@ SEASTAR_THREAD_TEST_CASE(test_complete_manifest_update) {
          false, 1024, model::offset(10), model::offset(19)}},
       {"20-1-v1.log",
        manifest::segment_meta{
-         false, 2048, model::offset(20), model::offset(29)}}};
+         false,
+         2048,
+         model::offset(20),
+         model::offset(29),
+         model::timestamp(1234567890)}}};
     for (const auto& actual : m) {
         auto it = expected.find(actual.first);
         BOOST_REQUIRE(it != expected.end());
@@ -114,6 +119,8 @@ SEASTAR_THREAD_TEST_CASE(test_complete_manifest_update) {
         BOOST_REQUIRE_EQUAL(
           it->second.is_compacted, actual.second.is_compacted);
         BOOST_REQUIRE_EQUAL(it->second.size_bytes, actual.second.size_bytes);
+        BOOST_REQUIRE_EQUAL(
+          it->second.max_timestamp, actual.second.max_timestamp);
     }
 }
 
@@ -126,6 +133,7 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_serialization) {
         .size_bytes = 1024,
         .base_offset = model::offset(10),
         .committed_offset = model::offset(19),
+        .max_timestamp = model::timestamp::missing(),
       });
     m.add(
       segment_name("20-1-v1.log"),
@@ -134,6 +142,7 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_serialization) {
         .size_bytes = 2048,
         .base_offset = model::offset(20),
         .committed_offset = model::offset(29),
+        .max_timestamp = model::timestamp::missing(),
       });
     auto [is, size] = m.serialize();
     iobuf buf;
@@ -171,7 +180,8 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_difference) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing) {
-    std::filesystem::path path = "b0000000/meta/kafka/redpanda-test/4_2/manifest.json";
+    std::filesystem::path path
+      = "b0000000/meta/kafka/redpanda-test/4_2/manifest.json";
     auto res = cloud_storage::get_manifest_path_components(path);
     BOOST_REQUIRE_EQUAL(res->_origin, path);
     BOOST_REQUIRE_EQUAL(res->_ns(), "kafka");
@@ -181,25 +191,29 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing_failure_1) {
-    std::filesystem::path path = "b0000000/meta/kafka/redpanda-test/a_b/manifest.json";
+    std::filesystem::path path
+      = "b0000000/meta/kafka/redpanda-test/a_b/manifest.json";
     auto res = cloud_storage::get_manifest_path_components(path);
     BOOST_REQUIRE(res.has_value() == false);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing_failure_2) {
-    std::filesystem::path path = "b0000000/kafka/redpanda-test/4_2/manifest.json";
+    std::filesystem::path path
+      = "b0000000/kafka/redpanda-test/4_2/manifest.json";
     auto res = cloud_storage::get_manifest_path_components(path);
     BOOST_REQUIRE(res.has_value() == false);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing_failure_3) {
-    std::filesystem::path path = "b0000000/meta/kafka/redpanda-test//manifest.json";
+    std::filesystem::path path
+      = "b0000000/meta/kafka/redpanda-test//manifest.json";
     auto res = cloud_storage::get_manifest_path_components(path);
     BOOST_REQUIRE(res.has_value() == false);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_manifest_name_parsing_failure_4) {
-    std::filesystem::path path = "b0000000/meta/kafka/redpanda-test/4_2/foo.bar";
+    std::filesystem::path path
+      = "b0000000/meta/kafka/redpanda-test/4_2/foo.bar";
     auto res = cloud_storage::get_manifest_path_components(path);
     BOOST_REQUIRE(res.has_value() == false);
 }
@@ -227,7 +241,8 @@ SEASTAR_THREAD_TEST_CASE(test_segment_name_parsing_failure_2) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_segment_path_parsing) {
-    std::filesystem::path path = "034b2193/kafka/redpanda-test/3_2/3587-1-v1.log";
+    std::filesystem::path path
+      = "034b2193/kafka/redpanda-test/3_2/3587-1-v1.log";
     auto res = cloud_storage::get_segment_path_components(path);
     BOOST_REQUIRE(res.has_value());
     BOOST_REQUIRE_EQUAL(res->_origin, path);
@@ -248,7 +263,8 @@ SEASTAR_THREAD_TEST_CASE(test_segment_path_parsing_failure_1) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_segment_path_parsing_failure_2) {
-    std::filesystem::path path = "034b2193/kafka/redpanda-test/3_2/foo-bar-v1.log";
+    std::filesystem::path path
+      = "034b2193/kafka/redpanda-test/3_2/foo-bar-v1.log";
     auto res = cloud_storage::get_segment_path_components(path);
     BOOST_REQUIRE(!res.has_value());
 }
@@ -266,8 +282,8 @@ SEASTAR_THREAD_TEST_CASE(test_segment_path_parsing_failure_4) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_segment_path_parsing_failure_5) {
-    std::filesystem::path path = "00000000/meta/kafka/redpanda-test/3_2/manifest.log";
+    std::filesystem::path path
+      = "00000000/meta/kafka/redpanda-test/3_2/manifest.log";
     auto res = cloud_storage::get_segment_path_components(path);
     BOOST_REQUIRE(!res.has_value());
 }
-

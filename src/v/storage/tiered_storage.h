@@ -3,6 +3,7 @@
 #include "cloud_storage/manifest.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/types.h"
+#include "model/record.h"
 #include "s3/client.h"
 #include "storage/ntp_config.h"
 #include "utils/named_type.h"
@@ -28,8 +29,10 @@ public:
 
     partition_recovery_manager(const partition_recovery_manager&) = delete;
     partition_recovery_manager(partition_recovery_manager&&) = delete;
-    partition_recovery_manager& operator=(const partition_recovery_manager&) = delete;
-    partition_recovery_manager& operator=(partition_recovery_manager&&) = delete;
+    partition_recovery_manager& operator=(const partition_recovery_manager&)
+      = delete;
+    partition_recovery_manager& operator=(partition_recovery_manager&&)
+      = delete;
 
     ~partition_recovery_manager();
 
@@ -123,8 +126,12 @@ private:
 
     ss::future<> download_log_with_capped_time(
       const offset_map_t& offset_map,
+      const cloud_storage::manifest& manifest,
       const std::filesystem::path& prefix,
-      ss::lowres_clock::duration time_boundary);
+      model::timestamp_clock::duration retention_time);
+
+    ss::future<std::optional<model::record_batch_header>>
+    read_first_record_header(const std::filesystem::path& path);
 
     const ntp_config& _ntpc;
     s3::bucket_name _bucket;

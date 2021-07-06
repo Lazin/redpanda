@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <limits>
+#include <compare>
 
 namespace model {
 
@@ -59,6 +60,8 @@ public:
 
     bool operator!=(const timestamp& other) const { return !(*this == other); }
 
+    auto operator<=>(const timestamp&) const = default;
+
     friend std::ostream& operator<<(std::ostream&, timestamp);
 
     static timestamp now();
@@ -69,12 +72,16 @@ private:
 
 using timestamp_clock = std::chrono::system_clock;
 
+inline timestamp to_timestamp(timestamp_clock::time_point ts) {
+    return timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+                       ts.time_since_epoch())
+                       .count());
+}
+
 inline timestamp new_timestamp() {
     // This mimics System.currentTimeMillis() which needs a duration_cast<>
     // around the current timestamp computed from epoch.
-    return timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
-                       timestamp_clock::now().time_since_epoch())
-                       .count());
+    return to_timestamp(timestamp_clock::now());
 }
 
 inline timestamp timestamp::now() { return new_timestamp(); }
