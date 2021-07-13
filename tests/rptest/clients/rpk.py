@@ -38,9 +38,15 @@ class RpkTool:
     def __init__(self, redpanda):
         self._redpanda = redpanda
 
-    def create_topic(self, topic, partitions=1):
+    def create_topic(self, topic, partitions=1, replicas=None, config=None):
         cmd = ["create", topic]
         cmd += ["--partitions", str(partitions)]
+        if replicas is not None:
+            cmd += ["--replicas", str(replicas)]
+        if config is not None:
+            cfg = [f"{k}:{v}" for k, v in config.items()]
+            for it in cfg:
+                cmd += ["--topic-config", it]
         return self._run_topic(cmd)
 
     def list_topics(self):

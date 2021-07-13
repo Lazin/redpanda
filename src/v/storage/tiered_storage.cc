@@ -346,8 +346,7 @@ ss::future<> partition_downloader::download_log_with_capped_size(
               it->second.full_path,
               total_size);
         }
-        auto fname = cloud_storage::segment_name(
-          std::filesystem::path(it->second.full_path).filename().string());
+        auto fname = cloud_storage::segment_name(it->second.full_path);
         co_await download_file(fname, manifest, prefix);
         total_size += meta.size_bytes;
     }
