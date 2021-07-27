@@ -190,16 +190,17 @@ class RedpandaService(Service):
         if self.coproc_enabled():
             self.start_wasm_engine(node)
 
-        cmd = (f"nohup {self.find_binary('redpanda')}"
-               f" --redpanda-cfg {RedpandaService.CONFIG_FILE}"
-               f" --default-log-level {self._log_level}"
-               f" --logger-log-level=exception=debug:archival=debug:io=debug "
-               f" --kernel-page-cache=true "
-               f" --overprovisioned "
-               f" --smp {self._num_cores} "
-               f" --memory 6G "
-               f" --reserve-memory 0M "
-               f" >> {RedpandaService.STDOUT_STDERR_CAPTURE} 2>&1 &")
+        cmd = (
+            f"nohup {self.find_binary('redpanda')}"
+            f" --redpanda-cfg {RedpandaService.CONFIG_FILE}"
+            f" --default-log-level {self._log_level}"
+            f" --logger-log-level=exception=debug:archival=debug:io=debug:cloud_storage=debug "
+            f" --kernel-page-cache=true "
+            f" --overprovisioned "
+            f" --smp {self._num_cores} "
+            f" --memory 6G "
+            f" --reserve-memory 0M "
+            f" >> {RedpandaService.STDOUT_STDERR_CAPTURE} 2>&1 &")
 
         # set llvm_profile var for code coverage
         # each node will create its own copy of the .profraw file
@@ -243,8 +244,7 @@ class RedpandaService(Service):
                 f"Starting redpanda wasm service on port: {wasm_port}",
                 timeout_sec=RedpandaService.READY_TIMEOUT_SEC,
                 backoff_sec=0.5,
-                err_msg=
-                f"Wasm engine didn't finish startup in {RedpandaService.READY_TIMEOUT_SEC} seconds",
+                err_msg=f"Wasm engine didn't finish startup in {RedpandaService.READY_TIMEOUT_SEC} seconds",
             )
 
     def monitor_log(self, node):
@@ -275,7 +275,7 @@ class RedpandaService(Service):
 
     def clean_node(self, node):
         node.account.kill_process("redpanda", clean_shutdown=False)
-        node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/*")
+        node.account.remove(f"{RedpandaService.PERSISTENT_ROOT}/data/*")
         node.account.remove(f"{RedpandaService.CONFIG_FILE}")
 
     def pids(self, node):
