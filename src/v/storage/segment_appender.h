@@ -81,7 +81,7 @@ public:
     void set_callbacks(callbacks* callbacks) { _callbacks = callbacks; }
 
 private:
-    void dispatch_background_head_write();
+    void dispatch_background_head_write(std::optional<ss::semaphore_units<>> u);
     ss::future<> do_next_adaptive_fallocation();
     ss::future<> hydrate_last_half_page();
     ss::future<> do_truncation(size_t);
@@ -108,6 +108,7 @@ private:
     size_t _fallocation_offset{0};
     size_t _bytes_flush_pending{0};
     ss::semaphore _concurrent_flushes;
+    ss::semaphore _concurrent_writes;
     ss::lw_shared_ptr<chunk> _head;
     ss::lw_shared_ptr<ss::semaphore> _prev_head_write;
 

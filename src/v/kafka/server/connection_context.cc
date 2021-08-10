@@ -18,6 +18,7 @@
 #include "kafka/server/quota_manager.h"
 #include "kafka/server/request_context.h"
 #include "units.h"
+#include "utils/hist_helper.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/scattered_message.hh>
@@ -64,7 +65,10 @@ ss::future<> connection_context::process_one_request() {
                       _rs.probe().header_corrupted();
                       return ss::make_ready_future<>();
                   }
-                  return dispatch_method_once(std::move(h.value()), s);
+                  static thread_local hist_helper hh(
+                    "connection_context.dispatch_method_once");
+                  return hh.measure(
+                    dispatch_method_once(std::move(h.value()), s));
               });
       });
 }
@@ -253,8 +257,14 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
               /**
                * first stage processed in a foreground.
                */
+              static thread_local hist_helper hh1(
+                "connection_context.dispatch_method_once.background_task");
+              static thread_local hist_helper hh2(
+                "connection_context.dispatch_method_once.process_request");
+              auto start_time = std::chrono::steady_clock::now();
               return res.dispatched
                 .then_wrapped([this,
+                               start_time,
                                f = std::move(res.response),
                                seq,
                                correlation,
@@ -300,7 +310,19 @@ connection_context::dispatch_method_once(request_header hdr, size_t size) {
                             e);
                           self->_rs.conn->shutdown_input();
                       })
-                      .finally([s = std::move(s), self] {});
+                      .finally([start_time, s = std::move(s), self] {
+                          auto stop_time = std::chrono::steady_clock::now();
+                          auto d = stop_time - start_time;
+                          auto delta = std::chrono::duration_cast<
+                            std::chrono::microseconds>(d);
+                          hh1.record(delta.count());
+                      });
+                    auto stop_time = std::chrono::steady_clock::now();
+                    auto dd = stop_time - start_time;
+                    auto delta
+                      = std::chrono::duration_cast<std::chrono::microseconds>(
+                        dd);
+                    hh2.record(delta.count());
                     return d;
                 })
                 .handle_exception([self](std::exception_ptr e) {

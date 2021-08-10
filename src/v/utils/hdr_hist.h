@@ -140,6 +140,8 @@ public:
 
     std::unique_ptr<measurement> auto_measure();
 
+    uint64_t get_sample_count() const { return _sample_count; }
+
 private:
     friend measurement;
     friend std::ostream& operator<<(std::ostream& o, const hdr_hist& h);

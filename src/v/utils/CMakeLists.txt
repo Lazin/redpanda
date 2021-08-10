@@ -4,6 +4,7 @@ v_cc_library(
   NAME utils
   SRCS
     hdr_hist.cc
+    hist_helper.cc
     human.cc
     file_io.cc
     base64.cc

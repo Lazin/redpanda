@@ -149,5 +149,6 @@ std::ostream& operator<<(std::ostream& o, const hdr_hist& h) {
              << ",p90=" << human::latency{(double)h.get_value_at(90.0)}
              << ",p99=" << human::latency{(double)h.get_value_at(99.0)}
              << ",p999=" << human::latency{(double)h.get_value_at(99.9)}
-             << ",max=" << human::latency{(double)h.get_value_at(100.0)} << "}";
+             << ",max=" << human::latency{(double)h.get_value_at(100.0)}
+             << ",cnt=" << h._sample_count << "}";
 };

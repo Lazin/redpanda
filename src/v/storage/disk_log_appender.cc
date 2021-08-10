@@ -15,6 +15,7 @@
 #include "storage/logger.h"
 #include "storage/segment.h"
 #include "storage/segment_appender.h"
+#include "utils/hist_helper.h"
 #include "vlog.h"
 
 #include <type_traits>
@@ -39,11 +40,12 @@ ss::future<> disk_log_appender::initialize() {
     release_lock();
     auto ptr = _log._segs.back();
     // appending is a non-destructive op. so acquire read lock
-    return ptr->read_lock().then([this, ptr](ss::rwlock::holder h) {
+    static thread_local hist_helper hh("disk_log_appender.initialize");
+    return hh.measure(ptr->read_lock().then([this, ptr](ss::rwlock::holder h) {
         _seg = ptr;
         _seg_lock = std::move(h);
         _bytes_left_in_segment = _log.bytes_left_before_roll();
-    });
+    }));
 }
 
 bool disk_log_appender::needs_to_roll_log(model::term_id batch_term) const {
@@ -115,7 +117,9 @@ disk_log_appender::append_batch_to_segment(const model::record_batch& batch) {
         return ss::make_ready_future<ss::stop_iteration>(
           ss::stop_iteration::no);
     }
-    return _seg->append(batch).then([this](append_result r) {
+    static thread_local hist_helper hh(
+      "disk_log_appender.append_batch_to_segment");
+    return hh.measure(_seg->append(batch).then([this](append_result r) {
         _idx = r.last_offset + model::offset(1); // next base offset
         _byte_size += r.byte_size;
         // do not track base_offset, only the last one
@@ -127,7 +131,7 @@ disk_log_appender::append_batch_to_segment(const model::record_batch& batch) {
         // take the min because _bytes_left_in_segment is optimistic
         _bytes_left_in_segment -= std::min(_bytes_left_in_segment, r.byte_size);
         return ss::stop_iteration::no;
-    });
+    }));
 }
 
 ss::future<append_result> disk_log_appender::end_of_stream() {
@@ -140,10 +144,11 @@ ss::future<append_result> disk_log_appender::end_of_stream() {
     if (_config.should_fsync == storage::log_append_config::fsync::no) {
         return ss::make_ready_future<append_result>(retval);
     }
-    return _log.flush().then([this, retval] {
+    static thread_local hist_helper hh("disk_log_appender.end_of_stream");
+    return hh.measure(_log.flush().then([this, retval] {
         release_lock();
         return retval;
-    });
+    }));
 }
 
 std::ostream& operator<<(std::ostream& o, const disk_log_appender& a) {

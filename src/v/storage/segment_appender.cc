@@ -11,18 +11,22 @@
 
 #include "config/configuration.h"
 #include "likely.h"
+#include "resource_mgmt/io_priority.h"
 #include "storage/chunk_cache.h"
 #include "storage/logger.h"
+#include "utils/hist_helper.h"
 #include "vassert.h"
 #include "vlog.h"
 
 #include <seastar/core/align.hh>
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future-util.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/semaphore.hh>
 
 #include <fmt/format.h>
 
+#include <chrono>
 #include <ostream>
 
 namespace storage {
@@ -53,6 +57,7 @@ segment_appender::segment_appender(ss::file f, options opts)
   : _out(std::move(f))
   , _opts(opts)
   , _concurrent_flushes(ss::semaphore::max_counter())
+  , _concurrent_writes(1)
   , _prev_head_write(ss::make_lw_shared<ss::semaphore>(1))
   , _inactive_timer([this] { handle_inactive_timer(); }) {
     const auto alignment = _out.disk_write_dma_alignment();
@@ -92,6 +97,7 @@ segment_appender::segment_appender(segment_appender&& o) noexcept
   , _fallocation_offset(o._fallocation_offset)
   , _bytes_flush_pending(o._bytes_flush_pending)
   , _concurrent_flushes(std::move(o._concurrent_flushes))
+  , _concurrent_writes(std::move(o._concurrent_writes))
   , _head(std::move(o._head))
   , _prev_head_write(std::move(o._prev_head_write))
   , _flush_ops(std::move(o._flush_ops))
@@ -131,52 +137,67 @@ ss::future<> segment_appender::append(const char* buf, const size_t n) {
 ss::future<> segment_appender::do_append(const char* buf, const size_t n) {
     vassert(!_closed, "append() on closed segment: {}", *this);
 
+    static thread_local hist_helper hh0(
+      "segment_appender.do_append-chunks-get");
+    static thread_local hist_helper hh1(
+      "segment_appender.do_append-do-adaptive-falloc");
+    static thread_local hist_helper hh11(
+      "segment_appender.do_append-do-adaptive-falloc-do-append");
     /*
      * if there is no current active chunk then we need to rehydrate. this can
      * happen because of truncation or because the appender had been idle and
      * its chunk was reclaimed into the chunk cache.
      */
     if (unlikely(!_head && _committed_offset > 0)) {
-        return internal::chunks()
-          .get()
-          .then([this](ss::lw_shared_ptr<chunk> chunk) {
-              _head = std::move(chunk);
-          })
-          .then([this, buf, n] {
-              return hydrate_last_half_page().then(
-                [this, buf, n] { return do_append(buf, n); });
-          });
+        co_await hh0.measure(
+          internal::chunks()
+            .get()
+            .then([this](ss::lw_shared_ptr<chunk> chunk) {
+                _head = std::move(chunk);
+            })
+            .then([this, buf, n] {
+                return hydrate_last_half_page().then(
+                  [this, buf, n] { return do_append(buf, n); });
+            }));
+        co_return;
     }
 
     if (next_committed_offset() + n > _fallocation_offset) {
-        return do_next_adaptive_fallocation().then(
-          [this, buf, n] { return do_append(buf, n); });
+        co_await hh1.measure(do_next_adaptive_fallocation().then(
+          [this, buf, n] { return hh11.measure(do_append(buf, n)); }));
+        co_return;
     }
 
     size_t written = 0;
+    // auto u = co_await ss::get_units(_concurrent_writes, 1);
     if (likely(_head)) {
         const size_t sz = _head->append(buf + written, n - written);
         written += sz;
         _bytes_flush_pending += sz;
         if (_head->is_full()) {
-            dispatch_background_head_write();
+            dispatch_background_head_write(std::nullopt); // std::move(u));
         }
-    }
-    if (written == n) {
-        return ss::make_ready_future<>();
+    } else {
+        // u.return_all();
     }
 
-    return ss::get_units(_concurrent_flushes, 1)
-      .then([this, next_buf = buf + written, next_sz = n - written](
-              ss::semaphore_units<>) {
-          // do not hold the units!
-          return internal::chunks().get().then(
-            [this, next_buf, next_sz](ss::lw_shared_ptr<chunk> chunk) {
-                vassert(!_head, "cannot overwrite existing chunk");
-                _head = std::move(chunk);
-                return do_append(next_buf, next_sz);
-            });
-      });
+    if (written == n) {
+        co_return;
+    }
+
+    static thread_local hist_helper hh2("segment_appender.do_append-get-unitx");
+    co_await hh2.measure(
+      ss::get_units(_concurrent_flushes, 1)
+        .then([this, next_buf = buf + written, next_sz = n - written](
+                ss::semaphore_units<>) {
+            // do not hold the units!
+            return internal::chunks().get().then(
+              [this, next_buf, next_sz](ss::lw_shared_ptr<chunk> chunk) {
+                  vassert(!_head, "cannot overwrite existing chunk");
+                  _head = std::move(chunk);
+                  return do_append(next_buf, next_sz);
+              });
+        }));
 }
 
 void segment_appender::handle_inactive_timer() {
@@ -186,7 +207,7 @@ void segment_appender::handle_inactive_timer() {
          * append: data was sitting in the write back buffer. the segment
          * appears to be inactive so go ahead and write that data to disk.
          */
-        dispatch_background_head_write();
+        dispatch_background_head_write(std::nullopt);
     }
 
     /*
@@ -310,6 +331,7 @@ ss::future<> segment_appender::close() {
 }
 
 ss::future<> segment_appender::do_next_adaptive_fallocation() {
+    static thread_local hist_helper hh("segment_appender.file.allocate");
     return ss::with_semaphore(
              _concurrent_flushes,
              ss::semaphore::max_counter(),
@@ -332,8 +354,10 @@ ss::future<> segment_appender::do_next_adaptive_fallocation() {
                    "{}",
                    _fallocation_offset,
                    _committed_offset);
-                 return _out.allocate(_fallocation_offset, step)
-                   .then([this, step] { _fallocation_offset += step; });
+                 return hh.measure(
+                   _out.allocate(_fallocation_offset, step).then([this, step] {
+                       _fallocation_offset += step;
+                   }));
              })
       .handle_exception([this](std::exception_ptr e) {
           vassert(
@@ -411,7 +435,8 @@ ss::future<> segment_appender::process_flush_ops(size_t committed) {
     });
 }
 
-void segment_appender::dispatch_background_head_write() {
+void segment_appender::dispatch_background_head_write(
+  std::optional<ss::semaphore_units<>> bgu) {
     vassert(_head, "dispatching write requires active chunk");
     vassert(
       _head->bytes_pending() > 0,
@@ -451,53 +476,73 @@ void segment_appender::dispatch_background_head_write() {
      * the correct semaphore by grabbing the units synchronously.
      */
     auto prev = _prev_head_write;
-    auto units = ss::get_units(*prev, 1);
+    static thread_local hist_helper hh0(
+      "segment_appender.dispatch_background_head_write-prev-units");
+    static thread_local hist_helper hh1(
+      "segment_appender.dispatch_background_head_write-with-semaphore");
+    static thread_local hist_helper hh2(
+      "segment_appender.dispatch_background_head_write-dma-write");
 
-    (void)ss::with_semaphore(
-      _concurrent_flushes,
-      1,
-      [h,
-       w,
-       this,
-       start_offset,
-       expected,
-       src,
-       prev,
-       units = std::move(units),
-       full]() mutable {
-          return units
-            .then([this, h, w, start_offset, expected, src, full](
-                    ss::semaphore_units<> u) mutable {
-                return _out
-                  .dma_write(start_offset, src, expected, _opts.priority)
-                  .then([this, h, w, expected, full](size_t got) {
-                      /*
-                       * the continuation that captured full=true is the end of
-                       * the dependency chain for this chunk. it can be returned
-                       * to cache.
-                       */
-                      if (full) {
-                          h->reset();
-                          internal::chunks().add(h);
-                      }
-                      if (unlikely(expected != got)) {
-                          return size_missmatch_error(
-                            "chunk::write", expected, got);
-                      }
-                      return maybe_advance_stable_offset(w);
-                  })
-                  .finally([u = std::move(u)] {});
-            })
-            .finally([prev] {});
-      })
-      .handle_exception([this](std::exception_ptr e) {
-          vassert(false, "Could not dma_write: {} - {}", e, *this);
-      });
+    auto units = hh0.measure(ss::get_units(*prev, 1));
+
+    (void)hh1.measure(
+      ss::with_semaphore(
+        _concurrent_flushes,
+        1,
+        [h,
+         w,
+         this,
+         start_offset,
+         expected,
+         src,
+         prev,
+         units = std::move(units),
+         bgu = std::move(bgu),
+         full]() mutable {
+            return units
+              .then([this,
+                     h,
+                     w,
+                     start_offset,
+                     expected,
+                     src,
+                     full,
+                     bgu = std::move(bgu)](ss::semaphore_units<> u) mutable {
+                  return hh2
+                    .measure(_out.dma_write(
+                      start_offset, src, expected, _opts.priority))
+                    .then([this, h, w, expected, full, bgu = std::move(bgu)](
+                            size_t got) mutable {
+                        if (bgu) {
+                            bgu->return_all();
+                        }
+                        /*
+                         * the continuation that captured full=true
+                         * is the end of the dependency chain for
+                         * this chunk. it can be returned to cache.
+                         */
+                        if (full) {
+                            h->reset();
+                            internal::chunks().add(h);
+                        }
+                        if (unlikely(expected != got)) {
+                            return size_missmatch_error(
+                              "chunk::write", expected, got);
+                        }
+                        return maybe_advance_stable_offset(w);
+                    })
+                    .finally([u = std::move(u)] {});
+              })
+              .finally([prev] {});
+        })
+        .handle_exception([this](std::exception_ptr e) {
+            vassert(false, "Could not dma_write: {} - {}", e, *this);
+        }));
 
     /*
-     * when the head becomes full it still needs to be properly sequenced (see
-     * above), but no future writes to same head head are possible so the
-     * dependency chain is reset for the next head.
+     * when the head becomes full it still needs to be properly
+     * sequenced (see above), but no future writes to same head head are
+     * possible so the dependency chain is reset for the next head.
      */
     if (full) {
         _prev_head_write = ss::make_lw_shared<ss::semaphore>(1);
@@ -510,21 +555,24 @@ ss::future<> segment_appender::flush() {
     // dispatched write will drive flush completion
     if (_head && _head->bytes_pending()) {
         auto& w = _flush_ops.emplace_back(file_byte_offset());
-        dispatch_background_head_write();
-        return w.p.get_future();
+        // auto u = co_await ss::get_units(_concurrent_writes, 1);
+        dispatch_background_head_write(std::nullopt); // std::move(u));
+        co_await w.p.get_future();
+        co_return;
     }
 
     if (file_byte_offset() <= _flushed_offset) {
-        return ss::now();
+        co_return;
     }
 
     /*
-     * if there are inflight write _ops_ then we can be sure that flush ops will
-     * be processed eventually (see: maybe advance stable offset).
+     * if there are inflight write _ops_ then we can be sure that flush ops
+     * will be processed eventually (see: maybe advance stable offset).
      */
     if (!_inflight.empty()) {
         auto& w = _flush_ops.emplace_back(file_byte_offset());
-        return w.p.get_future();
+        co_await w.p.get_future();
+        co_return;
     }
 
     vassert(
@@ -534,7 +582,7 @@ ss::future<> segment_appender::flush() {
       _stable_offset,
       *this);
 
-    return _out.flush().handle_exception([this](std::exception_ptr e) {
+    co_await _out.flush().handle_exception([this](std::exception_ptr e) {
         vassert(false, "Could not flush: {} - {}", e, *this);
     });
 }
@@ -542,22 +590,21 @@ ss::future<> segment_appender::flush() {
 ss::future<> segment_appender::hard_flush() {
     _inactive_timer.cancel();
     if (_head && _head->bytes_pending()) {
-        dispatch_background_head_write();
+        // auto u = co_await ss::get_units(_concurrent_writes, 1);
+        dispatch_background_head_write(std::nullopt); // std::move(u));
     }
-    return ss::with_semaphore(
-             _concurrent_flushes,
-             ss::semaphore::max_counter(),
-             [this]() mutable {
-                 vassert(
-                   _prev_head_write->available_units() == 1,
-                   "Unexpected pending head write {}",
-                   *this);
-                 vassert(
-                   _flush_ops.empty(),
-                   "Pending flushes after hard flush {}",
-                   *this);
-                 return _out.flush();
-             })
+    co_await ss::with_semaphore(
+      _concurrent_flushes,
+      ss::semaphore::max_counter(),
+      [this]() mutable {
+          vassert(
+            _prev_head_write->available_units() == 1,
+            "Unexpected pending head write {}",
+            *this);
+          vassert(
+            _flush_ops.empty(), "Pending flushes after hard flush {}", *this);
+          return _out.flush();
+      })
       .handle_exception([this](std::exception_ptr e) {
           vassert(false, "Could not flush: {} - {}", e, *this);
       });

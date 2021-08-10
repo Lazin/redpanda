@@ -25,6 +25,7 @@
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
 #include "storage/api.h"
+#include "utils/hist_helper.h"
 #include "vlog.h"
 
 #include <seastar/core/coroutine.hh>
@@ -440,7 +441,12 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
         model::term_id term;
     };
 
-    std::optional<ss::semaphore_units<>> u = co_await _op_lock.get_units();
+    static thread_local hist_helper hh1("consensus.lb.get_units");
+    static thread_local hist_helper hh2("consensus.lb.append_entries");
+    static thread_local hist_helper hh3("consensus.lb.follower_reply");
+
+    std::optional<ss::semaphore_units<>> u = co_await hh1.measure(
+      _op_lock.get_units());
 
     if (_vstate != vote_state::leader) {
         co_return result<model::offset>(make_error_code(errc::not_leader));
@@ -475,16 +481,16 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
         update_node_append_timestamp(target);
         vlog(
           _ctxlog.trace, "Sending empty append entries request to {}", target);
-        auto f
-          = _client_protocol
-              .append_entries(
-                target.id(),
-                std::move(req),
-                rpc::client_opts(_replicate_append_timeout + clock_type::now()))
-              .then([this, id = target.id(), seq, dirty_offset](
-                      result<append_entries_reply> reply) {
-                  process_append_entries_reply(id, reply, seq, dirty_offset);
-              });
+        auto f = hh2.measure(
+          _client_protocol
+            .append_entries(
+              target.id(),
+              std::move(req),
+              rpc::client_opts(_replicate_append_timeout + clock_type::now()))
+            .then([this, id = target.id(), seq, dirty_offset](
+                    result<append_entries_reply> reply) {
+                process_append_entries_reply(id, reply, seq, dirty_offset);
+            }));
 
         send_futures.push_back(std::move(f));
     });
@@ -512,10 +518,10 @@ ss::future<result<model::offset>> consensus::linearizable_barrier() {
     };
 
     // we do not hold the lock while waiting
-    co_await _follower_reply.wait(
-      [this, snapshot, &majority_sequences_updated] {
+    co_await hh3.measure(
+      _follower_reply.wait([this, snapshot, &majority_sequences_updated] {
           return majority_sequences_updated() || _term != snapshot.term;
-      });
+      }));
 
     // term have changed, not longer a leader
     if (snapshot.term != _term) {
@@ -597,7 +603,8 @@ replicate_stages consensus::do_replicate(
     auto enqueued_f = enqueued.get_future();
     using ret_t = result<replicate_result>;
 
-    auto replicated = _op_lock.get_units().then_wrapped(
+    static thread_local hist_helper hh("consensus.do_replicate");
+    auto replicated = hh.measure(_op_lock.get_units().then_wrapped(
       [this,
        expected_term,
        enqueued = std::move(enqueued),
@@ -610,7 +617,7 @@ replicate_stages consensus::do_replicate(
           }
           enqueued.set_exception(f.get_exception());
           return ss::make_ready_future<ret_t>(errc::leader_append_failed);
-      });
+      }));
 
     return wrap_stages_with_gate(
       _bg, replicate_stages(std::move(enqueued_f), std::move(replicated)));
@@ -654,12 +661,14 @@ void consensus::dispatch_flush_with_lock() {
         return;
     }
     (void)ss::with_gate(_bg, [this] {
-        return _op_lock.with([this] {
+        static thread_local hist_helper hh(
+          "consensus.dispatch_flush_with_lock");
+        return hh.measure(_op_lock.with([this] {
             if (!_has_pending_flushes) {
                 return ss::make_ready_future<>();
             }
             return flush_log();
-        });
+        }));
     });
 }
 
@@ -1176,20 +1185,22 @@ void consensus::read_voted_for() {
 ss::future<vote_reply> consensus::vote(vote_request&& r) {
     return with_gate(_bg, [this, r = std::move(r)]() mutable {
         auto target_node_id = r.node_id;
-        return _op_lock
-          .with(
-            _jit.base_duration(),
-            [this, r = std::move(r)]() mutable {
-                return do_vote(std::move(r));
-            })
-          .handle_exception_type(
-            [this, target_node_id](const ss::semaphore_timed_out&) {
-                return vote_reply{
-                  .target_node_id = target_node_id,
-                  .term = _term,
-                  .granted = false,
-                  .log_ok = false};
-            });
+        static thread_local hist_helper hh("consensus.vote");
+        return hh.measure(
+          _op_lock
+            .with(
+              _jit.base_duration(),
+              [this, r = std::move(r)]() mutable {
+                  return do_vote(std::move(r));
+              })
+            .handle_exception_type(
+              [this, target_node_id](const ss::semaphore_timed_out&) {
+                  return vote_reply{
+                    .target_node_id = target_node_id,
+                    .term = _term,
+                    .granted = false,
+                    .log_ok = false};
+              }));
     });
 }
 
@@ -1335,8 +1346,9 @@ ss::future<vote_reply> consensus::do_vote(vote_request&& r) {
 
 ss::future<append_entries_reply>
 consensus::append_entries(append_entries_request&& r) {
+    static thread_local hist_helper hh("consensus::append_entries");
     return with_gate(_bg, [this, r = std::move(r)]() mutable {
-        return _append_requests_buffer.enqueue(std::move(r));
+        return hh.measure(_append_requests_buffer.enqueue(std::move(r)));
     });
 }
 
@@ -1843,7 +1855,9 @@ append_entries_reply consensus::make_append_entries_reply(
 
 ss::future<> consensus::flush_log() {
     _probe.log_flushed();
-    return _log.flush().then([this] { _has_pending_flushes = false; });
+    static thread_local hist_helper hh("consensus.flush_log");
+    return hh.measure(
+      _log.flush().then([this] { _has_pending_flushes = false; }));
 }
 
 ss::future<storage::append_result> consensus::disk_append(
@@ -1856,54 +1870,57 @@ ss::future<storage::append_result> consensus::disk_append(
       storage::log_append_config::fsync::no,
       _scheduling.default_iopc,
       model::timeout_clock::now() + _disk_timeout};
-    return details::for_each_ref_extract_configuration(
-             _log.offsets().dirty_offset,
-             std::move(reader),
-             _log.make_appender(cfg),
-             cfg.timeout)
-      .then([this, should_update_last_quorum_idx](
-              std::tuple<ret_t, std::vector<offset_configuration>> t) {
-          auto& [ret, configurations] = t;
-          if (should_update_last_quorum_idx) {
-              /**
-               * We have to update last quorum replicated index before we
-               * trigger read for followers recovery as recovery_stm will have
-               * to deceide if follower flush is required basing on last quorum
-               * replicated index.
-               */
-              _last_quorum_replicated_index = ret.last_offset;
-          }
-          _disk_append.broadcast();
-          _has_pending_flushes = true;
-          // TODO
-          // if we rolled a log segment. write current configuration
-          // for speedy recovery in the background
+    static thread_local hist_helper hh("consensus.disk_append");
+    return hh.measure(
+      details::for_each_ref_extract_configuration(
+        _log.offsets().dirty_offset,
+        std::move(reader),
+        _log.make_appender(cfg),
+        cfg.timeout)
+        .then([this, should_update_last_quorum_idx](
+                std::tuple<ret_t, std::vector<offset_configuration>> t) {
+            auto& [ret, configurations] = t;
+            if (should_update_last_quorum_idx) {
+                /**
+                 * We have to update last quorum replicated index before we
+                 * trigger read for followers recovery as recovery_stm will have
+                 * to deceide if follower flush is required basing on last
+                 * quorum replicated index.
+                 */
+                _last_quorum_replicated_index = ret.last_offset;
+            }
+            _disk_append.broadcast();
+            _has_pending_flushes = true;
+            // TODO
+            // if we rolled a log segment. write current configuration
+            // for speedy recovery in the background
 
-          // leader never flush just after write
-          // for quorum_ack it flush in parallel to dispatching RPCs
-          // to followers for other consistency flushes are done
-          // separately.
-          auto f = ss::now();
-          if (!configurations.empty()) {
-              // we can use latest configuration to update follower stats
-              update_follower_stats(configurations.back().cfg);
-              f = _configuration_manager.add(std::move(configurations));
-          }
+            // leader never flush just after write
+            // for quorum_ack it flush in parallel to dispatching RPCs
+            // to followers for other consistency flushes are done
+            // separately.
+            auto f = ss::now();
+            if (!configurations.empty()) {
+                // we can use latest configuration to update follower stats
+                update_follower_stats(configurations.back().cfg);
+                f = _configuration_manager.add(std::move(configurations));
+            }
 
-          return f.then([this, ret = ret] {
-              // if we are already shutting down, do nothing
-              if (_bg.is_closed()) {
-                  return ret;
-              }
+            return f.then([this, ret = ret] {
+                // if we are already shutting down, do nothing
+                if (_bg.is_closed()) {
+                    return ret;
+                }
 
-              (void)ss::with_gate(
-                _bg, [this, last_offset = ret.last_offset, sz = ret.byte_size] {
-                    return _configuration_manager
-                      .maybe_store_highest_known_offset(last_offset, sz);
-                });
-              return ret;
-          });
-      });
+                (void)ss::with_gate(
+                  _bg,
+                  [this, last_offset = ret.last_offset, sz = ret.byte_size] {
+                      return _configuration_manager
+                        .maybe_store_highest_known_offset(last_offset, sz);
+                  });
+                return ret;
+            });
+        }));
 }
 
 model::term_id consensus::get_term(model::offset o) {
@@ -1949,15 +1966,16 @@ consensus::next_followers_request_seq() {
 
 void consensus::maybe_update_leader_commit_idx() {
     (void)with_gate(_bg, [this] {
-        return _op_lock.get_units().then(
-          [this](ss::semaphore_units<> u) mutable {
+        static thread_local hist_helper hh("maybe_update_leader_commit_ids");
+        return hh.measure(
+          _op_lock.get_units().then([this](ss::semaphore_units<> u) mutable {
               // do not update committed index if not the leader, this check has
               // to be done under the semaphore
               if (!is_leader()) {
                   return ss::now();
               }
               return do_maybe_update_leader_commit_idx(std::move(u));
-          });
+          }));
     }).handle_exception([this](const std::exception_ptr& e) {
         vlog(_ctxlog.warn, "Error updating leader commit index", e);
     });

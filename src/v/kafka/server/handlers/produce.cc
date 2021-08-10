@@ -25,6 +25,7 @@
 #include "model/timestamp.h"
 #include "raft/types.h"
 #include "storage/shard_assignment.h"
+#include "utils/hist_helper.h"
 #include "utils/remote.h"
 #include "utils/to_string.h"
 #include "vlog.h"
@@ -213,6 +214,12 @@ static partition_produce_stages produce_topic_partition(
 
     // steal the batch from the adapter
     auto batch = std::move(part.records->adapter.batch.value());
+    static thread_local hist_helper mm1(
+      "produce_topic_partition.batch_size_bytes", hist_type::memory);
+    static thread_local hist_helper mm2(
+      "produce_topic_partition.batch_record_count", hist_type::memory);
+    mm1.record(batch.size_bytes());
+    mm2.record(batch.record_count());
 
     /*
      * grab timestamp type topic configuration option out of the
@@ -286,29 +293,35 @@ static partition_produce_stages produce_topic_partition(
                   std::move(reader),
                   acks,
                   num_records);
-                return stages.dispatched
-                  .then_wrapped([source_shard, dispatch = std::move(dispatch)](
-                                  ss::future<> f) mutable {
-                      if (f.failed()) {
-                          (void)ss::smp::submit_to(
+                static thread_local hist_helper hh1(
+                  "produce_topic_partition-stages.dispatched");
+                return hh1.measure(
+                  stages.dispatched
+                    .then_wrapped(
+                      [source_shard,
+                       dispatch = std::move(dispatch)](ss::future<> f) mutable {
+                          if (f.failed()) {
+                              (void)ss::smp::submit_to(
+                                source_shard,
+                                [dispatch = std::move(dispatch),
+                                 e = f.get_exception()]() mutable {
+                                    dispatch->set_exception(e);
+                                    dispatch.reset();
+                                });
+                              return;
+                          }
+                          static thread_local hist_helper hh2(
+                            "produce_topic_partition.submit_to");
+                          (void)hh2.measure(ss::smp::submit_to(
                             source_shard,
-                            [dispatch = std::move(dispatch),
-                             e = f.get_exception()]() mutable {
-                                dispatch->set_exception(e);
+                            [dispatch = std::move(dispatch)]() mutable {
+                                dispatch->set_value();
                                 dispatch.reset();
-                            });
-                          return;
-                      }
-                      (void)ss::smp::submit_to(
-                        source_shard,
-                        [dispatch = std::move(dispatch)]() mutable {
-                            dispatch->set_value();
-                            dispatch.reset();
-                        });
-                  })
-                  .then([f = std::move(stages.produced)]() mutable {
-                      return std::move(f);
-                  });
+                            }));
+                      })
+                    .then([f = std::move(stages.produced)]() mutable {
+                        return std::move(f);
+                    }));
             })
           .then([&octx, start, m = std::move(m)](
                   produce_response::partition p) {
@@ -320,9 +333,11 @@ static partition_produce_stages produce_topic_partition(
               }
               return p;
           });
+    static thread_local hist_helper hh3("produce_topic_partition.dispatched");
+    static thread_local hist_helper hh4("produce_topic_partition.produced");
     return partition_produce_stages{
-      .dispatched = std::move(dispatch_f),
-      .produced = std::move(f),
+      .dispatched = hh3.measure(std::move(dispatch_f)),
+      .produced = hh4.measure(std::move(f)),
     };
 }
 

@@ -2,6 +2,7 @@
 
 #include "raft/consensus.h"
 #include "raft/types.h"
+#include "utils/hist_helper.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/do_with.hh>
@@ -26,17 +27,17 @@ append_entries_buffer::enqueue(append_entries_request&& r) {
         // we normally do not want to wait as it would cause requests
         // reordering. Reordering may only happend if we would wait on condition
         // variable.
-
-        return _flushed
-          .wait([this] { return _requests.size() < _max_buffered; })
-          .then([this, r = std::move(r)]() mutable {
-              ss::promise<append_entries_reply> p;
-              auto f = p.get_future();
-              _requests.push_back(std::move(r));
-              _responses.push_back(std::move(p));
-              _enqueued.signal();
-              return f;
-          });
+        static thread_local hist_helper hh("append_entries_buffer.enqueue");
+        return hh.measure(
+          _flushed.wait([this] { return _requests.size() < _max_buffered; })
+            .then([this, r = std::move(r)]() mutable {
+                ss::promise<append_entries_reply> p;
+                auto f = p.get_future();
+                _requests.push_back(std::move(r));
+                _responses.push_back(std::move(p));
+                _enqueued.signal();
+                return f;
+            }));
     });
 }
 
@@ -62,6 +63,14 @@ void append_entries_buffer::start() {
         return ss::do_until(
           [this] { return _gate.is_closed(); },
           [this] {
+              vlog(
+                _consensus._ctxlog.info,
+                "max_buffered: {}, num requests: {}, num responses {}, req "
+                "size: {}",
+                _max_buffered,
+                _requests.size(),
+                _responses.size(),
+                sizeof(append_entries_request));
               return _enqueued.wait([this] { return !_requests.empty(); })
                 .then([this] { return flush(); })
                 .handle_exception_type(
@@ -80,14 +89,15 @@ ss::future<> append_entries_buffer::flush() {
     auto requests = std::exchange(_requests, {});
     auto response_promises = std::exchange(_responses, {});
 
-    return _consensus._op_lock.get_units().then(
+    static thread_local hist_helper hh("append_entries_buffer.flush");
+    return hh.measure(_consensus._op_lock.get_units().then(
       [this,
        requests = std::move(requests),
        response_promises = std::move(response_promises)](
         ss::semaphore_units<> u) mutable {
           return do_flush(
             std::move(requests), std::move(response_promises), std::move(u));
-      });
+      }));
 }
 
 ss::future<> append_entries_buffer::do_flush(
@@ -115,6 +125,10 @@ ss::future<> append_entries_buffer::do_flush(
             f = _consensus.flush_log();
         }
     }
+
+    static thread_local hist_helper hh("append_entries_buffer.do_flush");
+
+    f = hh.measure(std::move(f));
 
     // units were released before flushing log
     co_await std::move(f);

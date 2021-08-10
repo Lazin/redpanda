@@ -16,6 +16,7 @@
 #include "kafka/server/request_context.h"
 #include "kafka/server/response.h"
 #include "security/scram_algorithm.h"
+#include "utils/hist_helper.h"
 #include "utils/utf8.h"
 #include "vlog.h"
 
@@ -95,10 +96,30 @@ ss::future<> protocol::apply(rpc::server::resources rs) {
       std::move(sasl),
       config::shard_local_cfg().enable_sasl());
 
-    return ss::do_until(
-             [ctx] { return ctx->is_finished_parsing(); },
-             [ctx] { return ctx->process_one_request(); })
-      .finally([ctx] {});
+    static thread_local hist_helper hh1(
+      "kafka-protocol-apply", hist_type::queue_depth);
+    static thread_local hist_helper hh2(
+      "kafka-protocol-apply-latency", hist_type::latency);
+    static thread_local hist_helper hh3(
+      "kafka-protocol-apply-num-requests", hist_type::queue_depth);
+    static thread_local hist_helper hh4(
+      "kafka-protocol-apply-single-request", hist_type::latency);
+    static thread_local uint64_t ctx_started = 0;
+    static thread_local uint64_t ctx_stopped = 0;
+    ctx_started++;
+    auto request_cnt = ss::make_lw_shared<int>(0);
+    return hh2.measure(ss::do_until(
+                         [ctx] { return ctx->is_finished_parsing(); },
+                         [ctx, request_cnt] {
+                             ++(*request_cnt);
+                             hh3.record(*request_cnt);
+                             return hh4.measure(ctx->process_one_request());
+                         })
+                         .finally([ctx] {
+                             ctx_stopped++;
+                             auto d = ctx_started - ctx_stopped;
+                             hh1.record(d);
+                         }));
 }
 
 } // namespace kafka

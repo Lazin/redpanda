@@ -92,3 +92,7 @@ rp_test(
   LABELS storage
 )
 
+
+add_executable(storage_benchmark storage_benchmark.cc)
+target_link_libraries(storage_benchmark PUBLIC v::storage)
+set_property(TARGET storage_benchmark PROPERTY POSITION_INDEPENDENT_CODE ON)
