@@ -6,6 +6,7 @@ v_cc_library(
     remote.cc
     offset_translation_layer.cc
     probe.cc
+    partition_recovery_manager.cc
     types.cc
   DEPS
     Seastar::seastar
