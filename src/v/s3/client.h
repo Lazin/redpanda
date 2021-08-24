@@ -252,6 +252,8 @@ public:
     /// \brief Get number of connections
     size_t size() const noexcept;
 
+    size_t max_size() const noexcept;
+
 private:
     void init();
     void release(ss::shared_ptr<client> leased);

@@ -581,6 +581,7 @@ ss::future<client_pool::client_lease> client_pool::acquire() {
         })};
 }
 size_t client_pool::size() const noexcept { return _pool.size(); }
+size_t client_pool::max_size() const noexcept { return _size; }
 void client_pool::init() {
     for (size_t i = 0; i < _size; i++) {
         auto cl = ss::make_shared<client>(_config, _as);
