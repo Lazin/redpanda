@@ -38,6 +38,8 @@
 #include <boost/test/tools/old/interface.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <optional>
+
 using namespace std::chrono_literals;
 
 inline ss::logger fixt_log("fixture"); // NOLINT
@@ -91,6 +93,7 @@ archival::configuration get_configuration() {
     conf.initial_backoff = 100ms;
     conf.segment_upload_timeout = 1s;
     conf.manifest_upload_timeout = 1s;
+    conf.time_limit = std::nullopt;
     return conf;
 }
 

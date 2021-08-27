@@ -42,14 +42,15 @@ std::ostream& operator<<(std::ostream& o, const configuration& cfg) {
       o,
       "{{bucket_name: {}, interval: {}, client_config: {}, connection_limit: "
       "{}, initial_backoff: {}, segment_upload_timeout: {}, "
-      "manifest_upload_timeout: {}}}",
+      "manifest_upload_timeout: {}, time_limit: {}}}",
       cfg.bucket_name,
       cfg.interval.count(),
       cfg.client_config,
       cfg.connection_limit,
       cfg.initial_backoff.count(),
       cfg.segment_upload_timeout.count(),
-      cfg.manifest_upload_timeout.count());
+      cfg.manifest_upload_timeout.count(),
+      cfg.time_limit);
     return o;
 }
 
@@ -63,7 +64,7 @@ ntp_archiver::ntp_archiver(
   , _ntp(ntp.ntp())
   , _rev(ntp.get_revision())
   , _remote(remote)
-  , _policy(_ntp, _svc_probe, std::ref(_probe))
+  , _policy(_ntp, _svc_probe, std::ref(_probe), conf.time_limit)
   , _bucket(conf.bucket_name)
   , _manifest(_ntp, _rev)
   , _gate()
@@ -116,17 +117,13 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
     gate_guard guard{_gate};
     retry_chain_node fib(_segment_upload_timeout, _initial_backoff, &parent);
     retry_chain_logger ctxlog(archival_log, fib, _ntp.path());
-    vlog(
-      ctxlog.debug,
-      "Uploading segment for {}, exposed name {} offset {}, length {}",
-      _ntp,
-      candidate.exposed_name,
-      candidate.starting_offset,
-      candidate.content_length);
+    vlog(ctxlog.debug, "Uploading segment {}", _ntp, candidate);
 
     auto reset_func = [candidate] {
         auto stream = candidate.source->reader().data_stream(
-          candidate.file_offset, ss::default_priority_class());
+          candidate.file_offset,
+          ss::default_priority_class(),
+          candidate.content_length);
         return stream;
     };
     co_return co_await _remote.upload_segment(

@@ -23,6 +23,7 @@ struct upload_candidate {
     ss::lw_shared_ptr<storage::segment> source;
     segment_name exposed_name;
     model::offset starting_offset;
+    model::offset final_offset;
     size_t file_offset;
     size_t content_length;
 };
@@ -37,7 +38,10 @@ std::ostream& operator<<(std::ostream& s, const upload_candidate& c);
 class archival_policy {
 public:
     explicit archival_policy(
-      model::ntp ntp, service_probe& svc_probe, ntp_level_probe& ntp_probe);
+      model::ntp ntp,
+      service_probe& svc_probe,
+      ntp_level_probe& ntp_probe,
+      std::optional<segment_time_limit> limit = std::nullopt);
 
     /// \brief regurn next upload candidate
     ///
@@ -55,6 +59,8 @@ public:
       storage::log_manager& lm);
 
 private:
+    bool upload_limit_reached();
+
     struct lookup_result {
         ss::lw_shared_ptr<storage::segment> segment;
         const storage::ntp_config* ntp_conf;
@@ -68,6 +74,8 @@ private:
     model::ntp _ntp;
     service_probe& _svc_probe;
     ntp_level_probe& _ntp_probe;
+    std::optional<segment_time_limit> _upload_limit;
+    std::optional<ss::lowres_clock::time_point> _upload_deadline;
 };
 
 } // namespace archival
