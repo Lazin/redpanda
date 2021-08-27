@@ -759,6 +759,13 @@ configuration::configuration()
       "Max https connection idle time (ms)",
       required::no,
       5s)
+  , cloud_storage_segment_max_upload_interval_sec(
+      *this,
+      "cloud_storage_segment_max_upload_interval_sec",
+      "Time that segment can be kept locally without uploading it to the "
+      "remote storage (sec)",
+      required::no,
+      0s)
   , superusers(
       *this, "superusers", "List of superuser usernames", required::no, {})
   , kafka_qdc_latency_alpha(
