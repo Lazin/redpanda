@@ -29,8 +29,8 @@ segment_reader::segment_reader(
   , _file_size(file_size)
   , _buffer_size(buffer_size) {}
 
-ss::input_stream<char>
-segment_reader::data_stream(size_t pos, const ss::io_priority_class& pc) {
+ss::input_stream<char> segment_reader::data_stream(
+  size_t pos, const ss::io_priority_class& pc, size_t read_size) {
     vassert(
       pos <= _file_size,
       "cannot read negative bytes. Asked to read at position: '{}' - {}",
@@ -40,8 +40,10 @@ segment_reader::data_stream(size_t pos, const ss::io_priority_class& pc) {
     options.buffer_size = _buffer_size;
     options.io_priority_class = pc;
     options.read_ahead = 10;
+    auto read_limit = read_size > 0 ? std::min(_file_size - pos, read_size)
+                                    : _file_size - pos;
     return make_file_input_stream(
-      _data_file, pos, _file_size - pos, std::move(options));
+      _data_file, pos, read_limit, std::move(options));
 }
 
 ss::future<> segment_reader::truncate(size_t n) {

@@ -62,8 +62,9 @@ public:
 
     /// create an input stream _sharing_ the underlying file handle
     /// starting at position @pos
+    /// limit the stream size by setting @read_size (0 = whole file)
     ss::input_stream<char>
-    data_stream(size_t pos, const ss::io_priority_class&);
+    data_stream(size_t pos, const ss::io_priority_class&, size_t read_size = 0);
 
 private:
     ss::sstring _filename;
