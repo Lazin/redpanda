@@ -23,9 +23,10 @@ struct upload_candidate {
     ss::lw_shared_ptr<storage::segment> source;
     segment_name exposed_name;
     model::offset starting_offset;
-    model::offset final_offset;
     size_t file_offset;
     size_t content_length;
+    std::optional<model::offset> final_offset;
+    std::optional<size_t> final_file_offset;
 };
 
 std::ostream& operator<<(std::ostream& s, const upload_candidate& c);
@@ -53,7 +54,7 @@ public:
     ///       last_offset because index is sparse and don't have all possible
     ///       offsets. If index is not materialized we will upload log starting
     ///       from the begining.
-    upload_candidate get_next_candidate(
+    ss::future<upload_candidate> get_next_candidate(
       model::offset last_offset,
       model::offset high_watermark,
       storage::log_manager& lm);
@@ -64,6 +65,7 @@ private:
     struct lookup_result {
         ss::lw_shared_ptr<storage::segment> segment;
         const storage::ntp_config* ntp_conf;
+        bool forced;
     };
 
     lookup_result find_segment(

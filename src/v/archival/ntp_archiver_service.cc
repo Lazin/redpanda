@@ -10,6 +10,7 @@
 
 #include "archival/ntp_archiver_service.h"
 
+#include "archival/archival_policy.h"
 #include "archival/logger.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/types.h"
@@ -112,6 +113,7 @@ ntp_archiver::upload_manifest(retry_chain_node& parent) {
     co_return co_await _remote.upload_manifest(_bucket, _manifest, fib);
 }
 
+// from offset to offset (by record batch boundary)
 ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
   upload_candidate candidate, retry_chain_node& parent) {
     gate_guard guard{_gate};
@@ -162,7 +164,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
           "Uploading next candidates for {}, trying offset {}",
           _ntp,
           last_uploaded_offset);
-        auto upload = _policy.get_next_candidate(
+        auto upload = co_await _policy.get_next_candidate(
           last_uploaded_offset, high_watermark, lm);
         if (upload.source.get() == nullptr) {
             vlog(

@@ -284,16 +284,19 @@ FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
 
     log_segment_set(lm);
     // Starting offset is lower than offset1
-    auto upload1 = policy.get_next_candidate(
-      model::offset(0), high_watermark, lm);
+    auto upload1
+      = policy.get_next_candidate(model::offset(0), high_watermark, lm).get();
     log_upload_candidate(upload1);
     BOOST_REQUIRE(upload1.source.get() != nullptr);
     BOOST_REQUIRE(upload1.starting_offset == offset1);
 
-    auto upload2 = policy.get_next_candidate(
-      upload1.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload2 = policy
+                     .get_next_candidate(
+                       upload1.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     log_upload_candidate(upload2);
     BOOST_REQUIRE(upload2.source.get() != nullptr);
     BOOST_REQUIRE(upload2.starting_offset() == offset2);
@@ -301,10 +304,13 @@ FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
     BOOST_REQUIRE(upload2.source != upload1.source);
     BOOST_REQUIRE(upload2.source->offsets().base_offset == offset2);
 
-    auto upload3 = policy.get_next_candidate(
-      upload2.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload3 = policy
+                     .get_next_candidate(
+                       upload2.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     log_upload_candidate(upload3);
     BOOST_REQUIRE(upload3.source.get() != nullptr);
     BOOST_REQUIRE(upload3.starting_offset() == offset3);
@@ -312,14 +318,19 @@ FIXTURE_TEST(test_archiver_policy, archiver_fixture) {
     BOOST_REQUIRE(upload3.source != upload2.source);
     BOOST_REQUIRE(upload3.source->offsets().base_offset == offset3);
 
-    auto upload4 = policy.get_next_candidate(
-      upload3.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload4 = policy
+                     .get_next_candidate(
+                       upload3.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     BOOST_REQUIRE(upload4.source.get() == nullptr);
 
-    auto upload5 = policy.get_next_candidate(
-      high_watermark + model::offset(1), high_watermark, lm);
+    auto upload5 = policy
+                     .get_next_candidate(
+                       high_watermark + model::offset(1), high_watermark, lm)
+                     .get();
     BOOST_REQUIRE(upload5.source.get() == nullptr);
 }
 
@@ -458,16 +469,19 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
     log_segment_set(lm);
     model::offset high_watermark{9999};
     // Starting offset is lower than offset1
-    auto upload1 = policy.get_next_candidate(
-      model::offset(0), high_watermark, lm);
+    auto upload1
+      = policy.get_next_candidate(model::offset(0), high_watermark, lm).get();
     log_upload_candidate(upload1);
     BOOST_REQUIRE(upload1.source.get() != nullptr);
     BOOST_REQUIRE(upload1.starting_offset == offset1);
 
-    auto upload2 = policy.get_next_candidate(
-      upload1.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload2 = policy
+                     .get_next_candidate(
+                       upload1.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     log_upload_candidate(upload2);
     BOOST_REQUIRE(upload2.source.get() != nullptr);
     BOOST_REQUIRE(upload2.starting_offset == offset2);
@@ -475,10 +489,13 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
     BOOST_REQUIRE(upload2.source != upload1.source);
     BOOST_REQUIRE(upload2.source->offsets().base_offset == offset2);
 
-    auto upload3 = policy.get_next_candidate(
-      upload2.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload3 = policy
+                     .get_next_candidate(
+                       upload2.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     log_upload_candidate(upload3);
     BOOST_REQUIRE(upload3.source.get() != nullptr);
     BOOST_REQUIRE(upload3.starting_offset == offset3);
@@ -486,9 +503,12 @@ FIXTURE_TEST(test_upload_segments_with_overlap, archiver_fixture) {
     BOOST_REQUIRE(upload3.source != upload2.source);
     BOOST_REQUIRE(upload3.source->offsets().base_offset == offset3);
 
-    auto upload4 = policy.get_next_candidate(
-      upload3.source->offsets().dirty_offset + model::offset(1),
-      high_watermark,
-      lm);
+    auto upload4 = policy
+                     .get_next_candidate(
+                       upload3.source->offsets().dirty_offset
+                         + model::offset(1),
+                       high_watermark,
+                       lm)
+                     .get();
     BOOST_REQUIRE(upload4.source.get() == nullptr);
 }
