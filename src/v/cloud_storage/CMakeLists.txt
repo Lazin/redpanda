@@ -4,6 +4,7 @@ v_cc_library(
   SRCS
     manifest.cc
     remote.cc
+    offset_translation_layer.cc
   DEPS
     Seastar::seastar
     v::bytes
