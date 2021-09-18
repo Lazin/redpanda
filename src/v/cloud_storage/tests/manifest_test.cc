@@ -11,6 +11,7 @@
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
 #include "cloud_storage/manifest.h"
+#include "cloud_storage/recoursive_directory_waler.h"
 #include "model/metadata.h"
 #include "seastarx.h"
 
@@ -167,5 +168,14 @@ SEASTAR_THREAD_TEST_CASE(test_manifest_difference) {
     {
         auto c = a.difference(b);
         BOOST_REQUIRE(c.size() == 0);
+    }
+}
+
+SEASTAR_THREAD_TEST_CASE(test_dirwalker) {
+    recoursive_directory_walker walker;
+    walker.walk("/home/lazin/workspace/test/pandadir").get();
+    for (auto [t, n, s] : walker.files) {
+        std::cout << "File " << n << " size " << s << " unix time "
+                  << t.time_since_epoch().count() << std::endl;
     }
 }
