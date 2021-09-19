@@ -315,6 +315,7 @@ struct topic_properties {
     std::optional<size_t> segment_size;
     tristate<size_t> retention_bytes{std::nullopt};
     tristate<std::chrono::milliseconds> retention_duration{std::nullopt};
+    std::optional<bool> recovery;
 
     bool is_compacted() const;
     bool has_overrides() const;

@@ -37,8 +37,8 @@ bool topic_properties::is_compacted() const {
 
 bool topic_properties::has_overrides() const {
     return cleanup_policy_bitflags || compaction_strategy || segment_size
-           || retention_bytes.has_value() || retention_bytes.is_disabled()
-           || retention_duration.has_value()
+           || recovery || retention_bytes.has_value()
+           || retention_bytes.is_disabled() || retention_duration.has_value()
            || retention_duration.is_disabled();
 }
 
@@ -76,7 +76,9 @@ storage::ntp_config topic_configuration::make_ntp_config(
             .retention_time = properties.retention_duration,
             // we disable cache for internal topics as they are read only once
             // during bootstrap.
-            .cache_enabled = storage::with_cache(!is_internal())});
+            .cache_enabled = storage::with_cache(!is_internal()),
+            .recovery_enabled = storage::topic_recovery_enabled(
+              properties.recovery ? *properties.recovery : false)});
     }
     return storage::ntp_config(
       model::ntp(tp_ns.ns, tp_ns.tp, p_id),
@@ -162,14 +164,15 @@ std::ostream& operator<<(std::ostream& o, const topic_properties& properties) {
       o,
       "{{ compression: {}, cleanup_policy_bitflags: {}, compaction_strategy: "
       "{}, retention_bytes: {}, retention_duration_ms: {}, segment_size: {}, "
-      "timestamp_type: {} }}",
+      "timestamp_type: {}, recovery_enabled: {} }}",
       properties.compression,
       properties.cleanup_policy_bitflags,
       properties.compaction_strategy,
       properties.retention_bytes,
       properties.retention_duration,
       properties.segment_size,
-      properties.timestamp_type);
+      properties.timestamp_type,
+      properties.recovery);
 
     return o;
 }
@@ -285,6 +288,7 @@ std::ostream& operator<<(
 } // namespace cluster
 
 namespace reflection {
+
 void adl<cluster::topic_configuration>::to(
   iobuf& out, cluster::topic_configuration&& t) {
     reflection::serialize(
@@ -298,7 +302,8 @@ void adl<cluster::topic_configuration>::to(
       t.properties.timestamp_type,
       t.properties.segment_size,
       t.properties.retention_bytes,
-      t.properties.retention_duration);
+      t.properties.retention_duration,
+      t.properties.recovery);
 }
 
 cluster::topic_configuration
@@ -323,6 +328,7 @@ adl<cluster::topic_configuration>::from(iobuf_parser& in) {
     cfg.properties.retention_bytes = adl<tristate<size_t>>{}.from(in);
     cfg.properties.retention_duration
       = adl<tristate<std::chrono::milliseconds>>{}.from(in);
+    cfg.properties.recovery = adl<std::optional<bool>>{}.from(in);
 
     return cfg;
 }
