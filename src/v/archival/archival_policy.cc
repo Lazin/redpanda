@@ -161,6 +161,106 @@ archival_policy::lookup_result archival_policy::find_segment(
     return {.segment = *it, .ntp_conf = &ntp_conf, .forced = force_upload};
 }
 
+struct segment_pos {
+    // TODO: use lower_bound/upper_bound like names
+    size_t file_offset{};
+    size_t final_file_offset{};
+    model::offset base_offset{};
+    model::offset max_offset{};
+    model::timestamp base_timestamp{};
+    model::timestamp max_timestamp{};
+};
+
+class batch_consumer : public storage::batch_consumer {
+public:
+    /// \brief  stopping the parser, may or may not be an error condition
+    /// it is a public interface indended to signal the internals of the parser
+    /// wether to continue or not.
+    using stop_parser = storage::batch_consumer::stop_parser;
+    /**
+     * Consume results informs parser what it the expected outcome of consume
+     * batch start decision
+     */
+    using consume_result = storage::batch_consumer::consume_result;
+
+    batch_consumer(
+      model::offset begin_inclusive, ss::lw_shared_ptr<segment_pos> pos)
+      : _begin_inclusive(begin_inclusive)
+      , _pos(std::move(pos)) {}
+
+    batch_consumer(const batch_consumer&) = default;
+    batch_consumer& operator=(const batch_consumer&) = default;
+    batch_consumer(batch_consumer&&) noexcept = default;
+    batch_consumer& operator=(batch_consumer&&) noexcept = default;
+
+    /**
+     * returns consume result, allow consumer to decide if batch header should
+     * be consumed, it may be called more than once with the same header.
+     */
+    consume_result
+    accept_batch_start(const model::record_batch_header& hdr) const override {
+        if (_stop) {
+            return consume_result::stop_parser;
+        }
+        if (hdr.last_offset() < _begin_inclusive) {
+            return consume_result::accept_batch;
+        }
+        return consume_result::skip_batch;
+    }
+
+    /**
+     * unconditionally consumes batch start
+     */
+    void consume_batch_start(
+      model::record_batch_header hdr,
+      size_t physical_base_offset,
+      size_t size_on_disk) override {
+        vlog(
+          archival_log.debug,
+          "consume_batch_start called, hdr: {}, physical_base_offset: {}, "
+          "size_on_disk: {}",
+          hdr,
+          physical_base_offset,
+          size_on_disk);
+        _pos->file_offset = physical_base_offset + size_on_disk;
+        _pos->final_file_offset = physical_base_offset + size_on_disk;
+        _pos->base_offset = hdr.last_offset() + model::offset(1);
+    }
+
+    /**
+     * unconditionally skip batch
+     */
+    void skip_batch_start(
+      model::record_batch_header hdr,
+      size_t physical_base_offset,
+      size_t size_on_disk) override {
+        vlog(
+          archival_log.debug,
+          "skip_batch_start called, hdr: {}, physical_base_offset: {}, "
+          "size_on_disk: {}",
+          hdr,
+          physical_base_offset,
+          size_on_disk);
+        _pos->base_timestamp = hdr.first_timestamp;
+        _pos->max_timestamp = hdr.max_timestamp;
+        _pos->final_file_offset = physical_base_offset + size_on_disk;
+        _stop = true;
+    }
+
+    stop_parser consume_batch_end() override { return stop_parser::no; }
+
+    void consume_records(iobuf&&) override {}
+
+    void print(std::ostream& o) const override {
+        o << "archival_policy_batch_consumer";
+    }
+
+private:
+    model::offset _begin_inclusive;
+    ss::lw_shared_ptr<segment_pos> _pos;
+    bool _stop{false};
+};
+
 // Data sink for noop output_stream instance
 // needed to implement scanning
 struct null_data_sink final : ss::data_sink_impl {
@@ -251,6 +351,41 @@ static ss::future<> get_file_range(
               }
               return storage::batch_consumer::consume_result::stop_parser;
           });
+        auto istr2 = segment->reader().data_stream(
+          scan_from, ss::default_priority_class());
+        auto spos = ss::make_lw_shared<segment_pos>();
+        spos->base_offset = sto;
+        spos->file_offset = scan_from;
+        storage::continuous_batch_parser parser(
+          std::make_unique<batch_consumer>(begin_inclusive, spos),
+          std::move(istr2));
+        auto res2 = co_await parser.consume();
+        vassert(res2.has_value(), "batch consumer failed");
+        vlog(
+          archival_log.debug,
+          "Segment pos! base_offset {}, base_timestamp {}, file_offset {}, "
+          "max_offset {}, max_timestamp {}, final_file_offset {}",
+          spos->base_offset,
+          spos->base_timestamp,
+          spos->file_offset,
+          spos->max_offset,
+          spos->max_timestamp,
+          spos->final_file_offset);
+        vlog(
+          archival_log.debug,
+          "Actual file offset value {}, Expected value {}",
+          spos->file_offset,
+          scan_from + res.value());
+        vlog(
+          archival_log.debug,
+          "Actual base offset value {}, Expected value {}",
+          spos->base_offset,
+          sto);
+        vassert(
+          spos->file_offset == scan_from + res.value(),
+          "Unexpected file offset");
+        vassert(spos->base_offset == sto, "Unexpected starting offset");
+
         if (res.has_error()) {
             vlog(
               archival_log.error,
@@ -322,6 +457,39 @@ static ss::future<> get_file_range(
               }
               return storage::batch_consumer::consume_result::stop_parser;
           });
+        auto istr2 = segment->reader().data_stream(
+          scan_from, ss::default_priority_class());
+        auto spos = ss::make_lw_shared<segment_pos>();
+        spos->max_offset = fo;
+        storage::continuous_batch_parser parser(
+          std::make_unique<batch_consumer>(*end_inclusive, spos),
+          std::move(istr2));
+        auto res2 = co_await parser.consume();
+        vassert(res2.has_value(), "batch consumer failed");
+        vlog(
+          archival_log.debug,
+          "Segment pos! base_offset {}, base_timestamp {}, file_offset {}, "
+          "max_offset {}, max_timestamp {}, final_file_offset {}",
+          spos->base_offset,
+          spos->base_timestamp,
+          spos->file_offset,
+          spos->max_offset,
+          spos->max_timestamp,
+          spos->final_file_offset);
+        vlog(
+          archival_log.debug,
+          "Actual final file offset value {}, Expected value {}",
+          scan_from + spos->final_file_offset,
+          scan_from + res.value());
+        vlog(
+          archival_log.debug,
+          "Actual max offset value {}, Expected value {}",
+          spos->max_offset,
+          fo);
+        vassert(
+          scan_from + spos->final_file_offset == scan_from + res.value(),
+          "Unexpected file offset");
+        vassert(spos->max_offset == fo, "Unexpected max offset");
         if (res.has_error()) {
             vlog(
               archival_log.error,
