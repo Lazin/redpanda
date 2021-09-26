@@ -22,11 +22,11 @@
 
 #include <seastar/util/bool_class.hh>
 
-#include <absl/container/btree_map.h>
 #include <rapidjson/fwd.h>
 
 #include <compare>
 #include <iterator>
+#include <map>
 
 namespace cloud_storage {
 
@@ -143,7 +143,7 @@ public:
 
     using key = std::variant<segment_name, remote_segment_path>;
     using value = segment_meta;
-    using segment_map = absl::btree_map<key, value>;
+    using segment_map = std::map<key, value>;
     using const_iterator = segment_map::const_iterator;
     using const_reverse_iterator = segment_map::const_reverse_iterator;
 

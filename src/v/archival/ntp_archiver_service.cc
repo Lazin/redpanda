@@ -73,8 +73,13 @@ ntp_archiver::ntp_archiver(
   , _gate()
   , _initial_backoff(conf.initial_backoff)
   , _segment_upload_timeout(conf.segment_upload_timeout)
-  , _manifest_upload_timeout(conf.manifest_upload_timeout) {
+  , _manifest_upload_timeout(conf.manifest_upload_timeout)
+  , _remote_partition(_manifest, _remote, _bucket) {
     vlog(archival_log.trace, "Create ntp_archiver {}", _ntp.path());
+    if (_partition) {
+        _partition->connect_with_cloud_storage(
+          _remote_partition.weak_from_this());
+    }
 }
 
 ss::future<> ntp_archiver::stop() {

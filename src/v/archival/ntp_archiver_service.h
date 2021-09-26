@@ -199,6 +199,7 @@ private:
     ss::lowres_clock::duration _initial_backoff;
     ss::lowres_clock::duration _segment_upload_timeout;
     ss::lowres_clock::duration _manifest_upload_timeout;
+    cloud_storage::remote_partition _remote_partition;
 };
 
 } // namespace archival
