@@ -365,7 +365,7 @@ size_t remote_segment_batch_reader::produce(model::record_batch batch) {
     return _total_size;
 }
 
-ss::future<> remote_segment_batch_reader::close() {
+ss::future<> remote_segment_batch_reader::stop() {
     vlog(cst_log.debug, "remote_segment_batch_reader::close");
     if (_parser) {
         vlog(
