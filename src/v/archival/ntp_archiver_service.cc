@@ -394,4 +394,29 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
       });
 }
 
+uint64_t ntp_archiver::estimate_backlog_size(cluster::partition_manager& pm) {
+    auto last_offset = _manifest.size() ? _manifest.get_last_offset()
+                                        : model::offset(0);
+    auto opt_log = pm.log(_manifest.get_ntp());
+    if (!opt_log) {
+        return 0U;
+    }
+    auto log = dynamic_cast<storage::disk_log_impl*>(opt_log->get_impl());
+    uint64_t total_size = 0;
+    uint64_t prev_size = 0;
+    // Ignore last segment
+    for (auto& segm : log->segments()) {
+        total_size += prev_size;
+        prev_size = 0;
+        if (segm->offsets().dirty_offset > last_offset) {
+            prev_size = segm->size_bytes();
+        }
+    }
+    // Note: last segment is not accounted since it's not uploaded until it's
+    // sealed (it stops being the last one in this case). If the partial uploads
+    // are enabled we can afford to not account for the last segment since the
+    // uploads are able to keep up with ingestion anyway.
+    return total_size;
+}
+
 } // namespace archival

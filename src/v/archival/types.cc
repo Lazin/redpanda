@@ -14,7 +14,8 @@
 
 namespace archival {
 
-std::ostream& operator << (std::ostream& o, const std::optional<segment_time_limit>& tl) {
+std::ostream&
+operator<<(std::ostream& o, const std::optional<segment_time_limit>& tl) {
     if (tl) {
         fmt::print(o, "{}", tl.value()().count());
     } else {
