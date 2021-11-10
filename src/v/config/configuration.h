@@ -193,6 +193,15 @@ struct configuration final : public config_store {
     property<std::optional<std::chrono::seconds>>
       cloud_storage_segment_max_upload_interval_sec;
 
+    // Archival upload controller
+    property<std::chrono::milliseconds>
+      cloud_storage_upload_ctrl_update_interval_ms;
+    property<double> cloud_storage_upload_ctrl_p_coeff;
+    property<double> cloud_storage_upload_ctrl_i_coeff;
+    property<double> cloud_storage_upload_ctrl_d_coeff;
+    property<int16_t> cloud_storage_upload_ctrl_min_shares;
+    property<int16_t> cloud_storage_upload_ctrl_max_shares;
+
     // Archival cache
     property<std::optional<ss::sstring>> cloud_storage_cache_directory;
     property<size_t> cloud_storage_cache_size;

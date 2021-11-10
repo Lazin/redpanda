@@ -827,6 +827,42 @@ configuration::configuration()
       "remote storage (sec)",
       required::no,
       std::nullopt)
+  , cloud_storage_upload_ctrl_update_interval_ms(
+      *this,
+      "cloud_storage_upload_ctrl_update_interval_ms",
+      "",
+      required::no,
+      120s)
+  , cloud_storage_upload_ctrl_p_coeff(
+      *this,
+      "cloud_storage_upload_ctrl_p_coeff",
+      "proportional coefficient for upload PID controller",
+      required::no,
+      10.0)
+  , cloud_storage_upload_ctrl_i_coeff(
+      *this,
+      "cloud_storage_upload_ctrl_i_coeff",
+      "integral coefficient for upload PID controller.",
+      required::no,
+      0.2)
+  , cloud_storage_upload_ctrl_d_coeff(
+      *this,
+      "cloud_storage_upload_ctrl_d_coeff",
+      "derivative coefficient for upload PID controller.",
+      required::no,
+      0.0)
+  , cloud_storage_upload_ctrl_min_shares(
+      *this,
+      "compaction_ctrl_min_shares",
+      "minimum number of IO and CPU shares that archival upload can use",
+      required::no,
+      100)
+  , cloud_storage_upload_ctrl_max_shares(
+      *this,
+      "cloud_storage_upload_ctrl_max_shares",
+      "maximum number of IO and CPU shares that archival upload can use",
+      required::no,
+      1000)
   , cloud_storage_cache_directory(
       *this,
       "cloud_storage_cache_directory",

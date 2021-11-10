@@ -11,6 +11,7 @@
 
 #include "archival/ntp_archiver_service.h"
 #include "archival/service.h"
+#include "archival/upload_controller.h"
 #include "cluster/cluster_utils.h"
 #include "cluster/controller.h"
 #include "cluster/fwd.h"
@@ -49,6 +50,7 @@
 #include "resource_mgmt/io_priority.h"
 #include "rpc/server.h"
 #include "rpc/simple_protocol.h"
+#include "storage/backlog_controller.h"
 #include "storage/chunk_cache.h"
 #include "storage/compaction_controller.h"
 #include "storage/directories.h"
@@ -62,6 +64,7 @@
 
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
+#include <seastar/core/seastar.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/json/json_elements.hh>
@@ -487,6 +490,36 @@ static storage::backlog_controller_config compaction_controller_config(
       config::shard_local_cfg().compaction_ctrl_max_shares());
 }
 
+inline storage::backlog_controller_config
+make_upload_controller_config(ss::scheduling_group sg) {
+    // This settings are similar to compaction_controller_config.
+    // The desired setpoint for archival is set to 0 since the goal is to upload
+    // all data that we have.
+    // If the size of the backlog (the data which should be uploaded to S3) is
+    // larger than this value we need to bump the scheduling priority.
+    // Otherwise, we're good with the minimal.
+
+    auto available = ss::fs_avail(
+                       config::shard_local_cfg().data_directory().path.string())
+                       .get();
+    int64_t setpoint = 0;
+    int64_t normalization = static_cast<int64_t>(available)
+                            / (1000 * ss::smp::count);
+    return {
+      config::shard_local_cfg().cloud_storage_upload_ctrl_p_coeff(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_i_coeff(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_d_coeff(),
+      normalization,
+      setpoint,
+      static_cast<int>(
+        priority_manager::local().archival_priority().get_shares()),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_update_interval_ms(),
+      sg,
+      priority_manager::local().archival_priority(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_min_shares(),
+      config::shard_local_cfg().cloud_storage_upload_ctrl_max_shares()};
+}
+
 // add additional services in here
 void application::wire_up_services() {
     if (_redpanda_enabled) {
@@ -699,6 +732,12 @@ void application::wire_up_redpanda_services() {
           std::ref(arch_configs))
           .get();
         arch_configs.stop().get();
+
+        construct_service(
+          _upload_controller,
+          std::ref(archival_scheduler),
+          make_upload_controller_config(_scheduling_groups.archival_upload()))
+          .get();
     }
     // group membership
     syschecks::systemd_message("Creating partition manager").get();
@@ -1111,4 +1150,5 @@ void application::start_redpanda() {
 
     _compaction_controller.invoke_on_all(&storage::compaction_controller::start)
       .get();
+    _upload_controller.invoke_on_all(&archival::upload_controller::start).get();
 }
