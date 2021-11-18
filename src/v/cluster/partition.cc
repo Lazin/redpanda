@@ -78,9 +78,7 @@ partition::partition(
         if (
           config::shard_local_cfg().cloud_storage_enabled()
           && cloud_storage_api.local_is_initialized()
-          && _raft->ntp().ns == model::kafka_namespace
-          && model::is_archival_enabled(
-            this->get_ntp_config().get_overrides().shadow_indexing_mode)) {
+          && _raft->ntp().ns == model::kafka_namespace) {
             _archival_meta_stm
               = ss::make_shared<cluster::archival_metadata_stm>(
                 _raft.get(), cloud_storage_api.local(), clusterlog);

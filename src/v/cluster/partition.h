@@ -208,6 +208,17 @@ public:
         return _archival_meta_stm;
     }
 
+    /// Return true if shadow indexing is enabled for the partition
+    bool shadow_indexing_enabled() const {
+        const auto& cfg = _raft->log_config();
+        if (!cfg.has_overrides()) {
+            return false;
+        }
+        auto mode = cfg.get_overrides().shadow_indexing_mode;
+        return mode == model::shadow_indexing_mode::shadow_indexing
+               || mode == model::shadow_indexing_mode::full;
+    }
+
     /// Check if cloud storage is connected to cluster partition
     ///
     /// The remaining 'cloud' methods can only be called if this

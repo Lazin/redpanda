@@ -205,10 +205,18 @@ enum class shadow_indexing_mode : int8_t {
     archival_storage = 1,
     // Upload data and enable shadow indexing
     shadow_indexing = 2,
+    // Enable both shadow indexing and upload
+    full = 3,
 };
 
 inline bool is_archival_enabled(shadow_indexing_mode m) {
-    return m == shadow_indexing_mode::archival_storage;
+    return m == shadow_indexing_mode::archival_storage
+           || m == shadow_indexing_mode::full;
+}
+
+inline bool is_shadowindex_enabled(shadow_indexing_mode m) {
+    return m == shadow_indexing_mode::shadow_indexing
+           || m == shadow_indexing_mode::full;
 }
 
 std::ostream& operator<<(std::ostream&, const shadow_indexing_mode&);

@@ -267,6 +267,18 @@ ss::future<stm_snapshot> archival_metadata_stm::take_snapshot() {
 }
 
 model::offset archival_metadata_stm::max_collectible_offset() {
+    if (
+      _raft->log_config().has_overrides()
+      && !model::is_archival_enabled(
+        _raft->log_config().get_overrides().shadow_indexing_mode)) {
+        // The archival is disabled but the state machine still exists so we
+        // shouldn't stop eviction from happening.
+        vlog(
+          _logger.info,
+          "handled log eviction, next offset: {}",
+          _raft->last_visible_index());
+        return _raft->last_visible_index();
+    }
     return _last_offset;
 }
 

@@ -49,6 +49,8 @@ static constexpr std::string_view topic_property_recovery
   = "x-redpanda-recovery";
 static constexpr std::string_view topic_property_archival
   = "x-redpanda-archival";
+static constexpr std::string_view topic_property_shadowindex
+  = "x-redpanda-shadowindex";
 
 // Data-policy property
 static constexpr std::string_view topic_property_data_policy_function_name

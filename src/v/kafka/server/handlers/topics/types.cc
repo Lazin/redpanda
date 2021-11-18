@@ -71,6 +71,13 @@ get_shadow_indexing_mode(const config_map_t& config) {
     if (arch_enabled && *arch_enabled) {
         mode = model::shadow_indexing_mode::archival_storage;
     }
+    auto si_enabled = get_bool_value(config, topic_property_shadowindex);
+    if (si_enabled && *si_enabled) {
+        mode = model::shadow_indexing_mode::full;
+    }
+    // NOTE: the 'x-redpanda-shadowindex' property enables both shadow indexing
+    // and archival. The 'model::shadow_indexing_mode::shadow_indexing' should
+    // be used for read replicas.
     return mode;
 }
 

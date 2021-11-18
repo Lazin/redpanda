@@ -376,6 +376,9 @@ std::ostream& operator<<(std::ostream& o, const shadow_indexing_mode& si) {
     case shadow_indexing_mode::shadow_indexing:
         o << "shadow_indexing";
         break;
+    case shadow_indexing_mode::full:
+        o << "full";
+        break;
     }
     return o;
 }

@@ -35,7 +35,8 @@ ss::future<model::record_batch_reader> replicated_partition::make_reader(
     auto local_kafka_start_offset = _translator->from_log_offset(
       _partition->start_offset());
     if (
-      _partition->cloud_data_available()
+      _partition->shadow_indexing_enabled()
+      && _partition->cloud_data_available()
       && cfg.start_offset < local_kafka_start_offset
       && cfg.start_offset >= _partition->start_cloud_offset()) {
         cfg.type_filter = {model::record_batch_type::raft_data};

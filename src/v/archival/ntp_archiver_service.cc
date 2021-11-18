@@ -304,6 +304,20 @@ ntp_archiver::schedule_uploads(
       });
 }
 
+static bool
+is_archival_enabled(const ss::lw_shared_ptr<cluster::partition>& part) {
+    if (part && part->get_ntp_config().has_overrides()) {
+        /*TODO:remove*/ vlog(
+          archival_log.info,
+          "Has overrides, archival enabled = {}",
+          model::is_archival_enabled(
+            part->get_ntp_config().get_overrides().shadow_indexing_mode));
+        return model::is_archival_enabled(
+          part->get_ntp_config().get_overrides().shadow_indexing_mode);
+    }
+    return false;
+}
+
 ss::future<ntp_archiver::batch_result> ntp_archiver::wait_all_scheduled_uploads(
   std::vector<ntp_archiver::scheduled_upload> scheduled,
   retry_chain_node& parent) {
@@ -350,7 +364,8 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::wait_all_scheduled_uploads(
         }
 
         // TODO: error handling
-        if (_partition->archival_meta_stm()) {
+        if (
+          is_archival_enabled(_partition) && _partition->archival_meta_stm()) {
             retry_chain_node rc_node(
               _manifest_upload_timeout, _initial_backoff, &parent);
             if (!co_await _partition->archival_meta_stm()->add_segments(
