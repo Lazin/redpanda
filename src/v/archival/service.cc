@@ -20,6 +20,7 @@
 #include "config/property.h"
 #include "http/client.h"
 #include "likely.h"
+#include "model/fundamental.h"
 #include "model/metadata.h"
 #include "model/namespace.h"
 #include "s3/client.h"
@@ -336,7 +337,12 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
                       storage::log_manager& lm = api.log_mgr();
                       auto log = lm.get(ntp);
                       auto part = _partition_manager.local().get(ntp);
-                      if (!log.has_value() || !part) {
+                      if (
+                        !log.has_value() || !part
+                        || !model::is_archival_enabled(
+                          part->get_ntp_config()
+                            .get_overrides()
+                            .shadow_indexing_mode)) {
                           return ss::now();
                       }
                       auto svc = ss::make_lw_shared<ntp_archiver>(

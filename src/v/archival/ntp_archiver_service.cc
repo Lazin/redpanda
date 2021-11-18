@@ -14,6 +14,7 @@
 #include "archival/logger.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/types.h"
+#include "model/fundamental.h"
 #include "model/metadata.h"
 #include "raft/configuration_manager.h"
 #include "s3/client.h"

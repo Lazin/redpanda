@@ -207,6 +207,10 @@ enum class shadow_indexing_mode : int8_t {
     shadow_indexing = 2,
 };
 
+inline bool is_archival_enabled(shadow_indexing_mode m) {
+    return m == shadow_indexing_mode::archival_storage;
+}
+
 std::ostream& operator<<(std::ostream&, const shadow_indexing_mode&);
 
 } // namespace model

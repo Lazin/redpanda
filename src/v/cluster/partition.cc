@@ -11,6 +11,7 @@
 
 #include "cluster/logger.h"
 #include "config/configuration.h"
+#include "model/fundamental.h"
 #include "model/namespace.h"
 #include "prometheus/prometheus_sanitize.h"
 #include "raft/types.h"
@@ -77,7 +78,9 @@ partition::partition(
         if (
           config::shard_local_cfg().cloud_storage_enabled()
           && cloud_storage_api.local_is_initialized()
-          && _raft->ntp().ns == model::kafka_namespace) {
+          && _raft->ntp().ns == model::kafka_namespace
+          && model::is_archival_enabled(
+            this->get_ntp_config().get_overrides().shadow_indexing_mode)) {
             _archival_meta_stm
               = ss::make_shared<cluster::archival_metadata_stm>(
                 _raft.get(), cloud_storage_api.local(), clusterlog);
