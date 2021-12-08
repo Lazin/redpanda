@@ -34,13 +34,19 @@ public:
 
     void update(const manifest& m);
 
+    struct stream_stats {
+      model::offset min_offset;
+      model::offset max_offset;
+      uint64_t size_bytes;
+    };
+
     /// Copy source stream into the destination stream
     ///
     /// Patch stream content by removing all non-data batches and adjusting the
     /// record batch offsets/checksums.
     /// The caller is responsible for patching the segement file name and
     /// passing correct base_offset of the original segment.
-    ss::future<uint64_t> copy_stream(
+    ss::future<stream_stats> copy_stream(
       remote_segment_path path,
       ss::input_stream<char> src,
       ss::output_stream<char> dst,

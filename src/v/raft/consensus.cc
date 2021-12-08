@@ -27,6 +27,7 @@
 #include "raft/vote_stm.h"
 #include "reflection/adl.h"
 #include "storage/api.h"
+#include "storage/ntp_config.h"
 #include "vlog.h"
 
 #include <seastar/core/coroutine.hh>
@@ -1045,7 +1046,11 @@ ss::future<> consensus::do_start() {
                 .highest_known_offset
                 = _configuration_manager.get_highest_known_offset(),
               };
-
+              vlog(_ctxlog.info, "RFTBOOTSTRAP must_reset={}", must_reset);
+              vlog(_ctxlog.info, "RFTBOOTSTRAP highest_known_offset={}", bootstrap.highest_known_offset);
+              for (auto a: bootstrap.offset2delta) {
+                vlog(_ctxlog.info, "RFTBOOTSTRAP offset2delta={}:{}", a.first, a.second);
+              }
               return _offset_translator.start(must_reset, std::move(bootstrap));
           })
           .then([this] { return hydrate_snapshot(); })

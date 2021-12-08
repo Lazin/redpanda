@@ -75,6 +75,14 @@ bytes serialize_kvstore_key(raft::group_id group, kvstore_key_type key_type) {
 
 } // namespace
 
+bytes offset_translator::kvstore_offsetmap_key(raft::group_id group) {
+  return serialize_kvstore_key(group, kvstore_key_type::offsets_map);
+}
+
+bytes offset_translator::kvstore_highest_known_offset_key(raft::group_id group) {
+  return serialize_kvstore_key(group, kvstore_key_type::highest_known_offset);
+}
+
 ss::future<>
 offset_translator::start(must_reset reset, bootstrap_state&& bootstrap) {
     vassert(
@@ -112,6 +120,11 @@ offset_translator::start(must_reset reset, bootstrap_state&& bootstrap) {
             // this case we take it from the map
             _highest_known_offset = std::max(
               _highest_known_offset, _state->last_gap_offset());
+
+            vlog(
+              _logger.info,
+              "offset translation kvstore state found, "
+              "highest known offset {}, last_delta {}, last_gap_offset {}", _highest_known_offset, _state->last_delta(), _state->last_gap_offset());
         } else {
             // For backwards compatibility: load state from
             // configuration_manager state

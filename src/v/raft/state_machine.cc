@@ -109,6 +109,7 @@ ss::future<result<replicate_result>> state_machine::quorum_write_empty_batch(
 }
 
 ss::future<> state_machine::apply() {
+    /*TODO: remove*/vlog(_log.info, "state_machine::apply called");
     // wait until consensus commit index is >= _next
     return _raft->events()
       .wait(_next, model::no_timeout, _as)
@@ -121,10 +122,12 @@ ss::future<> state_machine::apply() {
               // build a reader for log range [_next, +inf).
               storage::log_reader_config config(
                 _next, model::model_limits<model::offset>::max(), _io_prio);
+    /*TODO: remove*/vlog(_log.info, "state_machine::apply creating reader: {}", config);
               return _raft->make_reader(config);
           });
       })
       .then([this](model::record_batch_reader reader) {
+    /*TODO: remove*/vlog(_log.info, "state_machine::apply reader created");
           // apply each batch to the state machine
           return std::move(reader)
             .consume(batch_applicator(this), model::no_timeout)

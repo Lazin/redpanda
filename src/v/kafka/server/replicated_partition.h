@@ -33,12 +33,16 @@ public:
     const model::ntp& ntp() const final { return _partition->ntp(); }
 
     model::offset start_offset() const final {
+        static ss::logger tmplog("tmplog-replicated-part");
+        vlog(tmplog.info, "start_offset called, raft start offset: {}", _partition->start_offset());
         auto local_kafka_start_offset = _translator->from_log_offset(
           _partition->start_offset());
+        vlog(tmplog.info, "start_offset called, local_kafka_start_offset: {}", local_kafka_start_offset);
         if (
           _partition->is_remote_fetch_enabled()
           && _partition->cloud_data_available()
           && (_partition->start_cloud_offset() < local_kafka_start_offset)) {
+        vlog(tmplog.info, "start_offset called, start_cloud_offset: {}", _partition->start_cloud_offset());
             return _partition->start_cloud_offset();
         }
         return local_kafka_start_offset;

@@ -257,6 +257,32 @@ ss::future<> archival_metadata_stm::apply_snapshot(
     co_return;
 }
 
+ss::future<> archival_metadata_stm::make_snapshot_on_disk(
+  const storage::ntp_config& cfg,
+  const cloud_storage::manifest& m,
+  ss::logger& logger) {
+    auto segments = segments_from_manifest(m);
+    if (segments.empty()) {
+        co_return;
+    }
+    auto start_offset = segments[0].meta.base_offset;
+    iobuf snap_data = serde::to_iobuf(
+      snapshot{.segments = std::move(segments)});
+    vlog(
+      logger.info,
+      "creating snapshot on disk at offset: {}, remote start_offset: {}, "
+      "last_offset: {}, ntp_config: {}",
+      m.get_last_offset(),
+      start_offset,
+      m.get_last_offset(),
+      cfg);
+
+    auto snapshot = stm_snapshot::create(
+      0, m.get_last_offset(), std::move(snap_data));
+    vlog(logger.info, "work_directory: {}, base_directory: {}, topic_directory: {}", cfg.work_directory(), cfg.base_directory(), cfg.topic_directory());
+    co_return;
+}
+
 ss::future<stm_snapshot> archival_metadata_stm::take_snapshot() {
     auto segments = segments_from_manifest(_manifest);
     iobuf snap_data = serde::to_iobuf(

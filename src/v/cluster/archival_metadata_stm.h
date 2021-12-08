@@ -14,6 +14,7 @@
 #include "cloud_storage/manifest.h"
 #include "cloud_storage/remote.h"
 #include "cluster/persisted_stm.h"
+#include "storage/ntp_config.h"
 #include "utils/mutex.h"
 #include "utils/prefix_logger.h"
 #include "utils/retry_chain_node.h"
@@ -44,6 +45,11 @@ public:
     const cloud_storage::manifest& manifest() const { return _manifest; }
 
     ss::future<> stop() override;
+
+    static ss::future<> make_snapshot_on_disk(
+      const storage::ntp_config& cfg,
+      const cloud_storage::manifest& m,
+      ss::logger& logger);
 
 private:
     ss::future<bool>

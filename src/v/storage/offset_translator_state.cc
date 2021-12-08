@@ -12,6 +12,7 @@
 #include "storage/offset_translator_state.h"
 
 #include "vassert.h"
+#include "storage/logger.h"
 
 namespace storage {
 
@@ -36,6 +37,10 @@ inline constexpr model::offset prev_offset(model::offset o) {
 int64_t offset_translator_state::delta(model::offset o) const {
     if (_last_offset2batch.empty()) {
         return 0;
+    }
+    /*TODO: remove*/vlog(stlog.info, "OT delta {} requested", o);
+    for (const auto& it: _last_offset2batch) {
+      vlog(stlog.info, "last-offset: {}, batch base offset: {}, batch next delta: {}", it.first, it.second.base_offset, it.second.next_delta);
     }
 
     auto it = _last_offset2batch.lower_bound(o);

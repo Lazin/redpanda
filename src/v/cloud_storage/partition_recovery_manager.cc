@@ -78,17 +78,12 @@ partition_recovery_manager::~partition_recovery_manager() {
 
 ss::future<> partition_recovery_manager::stop() { co_await _gate.close(); }
 
-/// Download full log based on manifest data.
-/// The 'ntp_config' should have corresponding override. If override
-/// is not set nothing will happen and the returned future will be
-/// ready (not in failed state).
-/// \return true if log was actually downloaded, false otherwise
-ss::future<bool>
+ss::future<log_recovery_result>
 partition_recovery_manager::download_log(const storage::ntp_config& ntp_cfg) {
     if (!ntp_cfg.has_overrides()) {
         vlog(
           cst_log.debug, "No overrides for {} found, skipping", ntp_cfg.ntp());
-        co_return false;
+        co_return log_recovery_result{};
     }
     auto enabled = ntp_cfg.get_overrides().recovery_enabled;
     if (!enabled) {
@@ -96,7 +91,7 @@ partition_recovery_manager::download_log(const storage::ntp_config& ntp_cfg) {
           cst_log.debug,
           "No manifest override for {} found, skipping",
           ntp_cfg.ntp());
-        co_return false;
+        co_return log_recovery_result{};
     }
     partition_downloader downloader(
       ntp_cfg, &_remote.local(), _bucket, _gate, _root);
@@ -119,16 +114,16 @@ partition_downloader::partition_downloader(
       _rtcnode,
       ssx::sformat("[{}, rev: {}]", ntpc.ntp().path(), ntpc.get_revision())) {}
 
-ss::future<bool> partition_downloader::download_log() {
+ss::future<log_recovery_result> partition_downloader::download_log() {
     vlog(_ctxlog.debug, "Check conditions for S3 recovery for {}", _ntpc);
     if (!_ntpc.has_overrides()) {
         vlog(_ctxlog.debug, "No overrides for {} found, skipping", _ntpc.ntp());
-        co_return false;
+        co_return log_recovery_result{};
     }
     // TODO (evgeny): maybe check the condition differently
     bool exists = co_await ss::file_exists(_ntpc.work_directory());
     if (exists) {
-        co_return false;
+        co_return log_recovery_result{};
     }
     auto enabled = _ntpc.get_overrides().recovery_enabled;
     if (!enabled) {
@@ -136,14 +131,13 @@ ss::future<bool> partition_downloader::download_log() {
           _ctxlog.debug,
           "No manifest override for {} found, skipping",
           _ntpc.ntp());
-        co_return false;
+        co_return log_recovery_result{};
     }
     vlog(_ctxlog.info, "Downloading log for {}", _ntpc.ntp());
     try {
         auto topic_manifest_path = topic_manifest::get_topic_manifest_path(
           _ntpc.ntp().ns, _ntpc.ntp().tp.topic);
-        co_await download_log(topic_manifest_path);
-        co_return true;
+        co_return co_await download_log(topic_manifest_path);
     } catch (...) {
         // We can get here if the parttion manifest is missing (or some
         // other failure is preventing us from recovering the partition). In
@@ -160,7 +154,7 @@ ss::future<bool> partition_downloader::download_log() {
           "Error during log recovery: {}",
           std::current_exception());
     }
-    co_return false;
+    co_return log_recovery_result{};
 }
 
 static bool same_ntp(const manifest_path_components& c, const model::ntp& ntp) {
@@ -239,7 +233,7 @@ partition_downloader::build_offset_map(const recovery_material& mat) {
 }
 
 // entry point for the whole thing
-ss::future<>
+ss::future<log_recovery_result>
 partition_downloader::download_log(const remote_manifest_path& manifest_key) {
     auto prefix = std::filesystem::path(_ntpc.work_directory());
     auto retention = get_retention_policy(_ntpc.get_overrides());
@@ -301,7 +295,7 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
           offset_map, target, prefix, r.retention_duration);
     }
     // Move parts to final destinations
-    co_await move_parts(std::move(part));
+    co_await move_parts(part);
 
     auto upl_result = co_await _remote->upload_manifest(
       _bucket, target, _rtcnode);
@@ -335,7 +329,13 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
               target.get_manifest_path());
         }
     }
-    co_return;
+    log_recovery_result result{
+      .completed = true,
+      .min_kafka_offset = part.range.min_offset,
+      .max_kafka_offset = part.range.max_offset,
+      .manifest = target,
+    };
+    co_return result;
 }
 
 ss::future<partition_downloader::download_part>
@@ -352,6 +352,8 @@ partition_downloader::download_log_with_capped_size(
         size_t size_bytes;
     };
     std::deque<download> staged_downloads;
+    model::offset start_offset{0};
+    model::offset start_delta{0};
     for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
         const auto& meta = it->second.meta;
         if (total_size > max_size) {
@@ -374,11 +376,18 @@ partition_downloader::download_log_with_capped_size(
           .size_bytes = meta.size_bytes,
         });
         total_size += meta.size_bytes;
+        start_offset = meta.base_offset;
+        start_delta = meta.delta_offset == model::offset() ? start_delta
+                                                           : meta.delta_offset;
     }
     download_part dlpart{
       .part_prefix = std::filesystem::path(prefix.string() + "_part"),
       .dest_prefix = prefix,
-      .num_files = 0};
+      .num_files = 0,
+      .range = {
+        .min_offset = model::offset::max(),
+        .max_offset = model::offset::min(),
+      }};
 
     co_await ss::max_concurrent_for_each(
       staged_downloads,
@@ -394,7 +403,11 @@ partition_downloader::download_log_with_capped_size(
             dl.size_bytes,
             dlpart.part_prefix,
             dlpart.dest_prefix);
-          co_await download_file(dl.fname, manifest, dlpart);
+          auto offsets = co_await download_file(dl.fname, manifest, dlpart);
+          dlpart.range.min_offset = std::min(
+            dlpart.range.min_offset, offsets.min_offset);
+          dlpart.range.max_offset = std::max(
+            dlpart.range.max_offset, offsets.max_offset);
           ++dlpart.num_files;
       });
     co_return dlpart;
@@ -415,7 +428,8 @@ partition_downloader::download_log_with_capped_time(
       model::timestamp_clock::now() - retention_time);
 
     std::deque<remote_segment_path> staged_downloads;
-
+    model::offset start_offset{0};
+    model::offset start_delta{0};
     for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
         const auto& meta = it->second.meta;
         if (
@@ -438,11 +452,18 @@ partition_downloader::download_log_with_capped_time(
         }
         auto fname = it->second.path;
         staged_downloads.push_front(fname);
+        start_offset = meta.base_offset;
+        start_delta = meta.delta_offset == model::offset() ? start_delta
+                                                           : meta.delta_offset;
     }
     download_part dlpart = {
       .part_prefix = std::filesystem::path(prefix.string() + "_part"),
       .dest_prefix = prefix,
-      .num_files = 0};
+      .num_files = 0,
+      .range = {
+        .min_offset = model::offset::max(),
+        .max_offset = model::offset::min(),
+      }};
 
     co_await ss::max_concurrent_for_each(
       staged_downloads,
@@ -457,7 +478,11 @@ partition_downloader::download_log_with_capped_time(
             fname,
             dlpart.part_prefix,
             dlpart.dest_prefix);
-          co_await download_file(fname, manifest, dlpart);
+          auto offsets = co_await download_file(fname, manifest, dlpart);
+          dlpart.range.min_offset = std::min(
+            dlpart.range.min_offset, offsets.min_offset);
+          dlpart.range.max_offset = std::max(
+            dlpart.range.max_offset, offsets.max_offset);
           ++dlpart.num_files;
       });
     co_return dlpart;
@@ -527,7 +552,8 @@ open_output_file_stream(const std::filesystem::path& path) {
     co_return std::move(stream);
 }
 
-ss::future<> partition_downloader::download_file(
+ss::future<partition_downloader::offset_range>
+partition_downloader::download_file(
   const remote_segment_path& remote_location,
   const manifest& manifest,
   const partition_downloader::download_part& part) {
@@ -559,7 +585,11 @@ ss::future<> partition_downloader::download_file(
               "The local file {} is already downloaded and its size matches "
               "the manifest",
               localpath);
-            co_return;
+            // TODO: do not re-download the file but get the kafka offsets
+            // from the manifest. Currently the manifest doesn't have last
+            // kafka offset, only committed offset and initial offset delta.
+            // This means that we have to re-scan the whole segment to get
+            // the offset.
         }
         vlog(
           _ctxlog.info,
@@ -568,10 +598,11 @@ ss::future<> partition_downloader::download_file(
           localpath);
         co_await ss::remove_file(localpath.string());
     }
-
-    auto stream = [this, part, remote_location, localpath, &otl](
-                    uint64_t len,
-                    ss::input_stream<char> in) -> ss::future<uint64_t> {
+    model::offset min_offset;
+    model::offset max_offset;
+    auto stream =
+      [this, part, remote_location, localpath, &otl, &min_offset, &max_offset](
+        uint64_t len, ss::input_stream<char> in) -> ss::future<uint64_t> {
         vlog(
           _ctxlog.info,
           "Copying s3 path {} to local location {}",
@@ -579,15 +610,19 @@ ss::future<> partition_downloader::download_file(
           localpath.string());
         co_await ss::recursive_touch_directory(part.part_prefix.string());
         auto fs = co_await open_output_file_stream(localpath);
-        auto actual_len = co_await otl.copy_stream(
+        auto stream_stats = co_await otl.copy_stream(
           remote_location, std::move(in), std::move(fs), _rtcnode);
+
+        min_offset = stream_stats.min_offset;
+        max_offset = stream_stats.max_offset;
+
         vlog(
           _ctxlog.debug,
           "Log segment downloaded. {} bytes expected, {} bytes after "
           "pre-processing.",
           len,
-          actual_len);
-        co_return len;
+          stream_stats.size_bytes);
+        co_return stream_stats.size_bytes;
     };
 
     auto result = co_await _remote->download_segment(
@@ -599,7 +634,10 @@ ss::future<> partition_downloader::download_file(
         vlog(_ctxlog.error, "Failed segment download for {}", remote_location);
     }
 
-    co_return;
+    co_return offset_range{
+      .min_offset = min_offset,
+      .max_offset = max_offset,
+    };
 }
 
 ss::future<> partition_downloader::move_parts(download_part dls) {

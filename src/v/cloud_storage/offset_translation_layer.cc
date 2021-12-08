@@ -25,7 +25,7 @@ namespace cloud_storage {
 
 void offset_translator::update(const manifest& m) { _manifest = std::cref(m); }
 
-ss::future<uint64_t> offset_translator::copy_stream(
+ss::future<offset_translator::stream_stats> offset_translator::copy_stream(
   remote_segment_path path,
   ss::input_stream<char> src,
   ss::output_stream<char> dst,
@@ -36,7 +36,9 @@ ss::future<uint64_t> offset_translator::copy_stream(
     vassert(
       removed != model::offset::min(),
       "Can't copy segment which isn't in the manifest");
-    auto pred = [&removed, &ctxlog](model::record_batch_header& hdr) {
+    model::offset min_offset = model::offset::max();
+    model::offset max_offset = model::offset::min();
+    auto pred = [&removed, &ctxlog, &min_offset, &max_offset](model::record_batch_header& hdr) {
         if (
           hdr.type == model::record_batch_type::raft_configuration
           || hdr.type == model::record_batch_type::archival_metadata) {
@@ -46,17 +48,24 @@ ss::future<uint64_t> offset_translator::copy_stream(
         }
         auto old_offset = hdr.base_offset;
         hdr.base_offset = hdr.base_offset - removed;
-        vlog(
-          ctxlog.trace,
-          "writing batch {}, old base-offset: {}, new base-offset: {}",
-          hdr,
-          old_offset,
-          hdr.base_offset);
-        vlog(
-          ctxlog.debug,
-          "writing batch, old base-offset: {}, new base-offset: {}",
-          old_offset,
-          hdr.base_offset);
+
+        min_offset = std::min(min_offset, hdr.base_offset);
+        max_offset = std::max(max_offset, hdr.last_offset());
+
+        if (cst_log.is_enabled(ss::log_level::trace)) {
+            vlog(
+              ctxlog.trace,
+              "writing batch {}, old base-offset: {}, new base-offset: {}",
+              hdr,
+              old_offset,
+              hdr.base_offset);
+        } else {
+            vlog(
+              ctxlog.debug,
+              "writing batch, old base-offset: {}, new base-offset: {}",
+              old_offset,
+              hdr.base_offset);
+        }
         return storage::batch_consumer::consume_result::accept_batch;
     };
     auto len = co_await storage::transform_stream(
@@ -64,7 +73,11 @@ ss::future<uint64_t> offset_translator::copy_stream(
     if (len.has_error()) {
         throw std::system_error(len.error());
     }
-    co_return len.value();
+    co_return stream_stats{
+      .min_offset = min_offset,
+      .max_offset = max_offset,
+      .size_bytes = len.value(),
+    };
 }
 
 remote_segment_path offset_translator::get_adjusted_segment_name(

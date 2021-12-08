@@ -1146,7 +1146,10 @@ model::offset disk_log_impl::read_start_offset() const {
       kvstore::key_space::storage, internal::start_offset_key(config().ntp()));
     if (value) {
         auto offset = reflection::adl<model::offset>{}.from(std::move(*value));
+        vlog(stlog.info, "Successfuly read start-offset {}", offset);
         return offset;
+    } else {
+        vlog(stlog.info, "Can't find start-offset");
     }
     return model::offset{};
 }

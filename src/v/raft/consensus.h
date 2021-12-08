@@ -299,6 +299,11 @@ public:
     storage::log& log() { return _log; }
 
     ss::lw_shared_ptr<const storage::offset_translator_state>
+    get_offset_translator_state() const {
+        return _offset_translator.state();
+    }
+
+    ss::lw_shared_ptr<storage::offset_translator_state>
     get_offset_translator_state() {
         return _offset_translator.state();
     }

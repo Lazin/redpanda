@@ -55,6 +55,10 @@ public:
         return _state;
     }
 
+    ss::lw_shared_ptr<storage::offset_translator_state> state() {
+        return _state;
+    }
+
     using must_reset = ss::bool_class<struct must_reset_tag>;
 
     struct bootstrap_state {
@@ -95,6 +99,10 @@ public:
     ss::future<> prefix_truncate_reset(model::offset, int64_t delta);
 
     ss::future<> remove_persistent_state();
+
+    /// TODO: add doc
+    static bytes kvstore_offsetmap_key(raft::group_id group);
+    static bytes kvstore_highest_known_offset_key(raft::group_id group);
 
 private:
     bytes offsets_map_key() const;
