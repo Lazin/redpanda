@@ -583,9 +583,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, data, data, data, data, data, data, data, data, data},
@@ -622,9 +622,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, data, data, data, data, data},
@@ -661,9 +661,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, data, data, data, data, data, data, data, data, data},
@@ -700,9 +700,9 @@ FIXTURE_TEST(
     constexpr int batches_per_segment = 10;
     constexpr int num_segments = 3;
     constexpr int total_batches = batches_per_segment * num_segments;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, conf},
@@ -737,9 +737,9 @@ FIXTURE_TEST(
 FIXTURE_TEST(
   test_remote_partition_scan_translate_full_5, cloud_storage_fixture) {
     constexpr int num_segments = 3;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, data},
@@ -763,9 +763,9 @@ FIXTURE_TEST(
 FIXTURE_TEST(
   test_remote_partition_scan_translate_full_6, cloud_storage_fixture) {
     constexpr int num_segments = 3;
-    constexpr batch_t data = {
+    batch_t data = {
       .num_records = 10, .type = model::record_batch_type::raft_data};
-    constexpr batch_t conf = {
+    batch_t conf = {
       .num_records = 1, .type = model::record_batch_type::raft_configuration};
     const std::vector<std::vector<batch_t>> batch_types = {
       {conf, conf, conf, conf, conf, conf, conf, conf, conf, conf},
@@ -792,7 +792,8 @@ struct segment_layout {
 
 static segment_layout generate_segment_layout(int num_segments, int seed) {
     static constexpr size_t max_segment_size = 20;
-    static constexpr size_t max_batch_size = 100;
+    static constexpr size_t max_batch_size = 10;
+    static constexpr size_t max_record_bytes = 2048;
     std::seed_seq seq{seed};
     std::mt19937 re(seq);
     std::uniform_int_distribution<unsigned> dist;
@@ -801,13 +802,29 @@ static segment_layout generate_segment_layout(int num_segments, int seed) {
         size_t sz = 1 + dist(re) % max_segment_size;
         std::vector<batch_t> res;
         res.reserve(sz);
+        model::record_batch_type types[] = {
+          model::record_batch_type::raft_data,
+          model::record_batch_type::raft_configuration,
+          model::record_batch_type::archival_metadata,
+        };
+        constexpr auto num_types
+          = (sizeof(types) / sizeof(model::record_batch_type));
         for (size_t i = 0; i < sz; i++) {
+            size_t type = dist(re) % num_types;
             size_t batch_size = 1 + dist(re) % max_batch_size;
-            size_t type = dist(re) % 2;
+            if (type == 1) {
+                // raft_configuration can only have one record
+                // archival_metadata can have more than one records
+                batch_size = 1;
+            }
+            std::vector<size_t> sizes;
+            for (int j = 0; j < batch_size; j++) {
+                sizes.push_back(dist(re) % max_record_bytes);
+            }
             batch_t b{
               .num_records = static_cast<int>(batch_size),
-              .type = type == 0 ? model::record_batch_type::raft_data
-                                : model::record_batch_type::raft_configuration,
+              .type = types[type],
+              .record_sizes = sizes,
             };
             if (b.type == model::record_batch_type::raft_data) {
                 num_data_batches++;
@@ -869,6 +886,11 @@ scan_remote_partition_incrementally(
 
     storage::log_reader_config reader_config(
       base, max, ss::default_priority_class());
+
+    std::seed_seq seq{11};
+    std::mt19937 re(seq);
+    std::uniform_int_distribution<unsigned> dist;
+    // starting max_bytes
     reader_config.max_bytes = 4_KiB;
 
     auto next = base;
@@ -876,11 +898,18 @@ scan_remote_partition_incrementally(
     int num_fetches = 0;
     while (next < max) {
         reader_config.start_offset = next;
+        reader_config.max_bytes = dist(re) % 0x1000;
+        // reader_config.min_bytes = 200;
+        // reader_config.strict_max_bytes = true;
+        vlog(test_log.info, "reader_config {}", reader_config);
         auto reader = partition->make_reader(reader_config).get().reader;
         auto headers_read
           = reader.consume(test_consumer(), model::no_timeout).get();
         if (headers_read.empty()) {
             break;
+        }
+        for (const auto& header : headers_read) {
+            vlog(test_log.info, "header {}", header);
         }
         next = headers_read.back().last_offset() + model::offset(1);
         std::copy(
@@ -889,7 +918,7 @@ scan_remote_partition_incrementally(
           std::back_inserter(headers));
         num_fetches++;
     }
-    BOOST_REQUIRE(num_fetches != 1);
+    BOOST_REQUIRE(num_fetches > 0);
     partition->stop().get();
     vlog(test_log.info, "{} fetch operations performed", num_fetches);
     return headers;
