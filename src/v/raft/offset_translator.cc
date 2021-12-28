@@ -76,6 +76,15 @@ bytes serialize_kvstore_key(raft::group_id group, kvstore_key_type key_type) {
 
 } // namespace
 
+bytes offset_translator::kvstore_offsetmap_key(raft::group_id group) {
+    return serialize_kvstore_key(group, kvstore_key_type::offsets_map);
+}
+
+bytes offset_translator::kvstore_highest_known_offset_key(
+  raft::group_id group) {
+    return serialize_kvstore_key(group, kvstore_key_type::highest_known_offset);
+}
+
 ss::future<>
 offset_translator::start(must_reset reset, bootstrap_state&& bootstrap) {
     vassert(
