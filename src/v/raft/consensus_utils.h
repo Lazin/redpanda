@@ -189,4 +189,19 @@ ss::future<> move_persistent_state(
   ss::shard_id target_shard,
   ss::sharded<storage::api>&);
 
+/// Creates persitent state for pre-existing partition (stored in S3 bucket).
+///
+/// The function is supposed to be called before creating a raft group with the
+/// same group_id. The created group will have 'start_offset' equal to
+/// 'min_kafka_offset' and 'highest_known_offset' equal to 'max_kafka_offset'.
+/// The function will create the offset translator state in kv-store. The offset
+/// translator state will have the right starting point and delta. It will also
+/// create raft snapshot and raft state in kv-store.
+ss::future<> bootstrap_pre_existing_partition(
+  storage::api& api,
+  const storage::ntp_config& ntp_cfg,
+  raft::group_id group,
+  model::offset min_kafka_offset,
+  model::offset max_kafka_offset,
+  std::vector<model::broker> initial_nodes);
 } // namespace raft::details
