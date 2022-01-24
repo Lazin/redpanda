@@ -10,6 +10,7 @@
 
 #include "bytes/iobuf.h"
 #include "bytes/iobuf_parser.h"
+#include "cloud_storage/manifest.h"
 #include "cloud_storage/offset_translation_layer.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/remote_segment.h"
@@ -61,7 +62,8 @@ FIXTURE_TEST(
     auto bucket = s3::bucket_name("bucket");
     remote remote(s3_connection_limit(10), conf);
     manifest m(manifest_ntp, manifest_revision);
-    auto name = segment_name("1-2-v1.log");
+    auto name = manifest::key{
+      .base_offset = model::offset(1), .term = model::term_id(2)};
     model::revision_id segment_ntp_revision{777};
     iobuf segment_bytes = generate_segment(model::offset(1), 20);
     uint64_t clen = segment_bytes.size_bytes();
@@ -106,6 +108,7 @@ FIXTURE_TEST(test_remote_segment_timeout, cloud_storage_fixture) { // NOLINT
     remote remote(s3_connection_limit(10), conf);
     manifest m(manifest_ntp, manifest_revision);
     auto name = segment_name("7-8-v1.log");
+    manifest::key key = parse_segment_name(name).value();
     m.add(
       name,
       manifest::segment_meta{
@@ -119,7 +122,7 @@ FIXTURE_TEST(test_remote_segment_timeout, cloud_storage_fixture) { // NOLINT
         .ntp_revision = manifest_revision});
 
     retry_chain_node fib(100ms, 20ms);
-    remote_segment segment(remote, *cache, bucket, m, name, fib);
+    remote_segment segment(remote, *cache, bucket, m, key, fib);
     BOOST_REQUIRE_THROW(
       segment.data_stream(0, ss::default_priority_class()).get(),
       download_exception);
@@ -134,7 +137,8 @@ FIXTURE_TEST(
     auto bucket = s3::bucket_name("bucket");
     remote remote(s3_connection_limit(10), conf);
     manifest m(manifest_ntp, manifest_revision);
-    auto name = segment_name("1-2-v1.log");
+    auto name = manifest::key{
+      .base_offset = model::offset(1), .term = model::term_id(2)};
     iobuf segment_bytes = generate_segment(model::offset(1), 100);
     manifest::segment_meta meta{
       .is_compacted = false,
@@ -221,7 +225,8 @@ void test_remote_segment_batch_reader(
     auto action = ss::defer([&remote] { remote.stop().get(); });
 
     manifest m(manifest_ntp, manifest_revision);
-    auto name = segment_name("1-2-v1.log");
+    auto name = manifest::key{
+      .base_offset = model::offset(1), .term = model::term_id(2)};
     uint64_t clen = segment_bytes.size_bytes();
     manifest::segment_meta meta{
       .is_compacted = false,
@@ -332,7 +337,8 @@ FIXTURE_TEST(
     auto action = ss::defer([&remote] { remote.stop().get(); });
 
     manifest m(manifest_ntp, manifest_revision);
-    auto name = segment_name("1-2-v1.log");
+    auto name = manifest::key{
+      .base_offset = model::offset(1), .term = model::term_id(2)};
     uint64_t clen = segment_bytes.size_bytes();
     manifest::segment_meta meta{
       .is_compacted = false,

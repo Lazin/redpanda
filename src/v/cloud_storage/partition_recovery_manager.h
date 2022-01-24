@@ -114,7 +114,7 @@ private:
     };
 
     struct segment {
-        segment_name name;
+        manifest::key name;
         manifest::segment_meta meta;
     };
 
