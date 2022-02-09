@@ -31,7 +31,7 @@ struct log_recovery_result {
     bool completed;
     model::offset min_kafka_offset;
     model::offset max_kafka_offset;
-    cloud_storage::manifest manifest;
+    cloud_storage::partition_manifest manifest;
 };
 
 /// Data recovery provider is used to download topic segments from S3 (or
@@ -111,17 +111,13 @@ private:
     download_manifest(const remote_manifest_path& path);
 
     struct recovery_material {
-        std::vector<remote_manifest_path> paths;
         topic_manifest topic_manifest;
+        partition_manifest partition_manifest;
     };
 
     /// Locate all data needed to recover single partition
     ss::future<recovery_material>
     find_recovery_material(const remote_manifest_path& key);
-
-    /// Find all candidate partition manifests
-    ss::future<std::vector<remote_manifest_path>>
-    find_matching_partition_manifests(topic_manifest& manifest);
 
     struct offset_range {
         model::offset min_offset;
