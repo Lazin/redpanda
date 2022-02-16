@@ -14,6 +14,7 @@
 #include "cloud_storage/logger.h"
 #include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote.h"
+#include "cloud_storage/remote_segment_index.h"
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/record.h"
@@ -105,8 +106,16 @@ public:
     bool download_in_progress() const noexcept { return !_wait_list.empty(); }
 
 private:
-    /// Hydrates segment in the background if there is any consumer
+    /// Run hydration loop. The method is supposed to be constantly running
+    /// in the background. The background loop is triggered by the condition
+    /// variable '_bg_cvar' and the promise list '_wait_list'. When the promise
+    /// is waitning in the list and the cond-variable is triggered the loop
+    /// wakes up and hydrates the segment if needed.
     ss::future<> run_hydrate_bg();
+
+    /// Actually hydrate the segment. The method downloads the segment file
+    /// to the cache dir and updates the segment index.
+    ss::future<> do_hydrate();
 
     ss::gate _gate;
     remote& _api;
@@ -131,6 +140,7 @@ private:
     ss::expiring_fifo<ss::promise<ss::file>, expiry_handler> _wait_list;
 
     ss::file _data_file;
+    std::optional<offset_index> _index;
 };
 
 class remote_segment_batch_consumer;
