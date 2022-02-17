@@ -182,6 +182,45 @@ remote_segment::data_stream(size_t pos, ss::io_priority_class io_priority) {
     co_return data_stream;
 }
 
+ss::future<ss::input_stream<char>> remote_segment::offset_data_stream(
+  model::offset kafka_offset, ss::io_priority_class io_priority) {
+    vlog(
+      _ctxlog.debug,
+      "remote segment file input stream at offset {}",
+      kafka_offset);
+    ss::gate::holder g(_gate);
+    co_await hydrate();
+    size_t pos = maybe_get_file_offset(kafka_offset).value_or(0);
+    ss::file_input_stream_options options{};
+    options.buffer_size = config::shard_local_cfg().storage_read_buffer_size();
+    options.read_ahead
+      = config::shard_local_cfg().storage_read_readahead_count();
+    options.io_priority_class = io_priority;
+    auto data_stream = ss::make_file_input_stream(
+      _data_file, pos, std::move(options));
+    co_return data_stream;
+}
+
+std::optional<size_t>
+remote_segment::maybe_get_file_offset(model::offset kafka_offset) {
+    if (!_index) {
+        return {};
+    }
+    auto pos = _index->lower_bound_kaf_offset(kafka_offset);
+    if (!pos) {
+        return {};
+    }
+    vlog(
+      _ctxlog.debug,
+      "Using index to locate {}, the result is rp-offset: {}, kafka-offset: "
+      "{}, file-pos: {}",
+      kafka_offset,
+      pos->rp_offset,
+      pos->kaf_offset,
+      pos->file_pos);
+    return pos->file_pos;
+}
+
 ss::future<> remote_segment::do_hydrate() {
     auto callback = [this](
                       uint64_t size_bytes,
@@ -624,9 +663,13 @@ remote_segment_batch_reader::read_some(
 
 ss::future<std::unique_ptr<storage::continuous_batch_parser>>
 remote_segment_batch_reader::init_parser() {
-    vlog(_ctxlog.debug, "remote_segment_batch_reader::init_parser");
-    auto stream = co_await _seg->data_stream(
-      0, priority_manager::local().shadow_indexing_priority());
+    vlog(
+      _ctxlog.debug,
+      "remote_segment_batch_reader::init_parser, start_offset: {}",
+      _config.start_offset);
+    auto stream = co_await _seg->offset_data_stream(
+      _config.start_offset,
+      priority_manager::local().shadow_indexing_priority());
     auto parser = std::make_unique<storage::continuous_batch_parser>(
       std::make_unique<remote_segment_batch_consumer>(
         _config, *this, _seg->get_term(), _seg->get_ntp(), _rtc),

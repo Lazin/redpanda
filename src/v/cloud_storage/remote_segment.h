@@ -98,6 +98,11 @@ public:
     ss::future<ss::input_stream<char>>
     data_stream(size_t pos, ss::io_priority_class);
 
+    /// create an input stream _sharing_ the underlying file handle
+    /// starting at position @pos
+    ss::future<ss::input_stream<char>>
+    offset_data_stream(model::offset kafka_offset, ss::io_priority_class);
+
     /// Hydrate the segment
     ss::future<> hydrate();
 
@@ -106,6 +111,10 @@ public:
     bool download_in_progress() const noexcept { return !_wait_list.empty(); }
 
 private:
+    /// get a file offset for the corresponding kafka offset
+    /// if the index is available
+    std::optional<size_t> maybe_get_file_offset(model::offset kafka_offset);
+
     /// Run hydration loop. The method is supposed to be constantly running
     /// in the background. The background loop is triggered by the condition
     /// variable '_bg_cvar' and the promise list '_wait_list'. When the promise
