@@ -226,6 +226,10 @@ inline bool is_fetch_enabled(shadow_indexing_mode m) {
     return m == shadow_indexing_mode::fetch || m == shadow_indexing_mode::full;
 }
 
+inline bool is_read_replica_mode_enabled(shadow_indexing_mode m) {
+    return m == shadow_indexing_mode::fetch && m != shadow_indexing_mode::full;
+}
+
 /// Set 'rhs' flag in 'lhs'
 constexpr shadow_indexing_mode
 add_shadow_indexing_flag(shadow_indexing_mode lhs, shadow_indexing_mode rhs) {

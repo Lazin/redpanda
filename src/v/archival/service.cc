@@ -332,9 +332,13 @@ scheduler_service_impl::create_archivers(std::vector<model::ntp> to_create) {
           storage::log_manager& lm = api.log_mgr();
           auto log = lm.get(ntp);
           auto part = _partition_manager.local().get(ntp);
-          if (log.has_value() && part && part->is_leader()
-              && (part->get_ntp_config().is_archival_enabled()
-                  || config::shard_local_cfg().cloud_storage_enable_remote_read())) {
+          if (!log.has_value() || !part || !part->is_leader()) {
+              return ss::now();
+          }
+          if (
+            part->get_ntp_config().is_archival_enabled()
+            || part->get_ntp_config().is_read_replica_mode_enabled()
+            || config::shard_local_cfg().cloud_storage_enable_remote_read()) {
               auto svc = ss::make_lw_shared<ntp_archiver>(
                 log->config(), _conf, _remote.local(), part, _probe);
               return ss::repeat(

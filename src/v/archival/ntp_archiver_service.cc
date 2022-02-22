@@ -410,6 +410,50 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::upload_next_candidates(
     if (_gate.is_closed()) {
         return ss::make_ready_future<batch_result>(batch_result{});
     }
+
+    // TODO: the branch is for demo, shold be reworked 
+    if (_partition->get_ntp_config().is_read_replica_mode_enabled()) {
+        // Just pull new version of the manifest instead of uploading the data
+        return download_manifest(parent).then(
+          [this, &parent](
+            cloud_storage::download_result r) -> ss::future<batch_result> {
+              retry_chain_logger ctxlog(archival_log, parent, _ntp.path());
+              vlog(ctxlog.debug, "Downloading manifest in read-replica mode");
+              if (_partition->archival_meta_stm()) {
+                  vlog(
+                    ctxlog.debug,
+                    "Updating the archival_meta_stm in read-replica mode");
+                  retry_chain_node rc_node(
+                    _manifest_upload_timeout, _initial_backoff, &parent);
+                  auto error
+                    = co_await _partition->archival_meta_stm()->add_segments(
+                      _manifest, rc_node);
+                  if (
+                    error != cluster::errc::success
+                    && error != cluster::errc::not_leader) {
+                      vlog(
+                        ctxlog.warn,
+                        "archival metadata STM update failed: {}",
+                        error);
+                  }
+                  auto last_offset = _partition->archival_meta_stm()->manifest().get_last_offset();
+                  vlog(ctxlog.debug, "manifest last_offset: {}", last_offset);
+              }
+              co_await ss::sleep_abortable(30s, _as);
+              // TODO: return num_succeded=0 if there is no change. This will
+              // trigger backoff algorithm in the service eventually and there
+              // won't be any need to sleep here.
+              co_return batch_result{
+                .num_succeded = 1
+                                * static_cast<size_t>(
+                                  r == cloud_storage::download_result::success),
+                .num_failed = 1
+                              * static_cast<size_t>(
+                                r != cloud_storage::download_result::success),
+              };
+          });
+    }
+
     auto last_stable_offset = lso_override ? *lso_override
                                            : _partition->last_stable_offset();
     return ss::with_gate(

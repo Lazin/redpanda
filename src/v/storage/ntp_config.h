@@ -150,6 +150,12 @@ public:
                && model::is_fetch_enabled(_overrides->shadow_indexing_mode);
     }
 
+    bool is_read_replica_mode_enabled() const {
+        return _overrides != nullptr
+               && model::is_read_replica_mode_enabled(
+                 _overrides->shadow_indexing_mode);
+    }
+
 private:
     model::ntp _ntp;
     /// \brief currently this is the basedir. In the future

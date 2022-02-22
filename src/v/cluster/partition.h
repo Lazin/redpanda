@@ -217,6 +217,13 @@ public:
                     .cloud_storage_enable_remote_read.value();
     }
 
+    bool is_read_replica_mode_enabled() const {
+        const auto& cfg = _raft->log_config();
+        return cfg.is_read_replica_mode_enabled()
+               || config::shard_local_cfg()
+                    .cloud_storage_enable_remote_read.value();
+    }
+
     /// Check if cloud storage is connected to cluster partition
     ///
     /// The remaining 'cloud' methods can only be called if this
@@ -232,6 +239,14 @@ public:
           cloud_data_available(),
           "Method can only be called if cloud data is available");
         return _cloud_storage_partition->first_uploaded_offset();
+    }
+
+    /// Last available cloud offset
+    model::offset last_cloud_offset() const {
+        vassert(
+          cloud_data_available(),
+          "Method can only be called if cloud data is available");
+        return _cloud_storage_partition->last_uploaded_offset();
     }
 
     /// Create a reader that will fetch data from remote storage
