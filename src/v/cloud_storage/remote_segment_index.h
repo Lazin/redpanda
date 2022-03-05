@@ -106,6 +106,14 @@ public:
       , _last(initial_value)
       , _cnt{0} {}
 
+    deltafor_encoder(
+      TVal initial_value, uint32_t cnt, TVal last_value, iobuf data)
+      : _initial(initial_value)
+      , _last(last_value)
+      , _data(std::move(data)) 
+      , _cnt(cnt)
+      {}
+
     using row_t = std::array<TVal, FOR_buffer_depth>;
 
     /// Encode single row
@@ -133,6 +141,9 @@ public:
 
     /// Get initial value used to crate the encoder
     TVal get_initial_value() const noexcept { return _initial; }
+
+    /// Get last value used to crate the encoder
+    TVal get_last_value() const noexcept { return _last; }
 
 private:
     template<typename T>
@@ -1117,6 +1128,12 @@ public:
     /// returned.
     std::optional<find_result> find_kaf_offset(model::offset upper_bound);
 
+    /// Serialize offset_index
+    iobuf to_iobuf();
+
+    /// Deserialize offset_index
+    void from_iobuf(iobuf in);
+
 private:
     struct index_value {
         size_t ix;
@@ -1153,9 +1170,11 @@ private:
     model::offset _initial_rp;
     model::offset _initial_kaf;
     int64_t _initial_file_pos;
-    details::deltafor_encoder<int64_t> _rp_encoder;
-    details::deltafor_encoder<int64_t> _kaf_encoder;
-    details::deltafor_encoder<int64_t> _file_encoder;
+    using encoder_t = details::deltafor_encoder<int64_t>;
+    using decoder_t = details::deltafor_decoder<int64_t>;
+    encoder_t _rp_index;
+    encoder_t _kaf_index;
+    encoder_t _file_index;
 };
 
 class remote_segment_index_builder : public storage::batch_consumer {
