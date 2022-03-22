@@ -61,12 +61,14 @@ private:
 
     struct segment;
     struct add_segment_cmd;
+    struct rem_segment_cmd;
     struct snapshot;
 
     static std::vector<segment>
     segments_from_manifest(const cloud_storage::partition_manifest& manifest);
 
     void apply_add_segment(const segment& segment);
+    void apply_rem_segment(const segment& segment);
 
 private:
     prefix_logger _logger;

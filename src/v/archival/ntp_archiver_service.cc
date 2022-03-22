@@ -12,6 +12,8 @@
 
 #include "archival/archival_policy.h"
 #include "archival/logger.h"
+#include "bytes/iobuf.h"
+#include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/types.h"
 #include "model/metadata.h"
@@ -21,6 +23,7 @@
 #include "storage/fs_utils.h"
 #include "storage/parser.h"
 #include "utils/gate_guard.h"
+#include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/coroutine.hh>
@@ -30,6 +33,7 @@
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/core/timed_out_error.hh>
 #include <seastar/core/when_all.hh>
 #include <seastar/util/noncopyable_function.hh>
@@ -151,6 +155,59 @@ ss::future<cloud_storage::upload_result> ntp_archiver::upload_segment(
     };
     co_return co_await _remote.upload_segment(
       _bucket, path, candidate.content_length, reset_func, fib);
+}
+
+// TODO: remove
+void log_full_manifest(retry_chain_logger& ctxlog, const char* name, const cloud_storage::partition_manifest& m) {
+  std::stringstream out;
+  m.serialize(out);
+  vlog(ctxlog.info, "{} manifest: {}", name, out.str());
+}
+
+ss::future<> ntp_archiver::cleanup_manifest(retry_chain_node& rtc) {
+    ss::gate::holder gh(_gate);
+    bool removed = false;
+    retry_chain_logger ctxlog(archival_log, rtc, _ntp.path());
+    vlog(ctxlog.info, "archival metadata cleanup started");
+    //log_full_manifest(ctxlog, "archiver", _manifest);
+    for (const auto& [key, meta] : _manifest) {
+        retry_chain_node fib(_manifest_upload_timeout, _initial_backoff, &rtc);
+        auto sname = cloud_storage::generate_segment_name(
+          key.base_offset, key.term);
+        auto spath = cloud_storage::generate_remote_segment_path(
+          _ntp, _rev, sname, meta.archiver_term);
+        auto result = co_await _remote.segment_exists(_bucket, spath, fib);
+        if (result == cloud_storage::download_result::notfound) {
+            vlog(
+              ctxlog.info,
+              "archival metadata cleanup, found segment missing from the "
+              "bucket: {}",
+              spath);
+            removed = true;
+            //_manifest.remove(key, meta);
+        } else {
+            break;
+        }
+    }
+    if (removed && _partition->archival_meta_stm()) {
+        vlog(
+          ctxlog.info,
+          "archival metadata cleanup, some segments were removed from the "
+          "manifest, replicating archival metadata");
+        //log_full_manifest(ctxlog, "STM", _partition->archival_meta_stm()->manifest());
+        // retry_chain_node rc_node(
+        //   _manifest_upload_timeout, _initial_backoff, &rtc);
+        // auto error = co_await _partition->archival_meta_stm()
+        //                ->add_segments( // TODO: upd segments
+        //                  _manifest,
+        //                  rc_node);
+        // if (
+        //   error != cluster::errc::success
+        //   && error != cluster::errc::not_leader) {
+        //     vlog(ctxlog.warn, "archival metadata STM update failed: {}", error);
+        // }
+    }
+    vlog(ctxlog.info, "archival metadata cleanup completed");
 }
 
 ss::future<ntp_archiver::scheduled_upload> ntp_archiver::schedule_single_upload(

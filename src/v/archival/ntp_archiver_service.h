@@ -116,6 +116,14 @@ public:
 
     uint64_t estimate_backlog_size(cluster::partition_manager& pm);
 
+    /// Poke the segments listed in the manifest and remove the ones which are
+    /// no longer exists in the bucket. This method traverses the manifest from
+    /// oldest segments to newest. If it can find the oldest segment it just
+    /// stops all the checks. In other words, the cleanup procedure assumes FIFO
+    /// order of segment deletions.
+    /// This is designed with bucket level retention in mind.
+    ss::future<> cleanup_manifest(retry_chain_node& rtc);
+
 private:
     /// Information about started upload
     struct scheduled_upload {

@@ -120,6 +120,10 @@ public:
     bool add(const key& key, const segment_meta& meta);
     bool add(const segment_name& name, const segment_meta& meta);
 
+    /// Remove segment from the manifest only if the metadata matches
+    bool remove(const key& key, const segment_meta& meta);
+    bool remove(const segment_name& key, const segment_meta& meta);
+
     /// Get segment if available or nullopt
     const segment_meta* get(const key& key) const;
     const segment_meta* get(const segment_name& name) const;

@@ -26,6 +26,7 @@
 #include "s3/client.h"
 #include "s3/error.h"
 #include "s3/signature.h"
+#include "ssx/future-util.h"
 #include "storage/disk_log_impl.h"
 #include "storage/fs_utils.h"
 #include "storage/log.h"
@@ -432,6 +433,19 @@ uint64_t scheduler_service_impl::estimate_backlog_size() {
     return size;
 }
 
+void scheduler_service_impl::maybe_start_manifest_cleanup(ss::lw_shared_ptr<ntp_archiver> archiver) {
+  auto u = ss::try_get_units(_cleanup_sem, 1);
+  if (u) {
+    ssx::spawn_with_gate(_gate, [this, archiver, u=std::move(*u)] () mutable {
+      // TODO: limit restarts
+      // TODO: limit parallelism
+      return archiver->cleanup_manifest(_rtcnode).finally([u=std::move(u)] () mutable {
+        u.return_all();
+      });
+    });
+  }
+}
+
 ss::future<> scheduler_service_impl::run_uploads() {
     gate_guard g(_gate);
     static constexpr ss::lowres_clock::duration initial_backoff = 100ms;
@@ -448,6 +462,7 @@ ss::future<> scheduler_service_impl::run_uploads() {
               std::back_inserter(flist),
               [this](int) {
                   auto archiver = _queue.get_upload_candidate();
+                  maybe_start_manifest_cleanup(archiver);
                   storage::api& api = _storage_api.local();
                   storage::log_manager& lm = api.log_mgr();
                   return archiver->upload_next_candidates(lm, _rtcnode);

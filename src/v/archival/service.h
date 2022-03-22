@@ -25,6 +25,7 @@
 #include <seastar/core/io_priority_class.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/scheduling.hh>
+#include <seastar/core/shared_ptr.hh>
 #include <seastar/core/weak_ptr.hh>
 
 #include <absl/container/node_hash_map.h>
@@ -174,6 +175,10 @@ private:
     ss::future<ss::stop_iteration>
     add_ntp_archiver(ss::lw_shared_ptr<ntp_archiver> archiver);
 
+    /// Start manifest cleanup for ntp archiver if enough time
+    /// since the last check have passed.
+    void maybe_start_manifest_cleanup(ss::lw_shared_ptr<ntp_archiver> archiver);
+
     configuration _conf;
     ss::sharded<cluster::partition_manager>& _partition_manager;
     ss::sharded<cluster::topic_table>& _topic_table;
@@ -192,6 +197,7 @@ private:
     ss::lowres_clock::duration _topic_manifest_upload_timeout;
     ss::lowres_clock::duration _initial_backoff;
     ss::scheduling_group _upload_sg;
+    ss::semaphore _cleanup_sem{1};
 };
 
 } // namespace internal

@@ -252,6 +252,28 @@ bool partition_manifest::add(
     return add(key, meta);
 }
 
+bool partition_manifest::remove(
+  const partition_manifest::key& key, const segment_meta& meta) {
+    if (auto it = _segments.find(key); it != _segments.end()) {
+        if (it->second.committed_offset == meta.committed_offset) {
+            _segments.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool partition_manifest::remove(
+  const segment_name& name, const segment_meta& meta) {
+    auto maybe_key = parse_segment_name(name);
+    if (!maybe_key) {
+        throw std::runtime_error(
+          fmt_with_ctx(fmt::format, "can't parse segment name \"{}\"", name));
+    }
+    key key = {.base_offset = maybe_key->base_offset, .term = maybe_key->term};
+    return remove(key, meta);
+}
+
 const partition_manifest::segment_meta*
 partition_manifest::get(const partition_manifest::key& key) const {
     auto it = _segments.find(key);

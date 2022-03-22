@@ -52,6 +52,12 @@ struct archival_metadata_stm::add_segment_cmd {
     using value = segment;
 };
 
+struct archival_metadata_stm::rem_segment_cmd {
+    static constexpr cmd_key key{1};
+
+    using value = segment;
+};
+
 struct archival_metadata_stm::snapshot
   : public serde::
       envelope<snapshot, serde::version<0>, serde::compat_version<0>> {
@@ -109,14 +115,23 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
 
     rc_node.check_abort();
 
-    auto segments = segments_from_manifest(new_manifest.difference(_manifest));
-    if (segments.empty()) {
+    auto add_segments = segments_from_manifest(
+      new_manifest.difference(_manifest));
+    auto rem_segments = segments_from_manifest(
+      _manifest.difference(new_manifest));
+    if (add_segments.empty() && rem_segments.empty()) {
         co_return errc::success;
     }
 
     storage::record_batch_builder b(
       model::record_batch_type::archival_metadata, model::offset(0));
-    for (const auto& segment : segments) {
+    for (const auto& segment : rem_segments) {
+        iobuf key_buf = serde::to_iobuf(rem_segment_cmd::key);
+        auto record_val = rem_segment_cmd::value{segment};
+        iobuf val_buf = serde::to_iobuf(std::move(record_val));
+        b.add_raw_kv(std::move(key_buf), std::move(val_buf));
+    }
+    for (const auto& segment : add_segments) {
         iobuf key_buf = serde::to_iobuf(add_segment_cmd::key);
         auto record_val = add_segment_cmd::value{segment};
         iobuf val_buf = serde::to_iobuf(std::move(record_val));
@@ -147,7 +162,7 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
         co_return errc::replication_error;
     }
 
-    for (const auto& segment : segments) {
+    for (const auto& segment : add_segments) {
         vlog(
           _logger.info,
           "new remote segment added (name: {}, base_offset: {} last_offset: "
@@ -175,6 +190,10 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
             auto value = serde::from_iobuf<add_segment_cmd::value>(
               r.release_value());
             apply_add_segment(value);
+        } else if (key == rem_segment_cmd::key) {
+            auto value = serde::from_iobuf<rem_segment_cmd::value>(
+              r.release_value());
+            apply_rem_segment(value);
         }
     });
 
@@ -320,6 +339,25 @@ void archival_metadata_stm::apply_add_segment(const segment& segment) {
 
         _last_offset = meta.committed_offset;
     }
+}
+
+void archival_metadata_stm::apply_rem_segment(const segment& segment) {
+    if (!_manifest.remove(segment.name, segment.meta)) {
+        vlog(
+          _logger.info,
+          "Failed to remove segment from the manifiest. Segment base offset: "
+          "{}",
+          segment.meta.base_offset);
+        return;
+    }
+    if (_manifest.size()) {
+        _start_offset = _manifest.begin()->second.base_offset;
+        _last_offset = _manifest.rbegin()->second.committed_offset;
+    } else {
+        _start_offset = model::offset{};
+        _last_offset = model::offset{};
+    }
+    vlog(_logger.info, "segment {} deleted from the manifest", segment.name);
 }
 
 ss::future<> archival_metadata_stm::stop() {
