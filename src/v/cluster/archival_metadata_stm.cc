@@ -9,6 +9,7 @@
 
 #include "cluster/archival_metadata_stm.h"
 
+#include "cloud_storage/types.h"
 #include "config/configuration.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -176,6 +177,119 @@ ss::future<std::error_code> archival_metadata_stm::do_add_segments(
     }
 
     co_return errc::success;
+}
+
+ss::future<std::error_code> archival_metadata_stm::add_segments(
+  std::vector<segment_kv_item> add_set, retry_chain_node& rc_node) {
+    return _lock.with(
+      rc_node.get_timeout(),
+      [this, add_set = std::move(add_set), &rc_node]() mutable {
+          return do_add_segments(std::move(add_set), {}, rc_node);
+      });
+}
+
+ss::future<std::error_code> archival_metadata_stm::rem_segments(
+  std::vector<segment_kv_item> rem_set, retry_chain_node& rc_node) {
+    return _lock.with(
+      rc_node.get_timeout(),
+      [this, rem_set = std::move(rem_set), &rc_node]() mutable {
+          return do_add_segments({}, std::move(rem_set), rc_node);
+      });
+}
+
+// todo: return result
+ss::future<std::error_code> archival_metadata_stm::do_add_segments(
+  std::vector<segment_kv_item> add_set,
+  std::vector<segment_kv_item> rem_set,
+  retry_chain_node& rc_node) {
+    if (!co_await sync(rc_node.get_timeout())) {
+        co_return errc::timeout;
+    }
+
+    rc_node.check_abort();
+
+    std::vector<cluster::archival_metadata_stm::segment> add_segments;
+    std::vector<cluster::archival_metadata_stm::segment> rem_segments;
+
+    auto conv_fn = [](const segment_kv_item& it) {
+        auto name = cloud_storage::generate_segment_name(
+          it.key.base_offset, it.key.term);
+        return segment{
+          .ntp_revision_deprecated = it.meta.ntp_revision,
+          .name = name,
+          .meta = it.meta,
+        };
+    };
+
+    std::transform(
+      add_set.begin(),
+      add_set.end(),
+      std::back_inserter(add_segments),
+      conv_fn);
+    std::transform(
+      rem_set.begin(),
+      rem_set.end(),
+      std::back_inserter(rem_segments),
+      conv_fn);
+
+    if (add_segments.empty() && rem_segments.empty()) {
+        co_return errc::success;
+    }
+
+    storage::record_batch_builder b(
+      model::record_batch_type::archival_metadata, model::offset(0));
+    for (const auto& segment : rem_segments) {
+        iobuf key_buf = serde::to_iobuf(rem_segment_cmd::key);
+        auto record_val = rem_segment_cmd::value{segment};
+        iobuf val_buf = serde::to_iobuf(std::move(record_val));
+        b.add_raw_kv(std::move(key_buf), std::move(val_buf));
+    }
+    for (const auto& segment : add_segments) {
+        iobuf key_buf = serde::to_iobuf(add_segment_cmd::key);
+        auto record_val = add_segment_cmd::value{segment};
+        iobuf val_buf = serde::to_iobuf(std::move(record_val));
+        b.add_raw_kv(std::move(key_buf), std::move(val_buf));
+    }
+
+    auto batch = std::move(b).build();
+    auto fut = _raft->replicate(
+      _insync_term,
+      model::make_memory_record_batch_reader(std::move(batch)),
+      raft::replicate_options{raft::consistency_level::quorum_ack});
+
+    auto result = co_await ss::with_timeout(
+      rc_node.get_deadline(), std::move(fut));
+
+    if (!result) {
+        vlog(
+          _logger.warn,
+          "error on replicating remote segment metadata: {}",
+          result.error());
+        co_return result.error();
+    }
+
+    auto applied = co_await wait_no_throw(
+      result.value().last_offset, rc_node.get_timeout());
+
+    if (!applied) {
+        co_return errc::replication_error;
+    }
+
+    for (const auto& segment : add_segments) {
+        vlog(
+          _logger.info,
+          "new remote segment added (name: {}, base_offset: {} last_offset: "
+          "{}), "
+          "remote start_offset: {}, last_offset: {}",
+          segment.name,
+          segment.meta.base_offset,
+          segment.meta.committed_offset,
+          _start_offset,
+          _last_offset);
+    }
+
+    // Upload manifest to S3
+    co_return co_await upload_manifest(rc_node);
 }
 
 ss::future<> archival_metadata_stm::apply(model::record_batch b) {
@@ -363,6 +477,19 @@ void archival_metadata_stm::apply_rem_segment(const segment& segment) {
 ss::future<> archival_metadata_stm::stop() {
     _download_as.request_abort();
     co_await raft::state_machine::stop();
+}
+
+ss::future<std::error_code>
+archival_metadata_stm::upload_manifest(retry_chain_node& parent) {
+    auto bucket = config::shard_local_cfg().cloud_storage_bucket.value();
+    vassert(bucket, "configuration property cloud_storage_bucket must be set");
+    auto res = co_await _cloud_storage_api.upload_manifest(
+      s3::bucket_name(*bucket), _manifest, parent);
+    if (res != cloud_storage::upload_result::success) {
+        vlog(_logger.info, "failed to upload manifest {}", res);
+        co_return errc::timeout;
+    }
+    co_return errc::success;
 }
 
 } // namespace cluster

@@ -176,8 +176,8 @@ public:
       const ss::lowres_clock::duration& timeout);
 
     struct head_object_result {
-      uint64_t object_size;
-      ss::sstring etag;
+        uint64_t object_size;
+        ss::sstring etag;
     };
 
     /// HeadObject request.

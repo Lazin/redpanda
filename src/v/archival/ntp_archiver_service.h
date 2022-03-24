@@ -83,16 +83,6 @@ public:
     /// Get timestamp
     const ss::lowres_clock::time_point get_last_upload_time() const;
 
-    /// Download manifest from pre-defined S3 locatnewion
-    ///
-    /// \return future that returns true if the manifest was found in S3
-    ss::future<cloud_storage::download_result>
-    download_manifest(retry_chain_node& parent);
-
-    /// Upload manifest to the pre-defined S3 location
-    ss::future<cloud_storage::upload_result>
-    upload_manifest(retry_chain_node& parent);
-
     const cloud_storage::partition_manifest& get_remote_manifest() const;
 
     struct batch_result {
@@ -125,6 +115,8 @@ public:
     ss::future<> cleanup_manifest(retry_chain_node& rtc);
 
 private:
+    const cloud_storage::partition_manifest& manifest() const;
+
     /// Information about started upload
     struct scheduled_upload {
         /// The future that will be ready when the segment will be fully
@@ -180,9 +172,6 @@ private:
     model::term_id _start_term;
     archival_policy _policy;
     s3::bucket_name _bucket;
-    /// Remote manifest contains representation of the data stored in S3 (it
-    /// gets uploaded to the remote location)
-    cloud_storage::partition_manifest _manifest;
     ss::gate _gate;
     ss::abort_source _as;
     ss::semaphore _mutex{1};

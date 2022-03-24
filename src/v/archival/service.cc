@@ -279,47 +279,27 @@ ss::future<ss::stop_iteration> scheduler_service_impl::add_ntp_archiver(
         return ss::make_ready_future<ss::stop_iteration>(
           ss::stop_iteration::yes);
     }
-    return archiver->download_manifest(_rtcnode).then(
-      [this, archiver](cloud_storage::download_result result)
-        -> ss::future<ss::stop_iteration> {
-          auto ntp = archiver->get_ntp();
-          switch (result) {
-          case cloud_storage::download_result::success:
-              _queue.insert(archiver);
-              vlog(
-                _rtclog.info,
-                "Found manifest for partition {}",
-                archiver->get_ntp());
-              _probe.start_archiving_ntp();
-              return ss::make_ready_future<ss::stop_iteration>(
-                ss::stop_iteration::yes);
-          case cloud_storage::download_result::notfound:
-              _queue.insert(archiver);
-              vlog(
-                _rtclog.info,
-                "Start archiving new partition {}",
-                archiver->get_ntp());
-              // Start topic manifest upload
-              // asynchronously
-              if (ntp.tp.partition == 0) {
-                  // Upload manifest once per topic. GCS has strict
-                  // limits for single object updates.
-                  (void)upload_topic_manifest(
-                    model::topic_namespace(ntp.ns, ntp.tp.topic),
-                    archiver->get_revision_id());
-              }
-              _probe.start_archiving_ntp();
-              return ss::make_ready_future<ss::stop_iteration>(
-                ss::stop_iteration::yes);
-          case cloud_storage::download_result::failed:
-          case cloud_storage::download_result::timedout:
-              vlog(_rtclog.warn, "Manifest download failed");
-              return ss::make_exception_future<ss::stop_iteration>(
-                ss::timed_out_error());
-          }
-          return ss::make_ready_future<ss::stop_iteration>(
-            ss::stop_iteration::yes);
-      });
+    if (archiver->get_remote_manifest().size()) {
+        vlog(
+          _rtclog.info, "Found manifest for partition {}", archiver->get_ntp());
+    } else {
+        vlog(
+          _rtclog.info,
+          "Start archiving new partition {}",
+          archiver->get_ntp());
+        // Start topic manifest upload asynchronously
+        auto ntp = archiver->get_ntp();
+        if (ntp.tp.partition == 0) {
+            // Upload manifest once per topic. GCS has strict
+            // limits for single object updates.
+            (void)upload_topic_manifest(
+              model::topic_namespace(ntp.ns, ntp.tp.topic),
+              archiver->get_revision_id());
+        }
+    }
+    _probe.start_archiving_ntp();
+    _queue.insert(std::move(archiver));
+    return ss::make_ready_future<ss::stop_iteration>(ss::stop_iteration::yes);
 }
 
 ss::future<>
@@ -433,17 +413,21 @@ uint64_t scheduler_service_impl::estimate_backlog_size() {
     return size;
 }
 
-void scheduler_service_impl::maybe_start_manifest_cleanup(ss::lw_shared_ptr<ntp_archiver> archiver) {
-  auto u = ss::try_get_units(_cleanup_sem, 1);
-  if (u) {
-    ssx::spawn_with_gate(_gate, [this, archiver, u=std::move(*u)] () mutable {
-      // TODO: limit restarts
-      // TODO: limit parallelism
-      return archiver->cleanup_manifest(_rtcnode).finally([u=std::move(u)] () mutable {
-        u.return_all();
-      });
-    });
-  }
+void scheduler_service_impl::maybe_start_manifest_cleanup(
+  ss::lw_shared_ptr<ntp_archiver> archiver) {
+    std::ignore = archiver;
+    // auto u = ss::try_get_units(_cleanup_sem, 1);
+    // if (u) {
+    //   ssx::spawn_with_gate(_gate, [this, archiver, u=std::move(*u)] ()
+    //   mutable {
+    //     // TODO: limit restarts
+    //     // TODO: limit parallelism
+    //     return archiver->cleanup_manifest(_rtcnode).finally([u=std::move(u)]
+    //     () mutable {
+    //       u.return_all();
+    //     });
+    //   });
+    // }
 }
 
 ss::future<> scheduler_service_impl::run_uploads() {

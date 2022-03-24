@@ -21,6 +21,8 @@
 
 #include <seastar/util/log.hh>
 
+#include <system_error>
+
 namespace cluster {
 
 /// This replicated state machine allows storing archival manifest (a set of
@@ -33,10 +35,27 @@ public:
     explicit archival_metadata_stm(
       raft::consensus*, cloud_storage::remote& remote, ss::logger& logger);
 
+    /// NOTE: Method is depricated!!!
     /// Add the difference between manifests to the raft log, replicate it and
     /// wait until it is applied to the STM.
     ss::future<std::error_code>
     add_segments(const cloud_storage::partition_manifest&, retry_chain_node&);
+
+    /// Segment key and metadata
+    struct segment_kv_item {
+        cloud_storage::partition_manifest::key key;
+        cloud_storage::partition_manifest::segment_meta meta;
+    };
+
+    /// Add segments to the archival metadata snapshot. Replicate the changes
+    /// and wait until they're applied to the STM.
+    ss::future<std::error_code>
+    add_segments(std::vector<segment_kv_item>, retry_chain_node&);
+
+    /// Remove segments from the archival metadata snapshot. Replicate the
+    /// changes and wait until they're applied to the STM.
+    ss::future<std::error_code>
+    rem_segments(std::vector<segment_kv_item>, retry_chain_node&);
 
     /// A set of archived segments. NOTE: manifest can be out-of-date if this
     /// node is not leader; or if the STM hasn't yet performed sync; or if the
@@ -52,8 +71,16 @@ private:
     ss::future<std::error_code> do_add_segments(
       const cloud_storage::partition_manifest&, retry_chain_node&);
 
+    ss::future<std::error_code> do_add_segments(
+      std::vector<segment_kv_item>,
+      std::vector<segment_kv_item>,
+      retry_chain_node&);
+
     ss::future<> apply(model::record_batch batch) override;
     ss::future<> handle_eviction() override;
+
+    /// Upload serialized manifest to S3
+    ss::future<std::error_code> upload_manifest(retry_chain_node&);
 
     ss::future<> apply_snapshot(stm_snapshot_header, iobuf&&) override;
     ss::future<stm_snapshot> take_snapshot() override;

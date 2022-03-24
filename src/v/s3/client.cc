@@ -512,8 +512,8 @@ ss::future<client::head_object_result> client::head_object(
       .then(
         [](const http::client::response_stream_ref& ref)
           -> ss::future<head_object_result> {
-            return ref->prefetch_headers()
-              .then([ref]() -> ss::future<head_object_result> {
+            return ref->prefetch_headers().then(
+              [ref]() -> ss::future<head_object_result> {
                   vlog(
                     s3_log.info,
                     "HEAD response headers: {}",
