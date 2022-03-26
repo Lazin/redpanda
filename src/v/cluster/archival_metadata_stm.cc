@@ -28,6 +28,9 @@
 
 #include <boost/system/detail/errc.hpp>
 
+#include <chrono>
+#include <ratio>
+
 namespace cluster {
 
 namespace {
@@ -482,9 +485,13 @@ ss::future<> archival_metadata_stm::stop() {
 ss::future<std::error_code>
 archival_metadata_stm::upload_manifest(retry_chain_node& parent) {
     auto bucket = config::shard_local_cfg().cloud_storage_bucket.value();
+    auto timeout = config::shard_local_cfg().cloud_storage_manifest_upload_timeout_ms.value();
+    auto backoff = config::shard_local_cfg().cloud_storage_initial_backoff_ms.value();
     vassert(bucket, "configuration property cloud_storage_bucket must be set");
+    retry_chain_node fib(timeout, backoff);
+    vlog(_logger.info, "starting manifest upload, timeout: {}, initial backoff: {}", std::chrono::milliseconds(timeout), std::chrono::milliseconds(backoff));
     auto res = co_await _cloud_storage_api.upload_manifest(
-      s3::bucket_name(*bucket), _manifest, parent);
+      s3::bucket_name(*bucket), _manifest, fib);
     if (res != cloud_storage::upload_result::success) {
         vlog(_logger.info, "failed to upload manifest {}", res);
         co_return errc::timeout;

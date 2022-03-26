@@ -407,7 +407,7 @@ ss::future<ntp_archiver::batch_result> ntp_archiver::wait_all_scheduled_uploads(
           "re-uploading manifest file",
           total.num_succeded,
           total.num_failed);
-
+        
         if (_partition->archival_meta_stm()) {
             retry_chain_node rc_node(
               _manifest_upload_timeout, _initial_backoff, &parent);

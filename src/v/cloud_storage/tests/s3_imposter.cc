@@ -20,6 +20,7 @@
 #include <seastar/core/iostream.hh>
 #include <seastar/core/temporary_buffer.hh>
 #include <seastar/http/function_handlers.hh>
+#include <seastar/http/reply.hh>
 #include <seastar/net/socket_defs.hh>
 #include <seastar/util/defer.hh>
 
@@ -27,6 +28,7 @@
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/test/tools/old/interface.hpp>
 #include <boost/test/unit_test.hpp>
+#include <exception>
 
 using namespace std::chrono_literals;
 
@@ -126,6 +128,13 @@ void s3_imposter_fixture::set_routes(
                 }
                 repl.set_status(reply::status_type::no_content);
                 it->second.body = std::nullopt;
+                return "";
+            } else if (request._method == "HEAD") {
+                auto it = expectations.find(request._url);
+                if (it == expectations.end() || !it->second.body.has_value()) {
+                    vlog(fixt_log.trace, "Reply HEAD request with error");
+                    repl.set_status(reply::status_type::not_found);
+                }
                 return "";
             }
             BOOST_FAIL("Unexpected request");

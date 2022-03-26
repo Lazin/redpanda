@@ -308,8 +308,7 @@ SEASTAR_THREAD_TEST_CASE(test_archival_policy_timeboxed_uploads) {
 
     b.stop().get();
 }
-// TODO: restore tests
-/*
+
 // NOLINTNEXTLINE
 FIXTURE_TEST(test_upload_segments_leadership_transfer, archiver_fixture) {
     // This test simulates leadership transfer. In this situation the
@@ -371,8 +370,6 @@ FIXTURE_TEST(test_upload_segments_leadership_transfer, archiver_fixture) {
 
     retry_chain_node fib;
 
-    archiver.download_manifest(fib).get();
-
     auto res = archiver
                  .upload_next_candidates(get_local_storage_api().log_mgr(), fib)
                  .get0();
@@ -382,24 +379,15 @@ FIXTURE_TEST(test_upload_segments_leadership_transfer, archiver_fixture) {
     for (auto req : get_requests()) {
         vlog(test_log.info, "{} {}", req._method, req._url);
     }
-    BOOST_REQUIRE_EQUAL(get_requests().size(), 4);
+    BOOST_REQUIRE_EQUAL(get_requests().size(), 3);
 
     cloud_storage::partition_manifest manifest;
     {
         auto [begin, end] = get_targets().equal_range(manifest_url);
         size_t len = std::distance(begin, end);
-        BOOST_REQUIRE_EQUAL(len, 2);
-        std::set<ss::sstring> expected = {"PUT", "GET"};
-        for (auto it = begin; it != end; it++) {
-            auto key = it->second._method;
-            BOOST_REQUIRE(expected.contains(key));
-            expected.erase(key);
-
-            if (key == "PUT") {
-                manifest = load_manifest(it->second.content);
-            }
-        }
-        BOOST_REQUIRE(expected.empty());
+        BOOST_REQUIRE_EQUAL(len, 1);
+        BOOST_REQUIRE(begin->second._method == "PUT");
+        manifest = load_manifest(begin->second.content);
     }
     for (const segment_name& name : {s1name, s2name}) {
         auto url = get_segment_path(manifest, name);
@@ -425,7 +413,7 @@ FIXTURE_TEST(test_upload_segments_leadership_transfer, archiver_fixture) {
 
     BOOST_CHECK(stm_manifest == archiver.get_remote_manifest());
 }
-*/
+
 class counting_batch_consumer : public storage::batch_consumer {
 public:
     struct stream_stats {

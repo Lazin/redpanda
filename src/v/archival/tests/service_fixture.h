@@ -161,6 +161,10 @@ class archiver_fixture
   , public redpanda_thread_fixture
   , public segment_matcher<archiver_fixture> {
 public:
+    archiver_fixture()
+      : redpanda_thread_fixture(
+        redpanda_thread_fixture::init_cloud_storage_tag()) {}
+
     std::unique_ptr<storage::disk_log_builder> get_started_log_builder(
       model::ntp ntp, model::revision_id rev = model::revision_id(0));
     /// Wait unill all information will be replicated and the local node
