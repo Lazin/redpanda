@@ -14,6 +14,7 @@
 #include "net/dns.h"
 #include "net/transport.h"
 #include "seastarx.h"
+#include "vlog.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
@@ -29,7 +30,9 @@
 #include <seastar/http/httpd.hh>
 #include <seastar/http/routes.hh>
 #include <seastar/net/api.hh>
+#include <seastar/net/socket_defs.hh>
 #include <seastar/net/tcp.hh>
+#include <seastar/net/tls.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/util/defer.hh>
 
@@ -41,6 +44,8 @@
 #include <exception>
 #include <initializer_list>
 #include <optional>
+
+ss::logger testlog("DN_log");
 
 using namespace std::chrono_literals;
 
@@ -101,6 +106,13 @@ struct configured_test_pair {
 net::base_transport::configuration transport_configuration() {
     net::unresolved_address server_addr(httpd_host_name, httpd_port_number);
     net::base_transport::configuration conf{.server_addr = server_addr};
+    ss::tls::credentials_builder builder;
+    vlog(testlog.info, "start building client credentials");
+    builder.set_x509_trust_file("ca.crt", ss::tls::x509_crt_format::PEM).get();
+    builder.set_x509_key_file("client1.crt", "client1.key", ss::tls::x509_crt_format::PEM).get();
+    auto creds = builder.build_certificate_credentials();
+    vlog(testlog.info, "done building client credentials");
+    conf.credentials = creds;
     return conf;
 }
 
@@ -113,7 +125,13 @@ started_client_and_server(const net::base_transport::configuration& conf) {
     server->start().get();
     server->set_routes(set_routes).get();
     auto resolved = net::resolve_dns(conf.server_addr).get();
-    server->listen(resolved).get();
+    ss::tls::credentials_builder builder;
+    vlog(testlog.info, "start building server credentials");
+    builder.set_x509_trust_file("ca.crt", ss::tls::x509_crt_format::PEM).get();
+    builder.set_x509_key_file("server.crt", "server.key", ss::tls::x509_crt_format::PEM).get();
+    auto creds = builder.build_server_credentials();
+    vlog(testlog.info, "done building server credentials");
+    server->listen(resolved, creds).get();
     return {
       .server = server,
       .client = client,
@@ -409,14 +427,23 @@ public:
       , _response(std::move(resp)) {}
 
     void listen(ss::socket_address server_addr) {
-        auto conf = transport_configuration();
         ss::server_socket ss;
         ss::listen_options lo{};
         lo.reuse_address = true;
-        _server_socket = ss::engine().listen(server_addr, lo);
+        ss::tls::credentials_builder builder;
+        builder.set_x509_trust_file("ca.crt", ss::tls::x509_crt_format::PEM).get();
+        builder.set_x509_key_file("server.crt", "server.key", ss::tls::x509_crt_format::PEM).get();
+        builder.set_client_auth(ss::tls::client_auth::REQUIRE);
+        auto cred = builder.build_server_credentials();
+        _server_socket = ss::tls::listen(cred, server_addr, lo);
         (void)ss::with_gate(_gate, [this] {
             return ss::async([this] {
-                auto [connection, remoteaddr] = _server_socket.accept().get0();
+                auto [connection, remoteaddr, dn] = _server_socket.accept().get();
+                if (dn) {
+                  vlog(testlog.info, "DN={}, ISSUER={}", dn->subject, dn->issuer);
+                } else {
+                  vlog(testlog.info, "DN not set");
+                }
                 _socket = std::move(connection);
                 _fin = _socket.input();
                 _fout = _socket.output();
@@ -848,4 +875,56 @@ SEASTAR_THREAD_TEST_CASE(test_http_reconnect_graceful_shutdown) {
     client.stop().get();
     ss::sleep(10ms).get();
     BOOST_REQUIRE(fut.get() == http::reconnect_result_t::timed_out);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_dn_name_handling) {
+    // Send data and recv response
+    auto config = transport_configuration();
+
+    auto sa = net::resolve_dns(config.server_addr).get();
+    ss::server_socket ss;
+    ss::listen_options lo{};
+    lo.reuse_address = true;
+    ss::tls::credentials_builder builder;
+    builder.set_x509_trust_file("ca.crt", ss::tls::x509_crt_format::PEM).get();
+    builder.set_x509_key_file("server.crt", "server.key", ss::tls::x509_crt_format::PEM).get();
+    builder.set_client_auth(ss::tls::client_auth::REQUIRE);
+    auto cred = builder.build_server_credentials();
+    auto ssock = ss::tls::listen(cred, sa, lo);
+    ss::gate accept_gate;
+    (void)ss::with_gate(accept_gate, [ssock=std::move(ssock)] () mutable {
+      return ss::async([ssock=std::move(ssock)] () mutable {
+        vlog(testlog.info, "start accepting connections");
+        auto [connection, remoteaddr, dn] = ssock.accept().get();
+        if (dn) {
+          vlog(testlog.info, "DN={}, ISSUER={}", dn->subject, dn->issuer);
+        } else {
+          vlog(testlog.info, "DN not set");
+        }
+        auto server_socket = std::move(connection);
+        auto server_fin = server_socket.input();
+        auto server_fout = server_socket.output();
+        server_socket.set_nodelay(true);
+        server_socket.set_keepalive(true);
+
+        server_fout.write("hello", 5).get();
+        server_fout.flush().get();
+        server_fout.close().get();
+        server_socket.shutdown_output();
+        server_socket.shutdown_input();
+      });
+    });
+
+    vlog(testlog.info, "client start connecting");
+    auto client_socket = ss::tls::connect(config.credentials, sa).get();
+    vlog(testlog.info, "client connected");
+    auto client_fin = client_socket.input();
+    auto read_buf = client_fin.read_exactly(5).get();
+    vlog(testlog.info, "client consumed {}", std::string_view(read_buf.get(), read_buf.size()));
+    client_fin.close().get();
+
+    client_socket.shutdown_input();
+    client_socket.shutdown_output();
+    
+    accept_gate.close().get();
 }

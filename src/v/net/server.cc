@@ -143,6 +143,7 @@ ss::future<> server::accept(listener& s) {
               auto ar = f_cs_sa.get();
               ar.connection.set_nodelay(true);
               ar.connection.set_keepalive(true);
+              vlog(rpc::rpclog.info, "DN={}, issuer={}", ar.dn->subject, ar.dn->issuer);
 
               // `s` is a lambda reference argument to a coroutine:
               // this is the last place we may refer to it before
