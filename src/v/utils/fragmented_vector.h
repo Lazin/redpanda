@@ -50,6 +50,19 @@ public:
     fragmented_vector& operator=(const fragmented_vector&) noexcept = delete;
     fragmented_vector(fragmented_vector&&) noexcept = default;
     fragmented_vector& operator=(fragmented_vector&&) noexcept = default;
+
+    /// Constructs fragmented vector that contains 'size' elements.
+    /// The operation is equivalent to calling 'push_back' 'size' times
+    /// followed by the call to 'shrink_to_fit'.
+    explicit fragmented_vector(size_t size)
+      : _size(size) {
+        while (size > 0) {
+            auto fsize = size > elems_per_frag ? elems_per_frag : size;
+            _frags.emplace_back(fsize);
+            _capacity += fsize;
+            size -= fsize;
+        }
+    }
     ~fragmented_vector() noexcept = default;
 
     fragmented_vector copy() const noexcept { return *this; }
@@ -76,6 +89,12 @@ public:
     }
 
     const T& operator[](size_t index) const {
+        vassert(index < _size, "Index out of range {}/{}", index, _size);
+        auto& frag = _frags.at(index / elems_per_frag);
+        return frag.at(index % elems_per_frag);
+    }
+
+    T& operator[](size_t index) {
         vassert(index < _size, "Index out of range {}/{}", index, _size);
         auto& frag = _frags.at(index / elems_per_frag);
         return frag.at(index % elems_per_frag);
