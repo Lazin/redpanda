@@ -3,6 +3,7 @@ v_cc_library(
   NAME cloud_storage
   SRCS
     cache_service.cc
+    cache_utils.cc
     cache_probe.cc
     topic_manifest.cc
     partition_manifest.cc
