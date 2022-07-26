@@ -10,8 +10,8 @@
 
 #pragma once
 
-#include "cloud_storage/offset_translation_layer.h"
 #include "cloud_storage/remote.h"
+#include "cloud_storage/stream_util.h"
 #include "cloud_storage/topic_manifest.h"
 #include "cloud_storage/types.h"
 #include "cluster/types.h"

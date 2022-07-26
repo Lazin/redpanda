@@ -12,6 +12,7 @@
 
 #include "bytes/iobuf_istreambuf.h"
 #include "cloud_storage/logger.h"
+#include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/types.h"
 #include "config/configuration.h"
 #include "hashing/xx.h"
@@ -536,11 +537,10 @@ partition_downloader::download_segment_file(
       segm.meta.size_bytes,
       part.part_prefix.string());
 
-    offset_translator otl{segm.meta.delta_offset};
-
     auto localpath = part.part_prefix
-                     / std::string{otl.get_adjusted_segment_name(
-                       segm.manifest_key, _rtcnode)()};
+                     / std::filesystem::path(generate_segment_name(
+                       segm.manifest_key.base_offset,
+                       segm.manifest_key.term)());
 
     if (co_await ss::file_exists(localpath.string())) {
         vlog(
@@ -557,7 +557,6 @@ partition_downloader::download_segment_file(
                    _part{part},
                    _remote_path{remote_path},
                    _localpath{localpath},
-                   _otl{otl},
                    _min_offset{&min_offset},
                    _max_offset{&max_offset}](
                     uint64_t len,
@@ -565,7 +564,6 @@ partition_downloader::download_segment_file(
         auto part{_part};
         auto remote_path{_remote_path};
         auto localpath{_localpath};
-        auto otl{_otl};
         auto& min_offset{*_min_offset};
         auto& max_offset{*_max_offset};
         vlog(
@@ -575,7 +573,7 @@ partition_downloader::download_segment_file(
           localpath.string());
         co_await ss::recursive_touch_directory(part.part_prefix.string());
         auto fs = co_await open_output_file_stream(localpath);
-        auto stream_stats = co_await otl.copy_stream(
+        auto stream_stats = co_await stream_util::copy_stream(
           std::move(in), std::move(fs), _rtcnode);
 
         min_offset = stream_stats.min_offset;

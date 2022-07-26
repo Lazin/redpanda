@@ -8,7 +8,6 @@ rp_test(
     tx_range_manifest_test.cc
     s3_imposter.cc
     remote_test.cc
-    offset_translation_layer_test.cc
     remote_segment_test.cc
     remote_partition_test.cc
     remote_segment_index_test.cc 

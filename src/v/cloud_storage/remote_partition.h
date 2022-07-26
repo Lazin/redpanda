@@ -10,7 +10,6 @@
 
 #pragma once
 
-#include "cloud_storage/offset_translation_layer.h"
 #include "cloud_storage/partition_probe.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/remote_segment.h"

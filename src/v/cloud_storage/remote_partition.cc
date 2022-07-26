@@ -11,7 +11,6 @@
 #include "cloud_storage/remote_partition.h"
 
 #include "cloud_storage/logger.h"
-#include "cloud_storage/offset_translation_layer.h"
 #include "cloud_storage/remote_segment.h"
 #include "cloud_storage/types.h"
 #include "storage/parser_errc.h"

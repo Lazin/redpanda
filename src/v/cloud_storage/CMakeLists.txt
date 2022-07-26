@@ -9,7 +9,7 @@ v_cc_library(
     partition_manifest.cc
     recursive_directory_walker.cc
     remote.cc
-    offset_translation_layer.cc
+    stream_util.cc
     probe.cc
     partition_probe.cc
     partition_recovery_manager.cc
