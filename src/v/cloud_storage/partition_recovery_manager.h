@@ -165,23 +165,16 @@ private:
     /// which has to be changed. The downloaded file path
     /// is returned by the futue.
     ss::future<std::optional<offset_range>>
-    download_segment_file(const segment& segm, const download_part& part);
+    download_segment_file(const segment& segm, const download_part& part, model::offset unexpected_gap);
 
     using offset_map_t = absl::btree_map<model::offset, segment>;
 
     ss::future<offset_map_t> build_offset_map(const recovery_material& mat);
 
-    ss::future<download_part> download_log_with_capped_size(
+    ss::future<download_part> download_log_unlimited(
       const offset_map_t& offset_map,
       const partition_manifest& manifest,
-      const std::filesystem::path& prefix,
-      size_t max_size);
-
-    ss::future<download_part> download_log_with_capped_time(
-      const offset_map_t& offset_map,
-      const partition_manifest& manifest,
-      const std::filesystem::path& prefix,
-      model::timestamp_clock::duration retention_time);
+      const std::filesystem::path& prefix);
 
     /// Rename files in the list
     ss::future<> move_parts(download_part dls);

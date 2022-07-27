@@ -254,32 +254,9 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
           "Partition manifest used for recovery: {}",
           ostr.str());
     }
-    download_part part;
-    if (std::holds_alternative<std::monostate>(retention)) {
-        static constexpr std::chrono::seconds one_day = 86400s;
-        static constexpr auto one_week = one_day * 7;
-        vlog(_ctxlog.info, "Default retention parameters are used.");
-        part = co_await download_log_with_capped_time(
-          offset_map, mat.partition_manifest, prefix, one_week);
-    } else if (std::holds_alternative<size_bound_deletion_parameters>(
-                 retention)) {
-        auto r = std::get<size_bound_deletion_parameters>(retention);
-        vlog(
-          _ctxlog.info,
-          "Size bound retention is used. Size limit: {} bytes.",
-          r.retention_bytes);
-        part = co_await download_log_with_capped_size(
-          offset_map, mat.partition_manifest, prefix, r.retention_bytes);
-    } else if (std::holds_alternative<time_bound_deletion_parameters>(
-                 retention)) {
-        auto r = std::get<time_bound_deletion_parameters>(retention);
-        vlog(
-          _ctxlog.info,
-          "Time bound retention is used. Time limit: {}ms.",
-          r.retention_duration.count());
-        part = co_await download_log_with_capped_time(
-          offset_map, mat.partition_manifest, prefix, r.retention_duration);
-    }
+    download_part part = co_await download_log_unlimited(
+          offset_map, mat.partition_manifest, prefix);
+
     // Move parts to final destinations
     co_await move_parts(part);
 
@@ -325,12 +302,14 @@ void partition_downloader::update_downloaded_offsets(
 }
 
 ss::future<partition_downloader::download_part>
-partition_downloader::download_log_with_capped_size(
+partition_downloader::download_log_unlimited(
+  // This method is modifed to filter out offset gaps
+  // in the downloaded log and also to download all data
+  // available in the bucket
   const offset_map_t& offset_map,
   const partition_manifest& manifest,
-  const std::filesystem::path& prefix,
-  size_t max_size) {
-    vlog(_ctxlog.info, "Starting log download with size limit at {}", max_size);
+  const std::filesystem::path& prefix) {
+    vlog(_ctxlog.info, "Starting unlinited log download");
     gate_guard guard(_gate);
     size_t total_size = 0;
     std::deque<segment> staged_downloads;
@@ -338,20 +317,6 @@ partition_downloader::download_log_with_capped_size(
     model::offset start_delta{0};
     for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
         const auto& meta = it->second.meta;
-        if (total_size > max_size) {
-            vlog(
-              _ctxlog.debug,
-              "Max size {} reached, skipping {}",
-              total_size,
-              it->second.manifest_key);
-            break;
-        } else {
-            vlog(
-              _ctxlog.debug,
-              "Found {}, total log size {}",
-              it->second.manifest_key,
-              total_size);
-        }
         staged_downloads.push_front(it->second);
         total_size += meta.size_bytes;
         start_offset = meta.base_offset;
@@ -374,122 +339,36 @@ partition_downloader::download_log_with_capped_size(
         .min_offset = model::offset::max(),
         .max_offset = model::offset::min(),
       }};
+    
+    model::offset gap_size{0};
+    model::offset expected_base_offset{0};
+    for (const segment& s: staged_downloads) {
+      retry_chain_node fib(&_rtcnode);
+      retry_chain_logger dllog(cst_log, fib);
 
-    co_await ss::max_concurrent_for_each(
-      staged_downloads,
-      max_concurrency,
-      [this, _dlpart{&dlpart}, _dloffsets{&dloffsets}](
-        const segment& s) -> ss::future<> {
-          auto& dloffsets{*_dloffsets};
-          auto& dlpart{*_dlpart};
-          retry_chain_node fib(&_rtcnode);
-          retry_chain_logger dllog(cst_log, fib);
-          vlog(
-            dllog.debug,
-            "Starting download, base-offset: {}, term: {}, size: {}, fs "
-            "prefix: {}, "
-            "destination: {}",
-            s.manifest_key.base_offset,
-            s.manifest_key.term,
-            s.meta.size_bytes,
-            dlpart.part_prefix,
-            dlpart.dest_prefix);
-          auto offsets = co_await download_segment_file(s, dlpart);
-          if (offsets) {
-              dloffsets.push_back(offsets.value());
-          }
-      });
-    update_downloaded_offsets(std::move(dloffsets), dlpart);
-    if (dlpart.num_files == 0) {
-        // The segments didn't have data batches
-        dlpart.range.min_offset = manifest.get_last_offset();
-        dlpart.range.max_offset = manifest.get_last_offset();
+      gap_size = s.manifest_key.base_offset - expected_base_offset;
+
+      vlog(dllog.debug, "gap_size {} = {} - {}", gap_size, s.manifest_key.base_offset, expected_base_offset);
+      vlog(
+        dllog.debug,
+        "Starting download, base-offset: {}, term: {}, size: {}, fs "
+        "prefix: {}, "
+        "destination: {}, "
+        "calculated unexpected-gap: {}",
+        s.manifest_key.base_offset,
+        s.manifest_key.term,
+        s.meta.size_bytes,
+        dlpart.part_prefix,
+        dlpart.dest_prefix,
+        gap_size);
+
+      auto offsets = co_await download_segment_file(s, dlpart, gap_size);
+      expected_base_offset = offsets->max_offset + model::offset{1};
+      if (offsets) {
+          dloffsets.push_back(offsets.value());
+      }
     }
-    co_return dlpart;
-}
 
-ss::future<partition_downloader::download_part>
-partition_downloader::download_log_with_capped_time(
-  const offset_map_t& offset_map,
-  const partition_manifest& manifest,
-  const std::filesystem::path& prefix,
-  model::timestamp_clock::duration retention_time) {
-    vlog(
-      _ctxlog.info,
-      "Starting log download with time limit of {}s",
-      std::chrono::duration_cast<std::chrono::milliseconds>(retention_time)
-          .count()
-        / 1000);
-    gate_guard guard(_gate);
-    auto time_threshold = model::to_timestamp(
-      model::timestamp_clock::now() - retention_time);
-
-    std::deque<segment> staged_downloads;
-    model::offset start_offset{0};
-    model::offset start_delta{0};
-    for (auto it = offset_map.rbegin(); it != offset_map.rend(); it++) {
-        const auto& meta = it->second.meta;
-        if (
-          meta.max_timestamp == model::timestamp::missing()
-          || meta.max_timestamp < time_threshold) {
-            vlog(
-              _ctxlog.debug,
-              "Time threshold {} reached at {}, skipping {}",
-              time_threshold,
-              meta.max_timestamp,
-              it->second.manifest_key);
-            break;
-        } else {
-            vlog(
-              _ctxlog.debug,
-              "Found {}, max_timestamp {} is within the time threshold {}",
-              it->second.manifest_key,
-              meta.max_timestamp,
-              time_threshold);
-        }
-        staged_downloads.push_front(it->second);
-        start_offset = meta.base_offset;
-        start_delta = meta.delta_offset == model::offset() ? start_delta
-                                                           : meta.delta_offset;
-    }
-    vlog(
-      _ctxlog.info,
-      "Downloading log with time based retention, start_offset: {}, "
-      "start_delta: {}",
-      start_offset,
-      start_delta);
-    std::vector<offset_range> dloffsets;
-    download_part dlpart = {
-      .part_prefix = std::filesystem::path(prefix.string() + "_part"),
-      .dest_prefix = prefix,
-      .num_files = 0,
-      .range = {
-        .min_offset = model::offset::max(),
-        .max_offset = model::offset::min(),
-      }};
-
-    co_await ss::max_concurrent_for_each(
-      staged_downloads,
-      max_concurrency,
-      [this, _dlpart{&dlpart}, _dloffsets{&dloffsets}](
-        const segment& s) -> ss::future<> {
-          auto& dlpart{*_dlpart};
-          auto& dloffsets{*_dloffsets};
-          retry_chain_node fib(&_rtcnode);
-          retry_chain_logger dllog(cst_log, fib);
-          vlog(
-            dllog.debug,
-            "Starting download, base_offset: {}, term: {}, fs prefix: {}, "
-            "dest: {}",
-            s.manifest_key.base_offset,
-            s.manifest_key.term,
-            dlpart.part_prefix,
-            dlpart.dest_prefix);
-          auto offsets = co_await download_segment_file(s, dlpart);
-          if (offsets) {
-              dloffsets.push_back(offsets.value());
-          }
-      });
     update_downloaded_offsets(std::move(dloffsets), dlpart);
     if (dlpart.num_files == 0) {
         // The segments didn't have data batches
@@ -536,7 +415,7 @@ open_output_file_stream(const std::filesystem::path& path) {
 
 ss::future<std::optional<partition_downloader::offset_range>>
 partition_downloader::download_segment_file(
-  const segment& segm, const download_part& part) {
+  const segment& segm, const download_part& part, model::offset unexpected_gap) {
     auto name = generate_segment_name(
       segm.manifest_key.base_offset, segm.manifest_key.term);
     auto remote_path = generate_remote_segment_path(
@@ -551,7 +430,7 @@ partition_downloader::download_segment_file(
       segm.meta.size_bytes,
       part.part_prefix.string());
 
-    offset_translator otl{segm.meta.delta_offset};
+    offset_translator otl{unexpected_gap};
 
     auto localpath = part.part_prefix
                      / std::string{otl.get_adjusted_segment_name(
