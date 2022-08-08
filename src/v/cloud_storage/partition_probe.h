@@ -32,6 +32,8 @@ public:
     void segment_reader_created() { ++_cur_segment_readers; }
     void segment_reader_destroyed() { --_cur_segment_readers; }
 
+    // TODO: add metrics
+
 private:
     uint64_t _bytes_read = 0;
     uint64_t _records_read = 0;
