@@ -120,3 +120,5 @@ v_cc_library(
     v::cloud_storage
   )
 add_subdirectory(tests)
+add_subdirectory(snapshot_to_manifest)
+

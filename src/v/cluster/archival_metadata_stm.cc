@@ -375,6 +375,17 @@ ss::future<> archival_metadata_stm::handle_eviction() {
       _last_offset);
 }
 
+cloud_storage::partition_manifest
+archival_metadata_stm::manifest_from_snapshot_data(
+  iobuf data, model::ntp ntp, model::initial_revision_id rev) {
+    auto snap = serde::from_iobuf<snapshot>(std::move(data));
+    cloud_storage::partition_manifest manifest(std::move(ntp), rev);
+    for (const auto& segment : snap.segments) {
+        manifest.add(segment.name, segment.meta);
+    }
+    return manifest;
+}
+
 ss::future<> archival_metadata_stm::apply_snapshot(
   stm_snapshot_header header, iobuf&& data) {
     auto snap = serde::from_iobuf<snapshot>(std::move(data));
