@@ -1,0 +1,3 @@
+add_executable(snapshot_to_manifest snapshot_to_manifest.cc)
+target_link_libraries(snapshot_to_manifest PUBLIC v::cluster)
+set_property(TARGET snapshot_to_manifest PROPERTY POSITION_INDEPENDENT_CODE ON)
