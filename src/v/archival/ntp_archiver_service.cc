@@ -514,19 +514,18 @@ void ntp_archiver::update_probe() {
 }
 
 bool ntp_archiver::upload_loop_can_continue() const {
-    return !_as.abort_requested() && !_gate.is_closed()
-           && _parent.is_elected_leader() && _parent.term() == _start_term;
+    return !_as.abort_requested() && !_gate.is_closed() && _parent.is_leader()
+           && _parent.term() == _start_term;
 }
 
 bool ntp_archiver::sync_manifest_loop_can_continue() const {
-    // todo: think about it
-    return !_as.abort_requested() && !_gate.is_closed()
-           && _parent.is_elected_leader() && _parent.term() == _start_term;
+    return !_as.abort_requested() && !_gate.is_closed() && _parent.is_leader()
+           && _parent.term() == _start_term;
 }
 
 bool ntp_archiver::housekeeping_can_continue() const {
-    return !_as.abort_requested() && !_gate.is_closed()
-           && _parent.is_elected_leader() && _parent.term() == _start_term;
+    return !_as.abort_requested() && !_gate.is_closed() && _parent.is_leader()
+           && _parent.term() == _start_term;
 }
 
 ss::future<> ntp_archiver::stop() {
