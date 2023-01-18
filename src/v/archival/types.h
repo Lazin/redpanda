@@ -109,10 +109,13 @@ private:
 
 /// Represents a series of adjacent segments
 struct adjacent_segment_run {
-    model::offset base_offset;
-    model::offset max_offset;
-    size_t size_bytes{0};
+    explicit adjacent_segment_run(model::ntp ntp)
+      : ntp(std::move(ntp)) {}
+
+    model::ntp ntp;
+    cloud_storage::segment_meta meta{};
     size_t num_segments{0};
+    std::vector<cloud_storage::remote_segment_path> segments;
 
     bool
     maybe_add_segment(const cloud_storage::segment_meta& s, size_t max_size);
