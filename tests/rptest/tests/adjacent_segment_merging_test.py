@@ -102,7 +102,11 @@ class AdjacentSegmentMergingTest(RedpandaTest):
                             # is working
                             num_good += 1
                 return num_good > 0
-            except:
+            except Exception as err:
+                import traceback
+                self.logger.info("".join(
+                    traceback.format_exception(type(err), err,
+                                               err.__traceback__)))
                 return False
 
         wait_until(manifest_has_one_segment, 60)
@@ -110,9 +114,9 @@ class AdjacentSegmentMergingTest(RedpandaTest):
     def _find_partition_manifests(self):
         res = []
         for obj in self.cloud_storage_client.list_objects(self.bucket_name):
-            if obj.Key.endswith("manifest.json") and not obj.Key.endswith(
+            if obj.key.endswith("manifest.json") and not obj.key.endswith(
                     "topic_manifest.json"):
-                res.append(obj.Key)
+                res.append(obj.key)
         return res
 
     def _download_partition_manifest(self, manifest_path):
