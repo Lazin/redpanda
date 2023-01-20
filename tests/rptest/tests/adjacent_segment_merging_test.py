@@ -19,7 +19,6 @@ from rptest.util import (
 from ducktape.mark import matrix
 
 import time
-import os
 import json
 
 from rptest.utils.si_utils import gen_segment_name_from_meta
@@ -80,7 +79,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
         The retention is not enable so the reupload process can use data 
         available locally.
         """
-        for _ in range(0, 10):
+        for _ in range(10):
             # Every 'produce' call should create at least one segment
             # in the cloud which is 1MiB
             self.kafka_tools.produce(self.topic, 1024, 1024, acks)
