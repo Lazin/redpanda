@@ -1417,7 +1417,8 @@ ntp_archiver::find_reupload_candidate(manifest_scanner_t scanner) {
           *log_generic.get_impl());
         segment_collector collector(
           run->meta.base_offset, manifest(), log, run->meta.size_bytes);
-        collector.collect_segments(true);
+        collector.collect_segments(
+          segment_collector_mode::collect_non_compacted);
         auto candidate = co_await collector.make_upload_candidate(
           _conf->upload_io_priority, _conf->segment_upload_timeout);
         if (candidate.candidate.exposed_name().empty()) {
