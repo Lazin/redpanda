@@ -39,6 +39,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
 
     def __init__(self, test_context):
         si_settings = SISettings(
+            test_context,
             cloud_storage_max_connections=10,
             log_segment_size=0x10000,
             cloud_storage_segment_max_upload_interval_sec=1,
@@ -51,7 +52,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
             cloud_storage_segment_size_min=1024 * 1024 * 8,
         )
 
-        self.s3_bucket_name = si_settings.cloud_storage_bucket
+        self.bucket_name = si_settings.cloud_storage_bucket
 
         super(AdjacentSegmentMergingTest,
               self).__init__(test_context=test_context,
@@ -65,7 +66,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
         super().setUp()  # topic is created here
 
     def tearDown(self):
-        self.s3_client.empty_bucket(self.s3_bucket_name)
+        self.cloud_storage_client.empty_bucket(self.bucket_name)
         super().tearDown()
 
     @cluster(num_nodes=3)
@@ -108,7 +109,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
 
     def _find_partition_manifests(self):
         res = []
-        for obj in self.s3_client.list_objects(self.s3_bucket_name):
+        for obj in self.cloud_storage_client.list_objects(self.bucket_name):
             if obj.Key.endswith("manifest.json") and not obj.Key.endswith(
                     "topic_manifest.json"):
                 res.append(obj.Key)
@@ -116,7 +117,7 @@ class AdjacentSegmentMergingTest(RedpandaTest):
 
     def _download_partition_manifest(self, manifest_path):
         """Find and download individual partition manifest"""
-        manifest = self.s3_client.get_object_data(self.s3_bucket_name,
-                                                  manifest_path)
+        manifest = self.cloud_storage_client.get_object_data(
+            self.bucket_name, manifest_path)
         self.logger.info(f"manifest found: {manifest}")
         return json.loads(manifest)
