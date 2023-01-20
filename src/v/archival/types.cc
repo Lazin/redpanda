@@ -129,6 +129,12 @@ bool adjacent_segment_run::maybe_add_segment(
         }
     } else {
         if (meta.size_bytes + s.size_bytes <= max_size) {
+            vassert(
+              model::next_offset(meta.committed_offset) == s.base_offset,
+              "Committed offset of the previous segment {} doesn't align with "
+              "base offset of the current segment {}",
+              meta.committed_offset,
+              s.base_offset);
             // Move the end of the small segment run forward
             meta.committed_offset = s.committed_offset;
             meta.max_timestamp = s.max_timestamp;
