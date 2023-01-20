@@ -39,7 +39,6 @@ private:
     model::offset _last;
     ntp_archiver& _archiver;
     retry_chain_logger& _ctxlog;
-    config::binding<size_t> _segment_size;
     config::binding<std::optional<size_t>> _target_segment_size;
     config::binding<std::optional<size_t>> _min_segment_size;
     ss::abort_source _as;

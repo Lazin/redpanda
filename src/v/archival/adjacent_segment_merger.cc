@@ -40,7 +40,6 @@ adjacent_segment_merger::adjacent_segment_merger(
   : _is_local(is_local)
   , _archiver(parent)
   , _ctxlog(ctxlog)
-  , _segment_size(config::shard_local_cfg().log_segment_size.bind())
   , _target_segment_size(
       config::shard_local_cfg().cloud_storage_segment_size_target.bind())
   , _min_segment_size(
