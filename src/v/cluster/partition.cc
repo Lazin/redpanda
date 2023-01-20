@@ -331,7 +331,11 @@ ss::future<> partition::stop() {
     auto f = ss::now();
 
     if (_archiver) {
-        f = f.then([this] { return _archiver->stop(); });
+        f = f.then([this] {
+            _upload_housekeeping.local().deregister_jobs(
+              _archiver->get_housekeeping_jobs());
+            return _archiver->stop();
+        });
     }
 
     if (_archival_meta_stm) {
@@ -458,6 +462,8 @@ ss::future<> partition::update_configuration(topic_properties properties) {
           new_ntp_config,
           _raft->ntp());
         if (_archiver) {
+            _upload_housekeeping.local().deregister_jobs(
+              _archiver->get_housekeeping_jobs());
             co_await _archiver->stop();
             _archiver = nullptr;
         }
@@ -546,6 +552,8 @@ ss::future<> partition::remove_remote_persistent_state(ss::abort_source& as) {
 
 ss::future<> partition::stop_archiver() {
     if (_archiver) {
+        _upload_housekeeping.local().deregister_jobs(
+          _archiver->get_housekeeping_jobs());
         return _archiver->stop().then([this] {
             // Drop it so that we don't end up double-stopping on shutdown
             _archiver = nullptr;
