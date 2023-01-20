@@ -1481,7 +1481,6 @@ ss::future<bool> ntp_archiver::do_upload_local(
 
     auto units = co_await ss::get_units(_mutex, 1, _as);
 
-    auto first_source = upload.sources.front();
     auto offset = upload.final_offset;
     auto base = upload.starting_offset;
     auto ot_state = _parent.get_offset_translator_state();
