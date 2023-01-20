@@ -117,6 +117,7 @@ get_archival_service_config(ss::scheduling_group sg, ss::io_priority_class p) {
 
 bool adjacent_segment_run::maybe_add_segment(
   const cloud_storage::segment_meta& s, size_t max_size) {
+    vlog(archival_log.debug, "Looking at segment meta: {}", s);
     if (num_segments == 0) {
         // Find the begining of the small segment
         // run.
@@ -129,12 +130,12 @@ bool adjacent_segment_run::maybe_add_segment(
         }
     } else {
         if (meta.size_bytes + s.size_bytes <= max_size) {
-            vassert(
-              model::next_offset(meta.committed_offset) == s.base_offset,
-              "Committed offset of the previous segment {} doesn't align with "
-              "base offset of the current segment {}",
-              meta.committed_offset,
-              s.base_offset);
+            if (model::next_offset(meta.committed_offset) != s.base_offset) {
+                // In case if we're dealing with one of the old manifests with
+                // inconsistencies (overlapping offsets, etc).
+                num_segments = 0;
+                meta = {};
+            }
             // Move the end of the small segment run forward
             meta.committed_offset = s.committed_offset;
             meta.max_timestamp = s.max_timestamp;
