@@ -248,3 +248,8 @@ vbuild/
 .classpath
 .factorypath
 .settings/
+
+
+# Added by cargo
+
+/target
