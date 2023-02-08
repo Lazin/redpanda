@@ -346,7 +346,7 @@ partition_downloader::download_log(const remote_manifest_path& manifest_key) {
       .completed = true,
       .min_kafka_offset = part.range.min_offset,
       .max_kafka_offset = part.range.max_offset,
-      .manifest = mat.partition_manifest,
+      .manifest = std::move(mat.partition_manifest),
     };
     co_return result;
 }

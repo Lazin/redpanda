@@ -18,6 +18,8 @@
 #include "serde/serde.h"
 #include "utils/tracking_allocator.h"
 
+#include <seastar/core/abort_source.hh>
+#include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
 
 #include <deque>
@@ -146,7 +148,8 @@ public:
       , _last_offset(lo)
       , _start_offset(so)
       , _last_uploaded_compacted_offset(lco)
-      , _insync_offset(insync) {
+      , _insync_offset(insync)
+      , _serialization_sem(1) {
         for (auto nm : replaced) {
             auto key = parse_segment_name(nm.name);
             vassert(
@@ -166,6 +169,12 @@ public:
             _segments.insert(std::make_pair(nm.meta.base_offset, nm.meta));
         }
     }
+
+    partition_manifest(const partition_manifest&);
+    partition_manifest& operator=(const partition_manifest&);
+
+    partition_manifest(partition_manifest&&) noexcept = default;
+    partition_manifest& operator=(partition_manifest&&) = default;
 
     /// Manifest object name in S3
     remote_manifest_path get_manifest_path() const override;
@@ -267,6 +276,8 @@ public:
     ///
     /// \return asynchronous input_stream with the serialized json
     ss::future<serialized_json_stream> serialize() const override;
+    ss::future<ss::semaphore_units<>>
+    get_serialization_units(ss::abort_source& as);
 
     /// Serialize manifest object
     ///
@@ -361,6 +372,9 @@ private:
     model::offset _start_offset;
     model::offset _last_uploaded_compacted_offset;
     model::offset _insync_offset;
+    /// Semaphore used to prevent concurrent update of the manifest
+    /// while serialization is in progress.
+    mutable ss::semaphore _serialization_sem;
 };
 
 } // namespace cloud_storage

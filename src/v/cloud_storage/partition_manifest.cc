@@ -213,7 +213,8 @@ partition_manifest::partition_manifest()
   , _rev()
   , _mem_tracker(ss::make_shared<util::mem_tracker>(""))
   , _segments(util::mem_tracked::map<absl::btree_map, key, value>(_mem_tracker))
-  , _last_offset(0) {}
+  , _last_offset(0)
+  , _serialization_sem(1) {}
 
 partition_manifest::partition_manifest(
   model::ntp ntp,
@@ -225,7 +226,37 @@ partition_manifest::partition_manifest(
       partition_mem_tracker ? partition_mem_tracker->create_child("manifest")
                             : ss::make_shared<util::mem_tracker>(""))
   , _segments(util::mem_tracked::map<absl::btree_map, key, value>(_mem_tracker))
-  , _last_offset(0) {}
+  , _last_offset(0)
+  , _serialization_sem(1) {}
+
+partition_manifest::partition_manifest(const partition_manifest& other)
+  : _ntp(other._ntp)
+  , _rev(other._rev)
+  , _mem_tracker(other._mem_tracker)
+  , _segments(other._segments)
+  , _replaced(other._replaced)
+  , _last_offset(other._last_offset)
+  , _start_offset(other._start_offset)
+  , _last_uploaded_compacted_offset(other._last_uploaded_compacted_offset)
+  , _insync_offset(other._insync_offset)
+  , _serialization_sem(1) {}
+
+partition_manifest&
+partition_manifest::operator=(const partition_manifest& other) {
+    if (&other == this) {
+        return *this;
+    }
+    _ntp = other._ntp;
+    _rev = other._rev;
+    _mem_tracker = other._mem_tracker;
+    _segments = other._segments;
+    _replaced = other._replaced;
+    _last_offset = other._last_offset;
+    _start_offset = other._start_offset;
+    _last_uploaded_compacted_offset = other._last_uploaded_compacted_offset;
+    _insync_offset = other._insync_offset;
+    return *this;
+}
 
 // NOTE: the methods that generate remote paths use the xxhash function
 // to randomize the prefix. S3 groups the objects into chunks based on
@@ -1194,6 +1225,7 @@ struct partition_manifest::serialization_cursor {
 };
 
 ss::future<serialized_json_stream> partition_manifest::serialize() const {
+    auto units = co_await ss::get_units(_serialization_sem, 1);
     auto iso = _insync_offset;
     iobuf serialized;
     iobuf_ostreambuf obuf(serialized);
@@ -1224,6 +1256,11 @@ ss::future<serialized_json_stream> partition_manifest::serialize() const {
     co_return serialized_json_stream{
       .stream = make_iobuf_input_stream(std::move(serialized)),
       .size_bytes = size_bytes};
+}
+
+ss::future<ss::semaphore_units<>>
+partition_manifest::get_serialization_units(ss::abort_source& as) {
+    co_return co_await ss::get_units(_serialization_sem, 1, as);
 }
 
 void partition_manifest::serialize(std::ostream& out) const {

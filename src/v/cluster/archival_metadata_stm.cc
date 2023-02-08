@@ -512,7 +512,8 @@ ss::future<> archival_metadata_stm::apply(model::record_batch b) {
         _insync_offset = b.last_offset();
         co_return;
     }
-
+    // Lock asynchronous manifest serialization
+    auto units = co_await _manifest->get_serialization_units(_download_as);
     b.for_each_record([this](model::record&& r) {
         auto key = serde::from_iobuf<cmd_key>(r.release_key());
         switch (key) {

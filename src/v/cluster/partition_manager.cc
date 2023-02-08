@@ -115,7 +115,7 @@ ss::future<consensus_ptr> partition_manager::manage(
     gate_guard guard(_gate);
     auto dl_result = co_await maybe_download_log(ntp_cfg, rtp);
     auto [logs_recovered, min_kafka_offset, max_kafka_offset, manifest]
-      = dl_result;
+      = std::move(dl_result);
     if (logs_recovered) {
         vlog(
           clusterlog.info,
