@@ -54,6 +54,7 @@ enum class segment_meta_ix {
     segment_term,
     delta_offset_end,
     sname_format,
+    metadata_size_hint,
 };
 
 namespace details {
@@ -103,7 +104,7 @@ class column_store
   : public serde::
       envelope<column_store, serde::version<0>, serde::compat_version<0>> {
     using hint_t = deltafor_stream_pos_t<int64_t>;
-    using hint_vec_t = std::array<hint_t, 12>;
+    using hint_vec_t = std::array<hint_t, 13>;
 
     static constexpr size_t hint_array_size = sizeof(hint_vec_t); // (192 bytes)
 
@@ -135,7 +136,8 @@ class column_store
           _archiver_term,
           _segment_term,
           _delta_offset_end,
-          _sname_format);
+          _sname_format,
+          _metadata_size_hint);
     }
 
     auto columns() const {
@@ -151,7 +153,8 @@ class column_store
           _archiver_term,
           _segment_term,
           _delta_offset_end,
-          _sname_format);
+          _sname_format,
+          _metadata_size_hint);
     }
 
 public:
@@ -167,7 +170,8 @@ public:
       gauge_col_t::const_iterator,
       counter_col_t::const_iterator,
       counter_col_t::const_iterator,
-      counter_col_t::const_iterator>;
+      counter_col_t::const_iterator,
+      gauge_col_t::const_iterator>;
 
     column_store() = default;
 
@@ -196,7 +200,9 @@ public:
           _archiver_term.append_tx(meta.archiver_term()),
           _segment_term.append_tx(meta.segment_term()),
           _delta_offset_end.append_tx(meta.delta_offset_end()),
-          _sname_format.append_tx(static_cast<int64_t>(meta.sname_format))));
+          _sname_format.append_tx(static_cast<int64_t>(meta.sname_format)),
+          _metadata_size_hint.append_tx(
+            static_cast<int64_t>(meta.metadata_size_hint))));
 
         if (
           ix
@@ -222,7 +228,8 @@ public:
                   *_archiver_term.get_current_stream_pos(),
                   *_segment_term.get_current_stream_pos(),
                   *_delta_offset_end.get_current_stream_pos(),
-                  *_sname_format.get_current_stream_pos()};
+                  *_sname_format.get_current_stream_pos(),
+                  *_metadata_size_hint.get_current_stream_pos()};
                 _hints.insert(std::make_pair(meta.base_offset(), tup));
             } else {
                 _hints.insert(std::make_pair(meta.base_offset(), std::nullopt));
@@ -249,6 +256,8 @@ public:
         details::value_or<segment_meta_ix::delta_offset_end>(
           it, meta.delta_offset_end);
         details::value_or<segment_meta_ix::sname_format>(it, meta.sname_format);
+        details::value_or<segment_meta_ix::metadata_size_hint>(
+          it, meta.metadata_size_hint);
         return meta;
     }
 
@@ -273,6 +282,8 @@ public:
             *_delta_offset_end.last_value()),
           .sname_format = static_cast<segment_name_format>(
             *_sname_format.last_value()),
+          .metadata_size_hint = static_cast<uint64_t>(
+            *_metadata_size_hint.last_value()),
         };
         return meta;
     }
@@ -322,7 +333,8 @@ public:
               _archiver_term.at_index(ix),
               _segment_term.at_index(ix),
               _delta_offset_end.at_index(ix),
-              _sname_format.at_index(ix));
+              _sname_format.at_index(ix),
+              _metadata_size_hint.at_index(ix));
         }
 
         auto hint = hint_it->second;
@@ -343,7 +355,9 @@ public:
           at_with_hint<segment_meta_ix::segment_term>(_segment_term, ix, hint),
           at_with_hint<segment_meta_ix::delta_offset_end>(
             _delta_offset_end, ix, hint),
-          at_with_hint<segment_meta_ix::sname_format>(_sname_format, ix, hint));
+          at_with_hint<segment_meta_ix::sname_format>(_sname_format, ix, hint),
+          at_with_hint<segment_meta_ix::metadata_size_hint>(
+            _metadata_size_hint, ix, hint));
     }
 
     /// Search by base_offset
@@ -429,6 +443,7 @@ public:
           _segment_term,
           _delta_offset_end,
           _sname_format,
+          _metadata_size_hint,
           _hints);
     }
 
@@ -510,6 +525,7 @@ private:
     counter_col_t _segment_term{};
     counter_col_t _delta_offset_end{};
     counter_col_t _sname_format{};
+    gauge_col_t _metadata_size_hint{};
 
     hint_map_t _hints{};
 };
