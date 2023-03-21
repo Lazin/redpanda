@@ -11,6 +11,7 @@
 
 #include "cloud_storage/partition_manifest.h"
 #include "cloud_storage/remote.h"
+#include "cloud_storage/types.h"
 #include "cluster/errc.h"
 #include "cluster/persisted_stm.h"
 #include "config/configuration.h"
@@ -850,6 +851,42 @@ archival_metadata_stm::get_segments_to_cleanup() const {
     // Include replaced segments to the backlog
     using lw_segment_meta = cloud_storage::partition_manifest::lw_segment_meta;
     std::vector<lw_segment_meta> backlog = _manifest->lw_replaced_segments();
+
+    // Make sure that 'replaced' list doesn't have any references to active
+    // segments. This is a protection from the data loss.
+    auto backlog_size = backlog.size();
+    backlog.erase(
+      std::remove_if(
+        backlog.begin(),
+        backlog.end(),
+        [this](const lw_segment_meta& m) {
+            auto it = _manifest->find(m.base_offset);
+            if (it == _manifest->end()) {
+                return false;
+            }
+            const auto& s = it->second;
+            if (m.size_bytes == 0) {
+                // Legacy name format, these segments are always reuploaded
+                // using v2 or v3 format
+                return s.sname_format == cloud_storage::segment_name_format::v1;
+            }
+            // The segment will have the same path as the one we have in
+            // manifest in S3 so if we will delete it the data will be lost.
+            return s.base_offset == m.base_offset
+                   && s.committed_offset == m.committed_offset
+                   && s.size_bytes == m.size_bytes
+                   && s.segment_term == m.segment_term
+                   && s.archiver_term == m.archiver_term;
+        }),
+      backlog.end());
+
+    if (backlog.size() < backlog_size) {
+        vlog(
+          _logger.warn,
+          "{} segments will not be removed from the bucket because they're "
+          "available in the manifest",
+          backlog_size - backlog.size());
+    }
 
     auto so = _manifest->get_start_offset().value_or(model::offset(0));
     for (const auto& m : *_manifest) {
