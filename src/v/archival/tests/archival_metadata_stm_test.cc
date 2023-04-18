@@ -688,7 +688,7 @@ FIXTURE_TEST(test_archival_stm_spillover, archival_metadata_stm_fixture) {
       archival_stm->manifest().get_archive_clean_offset(), model::offset());
 
     archival_stm
-      ->cleanup_archive(model::offset{0}, ss::lowres_clock::now() + 10s)
+      ->cleanup_archive(model::offset{0}, 0, ss::lowres_clock::now() + 10s)
       .get();
     BOOST_REQUIRE_EQUAL(
       archival_stm->manifest().get_archive_start_offset(), model::offset(0));
@@ -704,7 +704,7 @@ FIXTURE_TEST(test_archival_stm_spillover, archival_metadata_stm_fixture) {
     auto batcher2 = archival_stm->batch_start(ss::lowres_clock::now() + 10s);
     batcher2.spillover(model::offset(1000));
     batcher2.truncate_archive_init(model::offset(200), model::offset_delta(0));
-    batcher2.cleanup_archive(model::offset(100));
+    batcher2.cleanup_archive(model::offset(100), 0);
     batcher2.replicate().get();
     BOOST_REQUIRE_EQUAL(archival_stm->get_start_offset(), model::offset(1000));
     BOOST_REQUIRE_EQUAL(
@@ -714,7 +714,7 @@ FIXTURE_TEST(test_archival_stm_spillover, archival_metadata_stm_fixture) {
 
     // try to move archive_clean_offset backward
     archival_stm
-      ->cleanup_archive(model::offset{0}, ss::lowres_clock::now() + 10s)
+      ->cleanup_archive(model::offset{0}, 0, ss::lowres_clock::now() + 10s)
       .get();
     BOOST_REQUIRE_EQUAL(
       archival_stm->manifest().get_archive_clean_offset(), model::offset(100));
@@ -757,7 +757,7 @@ FIXTURE_TEST(
 
     auto batcher2 = archival_stm->batch_start(ss::lowres_clock::now() + 10s);
     batcher2.truncate_archive_init(model::offset(0), model::offset_delta(0));
-    batcher2.cleanup_archive(model::offset(0));
+    batcher2.cleanup_archive(model::offset(0), 0);
     batcher2.replicate().get();
     BOOST_REQUIRE_EQUAL(
       archival_stm->manifest().get_archive_start_offset(), model::offset(0));
