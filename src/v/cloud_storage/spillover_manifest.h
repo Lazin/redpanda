@@ -17,13 +17,32 @@
 
 namespace cloud_storage {
 
+struct spillover_manifest_path_components {
+    model::offset base;
+    model::offset last;
+    kafka::offset base_kafka;
+    kafka::offset next_kafka;
+    model::timestamp base_ts;
+    model::timestamp last_ts;
+};
+
 inline remote_manifest_path generate_spillover_manifest_path(
   const model::ntp& ntp,
   model::initial_revision_id rev,
-  model::offset base,
-  model::offset last) {
+  const spillover_manifest_path_components& c) {
     auto path = generate_partition_manifest_path(ntp, rev);
-    return remote_manifest_path(fmt::format("{}.{}.{}", path, base(), last()));
+    // Given the topic name size limit the name should fit into
+    // the AWS S3 size limit. The ':' is used as a delimiter because
+    // valid topic name can't contain this character.
+    return remote_manifest_path(fmt::format(
+      "{}:{}:{}:{}:{}:{}:{}",
+      path,
+      c.base(),
+      c.last(),
+      c.base_kafka(),
+      c.next_kafka(),
+      c.base_ts.value(),
+      c.last_ts.value()));
 }
 
 /// The section of the partition manifest
@@ -38,14 +57,19 @@ public:
       : partition_manifest(ntp, rev) {}
 
     remote_manifest_path get_manifest_path() const override {
-        auto so = get_start_offset();
-        if (!so.has_value()) {
-            throw std::runtime_error(fmt_with_ctx(
-              fmt::format,
-              "Can't generate path for the empty spillover manifest"));
-        }
+        const auto fs = begin()->second;
+        const auto ls = last_segment();
+        vassert(ls.has_value(), "Spillover manifest can't be empty");
+        spillover_manifest_path_components smc{
+          .base = fs.base_offset,
+          .last = ls->committed_offset,
+          .base_kafka = fs.base_kafka_offset(),
+          .next_kafka = ls->next_kafka_offset(),
+          .base_ts = fs.base_timestamp,
+          .last_ts = ls->max_timestamp,
+        };
         return generate_spillover_manifest_path(
-          get_ntp(), get_revision_id(), so.value(), get_last_offset());
+          get_ntp(), get_revision_id(), smc);
     }
 };
 
