@@ -24,6 +24,7 @@ struct spillover_manifest_path_components {
     kafka::offset next_kafka;
     model::timestamp base_ts;
     model::timestamp last_ts;
+    int32_t index{-1};
 };
 
 inline remote_manifest_path generate_spillover_manifest_path(
