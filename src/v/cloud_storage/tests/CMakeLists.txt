@@ -12,8 +12,9 @@ rp_test(
     remote_segment_index_test.cc
     recovery_request_test.cc
     segment_meta_cstore_test.cc 
+    async_manifest_view_test.cc
   DEFINITIONS BOOST_TEST_DYN_LINK
-  LIBRARIES v::seastar_testing_main Boost::unit_test_framework v::cloud_storage v::storage_test_utils v::cloud_roles
+  LIBRARIES v::seastar_testing_main Boost::unit_test_framework v::cloud_storage v::storage_test_utils v::cloud_roles v::raft
   ARGS "-- -c 1"
   LABELS cloud_storage
 )
