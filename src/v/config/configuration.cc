@@ -1429,11 +1429,7 @@ configuration::configuration()
       "split the manifest into two parts and one of them will be uploaded to "
       "S3.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
-      std::nullopt,
-      {
-        .min = 1_KiB,  // We need small min value to be able to stress
-        .max = 32_MiB, // infinite retention in tests
-      })
+      std::nullopt)
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",

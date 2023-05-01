@@ -37,7 +37,7 @@ inline remote_manifest_path generate_spillover_manifest_path(
     // valid topic name can't contain this character.
     return remote_manifest_path(fmt::format(
       "{}:{}:{}:{}:{}:{}:{}",
-      path,
+      path().string(),
       c.base(),
       c.last(),
       c.base_kafka(),

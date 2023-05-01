@@ -13,9 +13,11 @@
 #include "archival/ntp_archiver_service.h"
 #include "archival/tests/service_fixture.h"
 #include "bytes/iobuf.h"
+#include "bytes/iostream.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/types.h"
 #include "cloud_storage_clients/client_pool.h"
+#include "config/configuration.h"
 #include "config/property.h"
 #include "model/metadata.h"
 #include "net/types.h"
@@ -24,6 +26,7 @@
 #include "ssx/sformat.h"
 #include "storage/disk_log_impl.h"
 #include "storage/parser.h"
+#include "storage/storage_resources.h"
 #include "storage/tests/utils/disk_log_builder.h"
 #include "test_utils/fixture.h"
 #include "utils/retry_chain_node.h"
@@ -1354,4 +1357,129 @@ SEASTAR_THREAD_TEST_CASE(small_segment_run_test) {
     BOOST_REQUIRE(run.meta.committed_offset == model::offset{21});
     BOOST_REQUIRE(run.num_segments == 3);
     BOOST_REQUIRE(run.meta.size_bytes == 100);
+}
+
+static void test_manifest_spillover_impl(archiver_fixture& test, size_t spillover_manifest_size, size_t start_manifest_size) {
+    // Add segments until spillover condition will be met and check that
+    // spillover actually triggered.
+    const int64_t rec_per_segment = 1;
+    cloud_storage::partition_manifest manifest(manifest_ntp, manifest_revision);
+
+    int i = 0;
+    while (manifest.segments_metadata_bytes() < start_manifest_size) {
+        auto bo = model::offset(i * rec_per_segment);
+        auto delta = model::offset_delta(i * rec_per_segment / 2);
+        cloud_storage::partition_manifest::segment_meta segment_meta{
+          .is_compacted = false,
+          .size_bytes = 1, // doesn't matter
+          .base_offset = bo,
+          .committed_offset = bo,
+          .base_timestamp = model::timestamp(i),
+          .max_timestamp = model::timestamp(i),
+          .delta_offset = delta,
+          .ntp_revision = manifest.get_revision_id(),
+          .archiver_term = model::term_id(1),
+          .segment_term = model::term_id(1),
+          .delta_offset_end = delta,
+        };
+        manifest.add(segment_meta);
+        i++;
+    }
+    test.init_storage_api_local({
+      {manifest_ntp, model::offset(0), model::term_id(1)},
+    });
+    test.wait_for_partition_leadership(manifest_ntp);
+    test.listen();
+
+    auto part = test.app.partition_manager.local().get(manifest_ntp);
+    tests::cooperative_spin_wait_with_timeout(10s, [part]() mutable {
+        return part->last_stable_offset() >= model::offset(0);
+    }).get();
+
+    // Generate new manifest based on data layout on disk
+    std::vector<cloud_storage::segment_meta> all_segments;
+    for (const auto& s : manifest) {
+        all_segments.push_back(s);
+    }
+
+    vlog(test_log.debug, "stm add segments");
+    part->archival_meta_stm()
+      ->add_segments(
+        all_segments, std::nullopt, ss::lowres_clock::now() + 1s, never_abort)
+      .get();
+    vlog(test_log.debug, "stm add segments completed");
+
+    vlog(
+      test_log.debug,
+      "archival metadata stm last offset: {}",
+      part->archival_meta_stm()->get_last_offset());
+
+    auto [aconf, cconf] = test.get_configurations();
+
+    aconf->time_limit = segment_time_limit(0s);
+
+    archival::ntp_archiver archiver(
+      get_ntp_conf(),
+      aconf,
+      test.remote.local(),
+      test.app.shadow_index_cache.local(),
+      *part);
+
+    // Do not start archiver and run spillover manually.
+    vlog(test_log.debug, "apply spillover");
+    config::shard_local_cfg().cloud_storage_spillover_manifest_size.set_value(
+      std::make_optional((size_t)spillover_manifest_size));
+    archiver.apply_spillover().get();
+
+    const auto& stm_manifest = part->archival_meta_stm()->manifest();
+    auto new_so = stm_manifest.get_start_offset();
+    auto new_kafka = stm_manifest.get_start_kafka_offset();
+    auto archive_so = stm_manifest.get_archive_start_offset();
+    auto archive_kafka = stm_manifest.get_archive_start_kafka_offset();
+    auto archive_clean = stm_manifest.get_archive_clean_offset();
+
+    BOOST_REQUIRE(new_so.has_value());
+    auto lo = new_so.value()();
+    auto expected_spillover_path = fmt::format(
+      "/10000000/meta/kafka/test-topic/42_0/manifest.json:{}:{}:{}:{}:{}:{}",
+      0,
+      lo - 1,
+      0,
+      lo / 2 + 1,
+      0,
+      lo - 1);
+
+    vlog(
+      test_log.info,
+      "new_so: {}, new_kafka: {}, archive_so: {}, archive_kafka: {}, "
+      "archive_clean: {}, expected: {}\n",
+      new_so,
+      new_kafka,
+      archive_so,
+      archive_kafka,
+      archive_clean,
+      expected_spillover_path);
+
+    auto it = test.get_targets().find(expected_spillover_path);
+    BOOST_REQUIRE(it != test.get_targets().end());
+    BOOST_REQUIRE_EQUAL(it->second.method, "PUT");
+
+    // Validate uploaded spillover manifest
+    cloud_storage::partition_manifest spm(manifest_ntp, manifest_revision);
+    iobuf sbuf;
+    sbuf.append(it->second.content.data(), it->second.content_length);
+    auto sstr = make_iobuf_input_stream(std::move(sbuf));
+    spm.update(std::move(sstr)).get();
+
+    BOOST_REQUIRE(model::next_offset(spm.get_last_offset()) == new_so);
+}
+
+// NOLINTNEXTLINE
+FIXTURE_TEST(test_manifest_spillover1, archiver_fixture) {
+    test_manifest_spillover_impl(*this, 2048, 4096);
+}
+
+// NOLINTNEXTLINE
+FIXTURE_TEST(test_manifest_spillover2, archiver_fixture) {
+    test_manifest_spillover_impl(*this, 4096, 8192);
 }
