@@ -813,12 +813,10 @@ class segment_meta_cstore::impl
       segment_meta_cstore::impl,
       serde::version<0>,
       serde::compat_version<0>> {
-    // TODO tunable?
-    constexpr static auto max_buffer_entries = 1024u;
+    // Max write buffer capacity
+    constexpr static auto max_buffer_entries = 64UL;
 
 public:
-    void append(const segment_meta& meta) { _col.append(meta); }
-
     std::unique_ptr<segment_meta_materializing_iterator::impl> begin() const {
         flush_write_buffer();
         return std::make_unique<segment_meta_materializing_iterator::impl>(
