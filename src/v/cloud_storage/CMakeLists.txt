@@ -23,6 +23,7 @@ v_cc_library(
     recovery_request.cc
     recovery_utils.cc
     segment_meta_cstore.cc
+    async_manifest_view.cc
   DEPS
     Seastar::seastar
     v::bytes
