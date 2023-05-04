@@ -941,7 +941,6 @@ public:
         _col = serde::read_nested<column_store>(in, h._bytes_left_limit);
     }
 
-private:
     void flush_write_buffer() const {
         if (_write_buffer.empty()) {
             return;
@@ -950,6 +949,7 @@ private:
         _write_buffer.clear();
     }
 
+private:
     mutable absl::btree_map<model::offset, segment_meta> _write_buffer{};
     mutable column_store _col{};
 };
@@ -1039,4 +1039,7 @@ void segment_meta_cstore::from_iobuf(iobuf in) {
 iobuf segment_meta_cstore::to_iobuf() {
     return serde::to_iobuf(std::exchange(*_impl, {}));
 }
+
+void segment_meta_cstore::flush_write_buffer() { _impl->flush_write_buffer(); }
+
 } // namespace cloud_storage

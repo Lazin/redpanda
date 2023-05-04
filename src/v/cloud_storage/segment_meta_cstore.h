@@ -923,6 +923,8 @@ public:
 
     iobuf to_iobuf();
 
+    void flush_write_buffer();
+
 private:
     std::unique_ptr<impl> _impl;
 };
