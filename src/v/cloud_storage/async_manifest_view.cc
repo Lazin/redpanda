@@ -18,6 +18,7 @@
 #include "cloud_storage_clients/types.h"
 #include "config/configuration.h"
 #include "resource_mgmt/io_priority.h"
+#include "ssx/sformat.h"
 #include "utils/human.h"
 #include "utils/retry_chain_node.h"
 
@@ -34,6 +35,14 @@
 namespace cloud_storage {
 
 static constexpr size_t max_cache_capacity_bytes = 1_GiB;
+
+static ss::sstring to_string(const async_view_search_query_t& t) {
+    return ss::visit(
+      t,
+      [&](model::offset ro) { return ssx::sformat("[offset: {}]", ro); },
+      [&](kafka::offset ko) { return ssx::sformat("[kafka offset: {}]", ko); },
+      [&](model::timestamp ts) { return ssx::sformat("[timestamp: {}]", ts); });
+}
 
 materialized_manifest_cache::materialized_manifest_cache(
   size_t capacity_bytes, retry_chain_logger& parent_logger)
@@ -200,6 +209,10 @@ materialized_manifest_cache::get(model::offset base_offset) {
     return nullptr;
 }
 
+bool materialized_manifest_cache::contains(model::offset base_offset) {
+    return _cache.contains(base_offset);
+}
+
 bool materialized_manifest_cache::promote(model::offset base) {
     if (auto it = _cache.find(base); it != _cache.end()) {
         return promote(it->second);
@@ -356,4 +369,435 @@ void materialized_manifest_cache::discard_rollback_manifest(model::offset so) {
       so);
 }
 
+async_manifest_view_cursor::async_manifest_view_cursor(
+  async_manifest_view& view)
+  : _view(view) {}
+
+ss::future<result<bool, error_outcome>>
+async_manifest_view_cursor::seek(async_view_search_query_t q) {
+    auto res = co_await _view.get_materialized_manifest(q);
+    if (res.has_failure()) {
+        vlog(
+          _view._ctxlog.error,
+          "Failed to seek async_manifest_view_cursor: {}",
+          res.error());
+        co_return res.as_failure();
+    }
+    _current = res.value();
+    co_return true;
+}
+
+ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
+    throw "Not implemented";
+}
+
+std::optional<std::reference_wrapper<const spillover_manifest>> manifest() {
+    throw "Not implemente";
+}
+
+async_manifest_view::async_manifest_view(
+  ss::sharded<remote>& remote,
+  ss::sharded<cache>& cache,
+  const partition_manifest& stm_manifest,
+  cloud_storage_clients::bucket_name bucket)
+  : _bucket(bucket)
+  , _remote(remote)
+  , _cache(cache)
+  , _stm_manifest(stm_manifest)
+  , _rtcnode(_as)
+  , _ctxlog(cst_log, _rtcnode, _stm_manifest.get_ntp().path())
+  , _timeout(
+      config::shard_local_cfg().cloud_storage_manifest_upload_timeout_ms.bind())
+  , _backoff(config::shard_local_cfg().cloud_storage_initial_backoff_ms.bind())
+  , _read_buffer_size(config::shard_local_cfg().storage_read_buffer_size.bind())
+  , _readahead_size(
+      config::shard_local_cfg().storage_read_readahead_count.bind()) {}
+
+ss::future<> async_manifest_view::start() { co_return; }
+
+ss::future<> async_manifest_view::stop() {
+    _as.request_abort();
+    co_await _gate.close();
+}
+ss::future<> async_manifest_view::run_bg_loop() {
+    ss::gate::holder h(_gate);
+    while (!_as.abort_requested()) {
+        co_await _cvar.when(
+          [&] { return !_requests.empty() || _as.abort_requested(); });
+        _as.check();
+        if (!_requests.empty()) {
+            auto front = std::move(_requests.front());
+            _requests.pop_front();
+            vlog(
+              _ctxlog.debug,
+              "Processing spillover manifest request {}",
+              front.search_vec);
+            if (is_stm(front.search_vec.base)) {
+                vlog(
+                  _ctxlog.warn,
+                  "Request {} refers to STM manifest",
+                  front.search_vec);
+                // Normally, the request shouldn't contain the STM request
+                // but nothing prevents us from handling this just in case.
+                front.promise.set_value(std::ref(_stm_manifest));
+                continue;
+            }
+            auto sb_res = co_await maybe_scan_bucket();
+            if (sb_res.has_failure()) {
+                vlog(
+                  _ctxlog.error,
+                  "Failed to re-scan the bucket: {}",
+                  sb_res.error());
+                front.promise.set_value(sb_res.as_failure());
+                continue;
+            }
+            if (!_manifest_cache->contains(front.search_vec.base)) {
+                // Manifest is not cached and has to be hydrated and/or
+                // materialized.
+                auto u = co_await _manifest_cache->prepare(
+                  front.search_vec.size_bytes); // TODO: use timeout
+                // At this point we have free memory to download the
+                // spillover manifest.
+                auto m_res = co_await materialize_manifest(
+                  front.search_vec.base);
+                if (m_res.has_failure()) {
+                    vlog(
+                      _ctxlog.error,
+                      "Failed to materialize manifest {}: {}",
+                      front.search_vec,
+                      m_res.error());
+                    front.promise.set_value(m_res.as_failure());
+                    continue;
+                }
+                // Put newly materialized manifest into the cache
+                _manifest_cache->put(std::move(u), std::move(m_res.value()));
+                _probe.set_spillover_manifest_bytes(
+                  static_cast<int64_t>(_manifest_cache->size_bytes()));
+                _probe.set_spillover_manifest_instances(
+                  static_cast<int32_t>(_manifest_cache->size()));
+            }
+            auto cached = _manifest_cache->get(front.search_vec.base);
+            front.promise.set_value(cached);
+            vlog(
+              _ctxlog.debug,
+              "Spillover manifest request {} processed successfully",
+              front.search_vec);
+        }
+    }
+    co_return;
+}
+
+static bool bucket_item_filter(
+  const cloud_storage_clients::client::list_bucket_item& item) {
+    return !boost::algorithm::ends_with(item.key, ".json");
+}
+
+static spillover_manifest_path_components parse_spillover_manifest_path(
+  const ss::sstring& path, size_t size_bytes, int32_t index) {
+    std::deque<ss::sstring> components;
+    boost::split(components, path, boost::is_any_of(":"));
+    spillover_manifest_path_components res{
+      .base = model::offset(boost::lexical_cast<int64_t>(components[1])),
+      .last = model::offset(boost::lexical_cast<int64_t>(components[2])),
+      .base_kafka = kafka::offset(boost::lexical_cast<int64_t>(components[3])),
+      .next_kafka = kafka::offset(boost::lexical_cast<int64_t>(components[4])),
+      .base_ts = model::timestamp(boost::lexical_cast<int64_t>(components[5])),
+      .last_ts = model::timestamp(boost::lexical_cast<int64_t>(components[6])),
+      .size_bytes = size_bytes,
+      .index = index,
+    };
+    return res;
+}
+
+ss::future<result<async_manifest_view_cursor, error_outcome>>
+async_manifest_view::get_cursor(async_view_search_query_t query) noexcept {
+    try {
+        ss::gate::holder h(_gate);
+        auto cursor = async_manifest_view_cursor(*this);
+        // This calls 'get_materialized_manifest' internally which
+        // could potentially schedule manifest hydration/materialization
+        // in the background fiber.
+        auto result = co_await cursor.seek(query);
+        if (result.has_error()) {
+            vlog(
+              _ctxlog.error,
+              "failed to seek to offset {}, error: {}",
+              query,
+              result.error());
+            co_return result.as_failure();
+        }
+        co_return cursor;
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to create a cursor: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+}
+
+bool async_manifest_view::is_empty() const noexcept {
+    return _stm_manifest.size() == 0;
+}
+
+bool async_manifest_view::is_archive(async_view_search_query_t o) {
+    return ss::visit(
+      o,
+      [this](model::offset ro) {
+          return ro < _stm_manifest.get_start_offset().value_or(
+                   model::offset::max());
+      },
+      [this](kafka::offset ko) {
+          return ko < _stm_manifest.get_start_kafka_offset().value_or(
+                   kafka::offset::max());
+      },
+      [this](model::timestamp ts) {
+          auto bt = _stm_manifest.begin()->base_timestamp;
+          return ts < bt;
+      });
+}
+
+bool async_manifest_view::is_stm(async_view_search_query_t o) {
+    return ss::visit(
+      o,
+      [this](model::offset ro) {
+          return ro >= _stm_manifest.get_start_offset().value_or(
+                   model::offset::max());
+      },
+      [this](kafka::offset ko) {
+          return ko >= _stm_manifest.get_start_kafka_offset().value_or(
+                   kafka::offset::max());
+      },
+      [this](model::timestamp ts) {
+          auto sm = _stm_manifest.timequery(ts);
+          return sm.has_value();
+      });
+}
+
+ss::future<result<manifest_section_t, error_outcome>>
+async_manifest_view::get_materialized_manifest(
+  async_view_search_query_t q) noexcept {
+    try {
+        ss::gate::holder h(_gate);
+        if (is_stm(o)) {
+            // Fast path for STM reads
+            co_return std::ref(_stm_manifest);
+        }
+        //
+        auto index = search_spillover_manifests(q);
+        if (index < 0) {
+            co_return error_outcome::manifest_not_found;
+        }
+        auto vec = _manifests->components[index];
+        auto res = _manifest_cache->get(comp.base);
+        if (res) {
+            co_return res;
+        }
+        // Send materialization request to background loop
+        materialization_request_t request{
+          .search_vec = vec,
+          ._measurement = _probe.spillover_manifest_latency(),
+        };
+        auto fut = request.promise.get_future();
+        _requests.emplace_back(std::move(request));
+        _cvar.signal();
+        auto m = co_await std::move(fut);
+        if (m.has_failure()) {
+            vlog(
+              _ctxlog.error,
+              "Failed to materialize spillover manifest: {}",
+              m.error());
+            co_return m.as_failure();
+        }
+        co_return m.value();
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to materialize spillover manifest: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+}
+
+ss::future<result<spillover_manifest, error_outcome>>
+async_manifest_view::hydrate_manifest(
+  remote_manifest_path path) const noexcept {
+    try {
+        spillover_manifest manifest(
+          _stm_manifest.get_ntp(), _stm_manifest.get_revision_id());
+        retry_chain_node fib(_timeout(), _backoff(), &_rtcnode);
+        auto res = co_await _remote.local().download_manifest(
+          _bucket, path, manifest, fib);
+        if (res != download_result::success) {
+            vlog(
+              _ctxlog.error,
+              "failed to download manifest {}, object key: {}",
+              res,
+              path);
+            co_return error_outcome::manifest_download_error;
+        }
+        auto [str, len] = co_await manifest.serialize();
+        co_await _cache.local().put(
+          manifest.get_manifest_path()(),
+          str,
+          priority_manager::local().shadow_indexing_priority());
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to materialize segment: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+    _probe.on_spillover_manifest_hydration();
+    co_return manifest;
+}
+
+int32_t async_manifest_view::search_spillover_manifests(
+  async_view_search_query_t query) const {
+    if (!_manifests.has_value()) {
+        throw std::logic_error(fmt_with_ctx(
+          fmt::format,
+          "can't hydrate spillover manifest, bucket has to be scanned first"));
+    }
+
+    // Perform simple scan of the manifest list.
+    auto it = std::find_if(
+      _manifests->components.begin(),
+      _manifests->components.end(),
+      [query](const spillover_manifest_path_components& c) {
+          return ss::visit(
+            query,
+            [&](model::offset o) { return o >= c.base && o <= c.last; },
+            [&](kafka::offset k) {
+                return k >= c.base_kafka && k < c.next_kafka;
+            },
+            [&](model::timestamp t) {
+                return t >= c.base_ts && t <= c.last_ts;
+            });
+      });
+
+    if (it == _manifests->components.end()) {
+        return -1;
+    }
+
+    return it->index;
+}
+
+ss::future<result<spillover_manifest, error_outcome>>
+async_manifest_view::materialize_manifest(
+  async_view_search_query_t query) const noexcept {
+    try {
+        spillover_manifest manifest(
+          _stm_manifest.get_ntp(), _stm_manifest.get_revision_id());
+        if (!_manifests.has_value()) {
+            throw std::logic_error(fmt_with_ctx(
+              fmt::format,
+              "can't hydrate spillover manifest, bucket has to be scanned "
+              "first"));
+        }
+        auto h = _gate.hold();
+        // Perform simple scan of the manifest list
+        auto index = search_spillover_manifests(query);
+        if (index < 0) {
+            vlog(
+              _ctxlog.error,
+              "failed to find spillover manifest with base offset {}",
+              to_string(query));
+            co_return error_outcome::manifest_not_found;
+        }
+        auto path = _manifests->manifests.at(index);
+        // Probe cache. If not available or in case of race with cache eviction
+        // hydrate manifest from the cloud.
+        auto cache_status = co_await _cache.local().is_cached(path());
+        switch (cache_status) {
+        case cache_element_status::in_progress:
+            vlog(_ctxlog.warn, "Concurrent manifest hydration, path {}", path);
+            co_return error_outcome::repeat;
+        case cache_element_status::not_available: {
+            auto res = co_await hydrate_manifest(path);
+            if (res.has_failure()) {
+                vlog(
+                  _ctxlog.error,
+                  "failed to download manifest, object key: {}, error: {}",
+                  path,
+                  res.error());
+                co_return error_outcome::manifest_download_error;
+            }
+            auto manifest = std::move(res.value());
+            auto [str, len] = co_await manifest.serialize();
+            co_await _cache.local().put(
+              manifest.get_manifest_path()(),
+              str,
+              priority_manager::local().shadow_indexing_priority());
+        }
+        case cache_element_status::available: {
+            auto res = co_await _cache.local().get(path());
+            if (!res.has_value()) {
+                vlog(
+                  _ctxlog.warn,
+                  "failed to read cached manifest, object key: {}",
+                  path);
+                // Cache race removed the file after `is_cached` check, the
+                // upper layer is supposed to retry the call.
+                co_return error_outcome::repeat;
+            }
+            ss::file_input_stream_options options{
+              .buffer_size = _read_buffer_size(),
+              .read_ahead = static_cast<uint32_t>(_readahead_size()),
+              .io_priority_class
+              = priority_manager::local().shadow_indexing_priority()};
+            auto data_stream = ss::make_file_input_stream(
+              res->body, 0, std::move(options));
+            co_await manifest.update(std::move(data_stream));
+        }
+        };
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to materialize segment: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+    _probe.on_spillover_manifest_materialization();
+    co_return manifest;
+}
+
+ss::future<result<bool, error_outcome>>
+async_manifest_view::maybe_scan_bucket() noexcept {
+    try {
+        if (
+          _stm_manifest.get_start_offset() == _last_stm_start_offset
+          || _stm_manifest.get_archive_start_offset() == model::offset{}) {
+            // In this case no new spillover manifests could be uploaded.
+            co_return false;
+        }
+        spillover_manifest_list result;
+        retry_chain_node fib(_timeout(), _backoff(), &_rtcnode);
+        auto prefix = _stm_manifest.get_manifest_path();
+        auto res = co_await _remote.local().list_objects(
+          _bucket,
+          fib,
+          cloud_storage_clients::object_key(prefix().string()),
+          std::nullopt,
+          &bucket_item_filter);
+        if (res.has_error()) {
+            vlog(_ctxlog.error, "failed to list manifests: {}", res.error());
+            co_return error_outcome::scan_bucket_error;
+        }
+        int32_t index = 0;
+        for (const auto& it : res.value().contents) {
+            result.manifests.emplace_back(it.key);
+            result.components.push_back(
+              parse_spillover_manifest_path(it.key, it.size_bytes, index));
+            index++;
+        }
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to materialize segment: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+    co_return true;
+}
 } // namespace cloud_storage
