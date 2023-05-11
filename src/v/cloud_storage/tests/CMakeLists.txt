@@ -17,6 +17,7 @@ rp_test(
   UNIT_TEST
   BINARY_NAME cloud_storage_basic
   SOURCES
+    s3_imposter.cc
     directory_walker_test.cc
     partition_manifest_test.cc
     topic_manifest_test.cc
