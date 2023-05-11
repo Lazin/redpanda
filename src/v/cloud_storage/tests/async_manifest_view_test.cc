@@ -10,12 +10,14 @@
 
 #include "cloud_storage/async_manifest_view.h"
 #include "cloud_storage/spillover_manifest.h"
+#include "cloud_storage/tests/cloud_storage_fixture.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "test_utils/fixture.h"
 #include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/io_priority_class.hh>
 #include <seastar/core/timed_out_error.hh>
 #include <seastar/testing/seastar_test.hh>
 #include <seastar/testing/thread_test_case.hh>
@@ -28,8 +30,6 @@
 using namespace cloud_storage;
 
 static ss::logger test_log("async_manifest_view_log");
-static const model::ntp manifest_ntp(
-  model::ns("test-ns"), model::topic("test-topic"), model::partition_id(42));
 static const model::initial_revision_id manifest_rev(111);
 
 static spillover_manifest make_manifest(model::offset base) {
@@ -478,4 +478,109 @@ SEASTAR_THREAD_TEST_CASE(test_materialized_manifest_cache_grow) {
     BOOST_REQUIRE(p0 == nullptr);
     p1 = cache.get(model::offset(1));
     BOOST_REQUIRE(p1 != nullptr);
+}
+
+class async_manifest_view_fixture : public cloud_storage_fixture {
+public:
+    async_manifest_view_fixture()
+      : cloud_storage_fixture()
+      , stm_manifest(manifest_ntp, manifest_rev)
+      , bucket("test-bucket")
+      , rtc(as)
+      , ctxlog(test_log, rtc)
+      , probe(manifest_ntp)
+      , view(api, cache, stm_manifest, bucket, probe) {
+        view.start().get();
+    }
+
+    // The current content of the manifest will be spilled over to the archive
+    // and new elements will be generated. On the first call the spillover
+    // manifest is not generated.
+    void generate_manifest_section(int num_segments, bool hydrate = true) {
+        if (stm_manifest.empty()) {
+            add_random_segments(stm_manifest, num_segments);
+            return;
+        }
+        auto so = model::next_offset(stm_manifest.get_last_offset());
+        add_random_segments(stm_manifest, num_segments);
+        auto tmp = stm_manifest.truncate(so);
+        spillover_manifest spm(manifest_ntp, manifest_rev);
+        for (const auto& meta : tmp) {
+            spm.add(meta);
+        }
+        // update cache
+        auto path = spm.get_manifest_path();
+        if (hydrate) {
+            auto stream = spm.serialize().get();
+            cache.local()
+              .put(path, stream.stream, ss::default_priority_class())
+              .get();
+            stream.stream.close().get();
+        }
+        // upload to the cloud
+        std::stringstream body;
+        spm.serialize(body);
+        BOOST_REQUIRE(!body.fail());
+        expectation exp{
+          .url = path().string(),
+          .body = body.str(),
+        };
+        _expectations.push_back(std::move(exp));
+        spillover_start_offsets.push_back(so);
+    }
+
+    void listen() { set_expectations_and_listen(_expectations); }
+
+private:
+    // Generate random segments and add them to the manifest
+    static void
+    add_random_segments(partition_manifest& manifest, int num_segments) {
+        auto base = manifest.empty()
+                      ? model::offset(0)
+                      : model::next_offset(manifest.get_last_offset());
+        auto delta = model::offset_delta(0);
+        static constexpr int64_t ts_step = 1000;
+        static constexpr size_t segment_size = 4097;
+        for (int i = 0; i < num_segments; i++) {
+            auto last = base
+                        + model::offset(random_generators::get_int(1, 100));
+            auto delta_end = model::offset_delta(
+              random_generators::get_int(delta(), delta() + delta()));
+            segment_meta meta{
+              .is_compacted = false,
+              .size_bytes = segment_size,
+              .base_offset = base,
+              .committed_offset = last,
+              .base_timestamp = model::timestamp(i * ts_step),
+              .max_timestamp = model::timestamp(i * ts_step + (ts_step - 1)),
+              .delta_offset = delta,
+              .ntp_revision = manifest_rev,
+              .archiver_term = model::term_id(1),
+              .segment_term = model::term_id(1),
+              .delta_offset_end = delta_end,
+            };
+            base = model::next_offset(last);
+            delta = delta_end;
+            manifest.add(meta);
+        }
+    }
+
+    partition_manifest stm_manifest;
+    cloud_storage_clients::bucket_name bucket;
+    ss::abort_source as;
+    retry_chain_node rtc;
+    retry_chain_logger ctxlog;
+    partition_probe probe;
+    async_manifest_view view;
+    std::vector<expectation> _expectations;
+    std::vector<model::offset> spillover_start_offsets;
+};
+
+FIXTURE_TEST(test_async_manifest_view, async_manifest_view_fixture) {
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    listen();
 }
