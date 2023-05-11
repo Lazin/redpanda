@@ -13,6 +13,7 @@
 #include "cloud_storage/fwd.h"
 #include "cloud_storage/materialized_segments.h"
 #include "cloud_storage/partition_manifest.h"
+#include "cloud_storage/partition_probe.h"
 #include "cloud_storage/probe.h"
 #include "cloud_storage/remote.h"
 #include "cloud_storage/spillover_manifest.h"
@@ -33,6 +34,7 @@
 #include <algorithm>
 #include <exception>
 #include <map>
+#include <variant>
 
 namespace cloud_storage {
 
@@ -67,6 +69,9 @@ struct materialized_manifest
     spillover_manifest manifest;
     ss::semaphore_units<> _units;
     intrusive_list_hook _hook;
+    /// Flag which is set to true when the manifest is being evicted
+    /// from the cache.
+    bool evicted{false};
 };
 
 /// Collection of materialized manifests
@@ -200,9 +205,19 @@ public:
 
 class async_manifest_view;
 
+/// The structure represents evicted manifest. The difference between this
+/// state and uninitialized state is that 'stale_manifest' will trigger
+/// timed_out error on first access.
+struct stale_manifest {
+    /// Cached last offset value + 1 of the stale manifest
+    model::offset next_offset;
+};
+
 /// Type that represents section of full metadata. It can either contain
 /// a materialized spillover manifest or reference to main STM manifest.
 using manifest_section_t = std::variant<
+  std::monostate,
+  stale_manifest,
   ss::shared_ptr<materialized_manifest>,
   std::reference_wrapper<const partition_manifest>>;
 
@@ -224,7 +239,8 @@ struct spillover_manifest_list {
 /// batches in the 'refresh' call.
 class async_manifest_view_cursor {
 public:
-    explicit async_manifest_view_cursor(async_manifest_view& view);
+    explicit async_manifest_view_cursor(
+      async_manifest_view& view, ss::lowres_clock::duration timeout);
 
     /// Seek to manifest that contains offset
     ss::future<result<bool, error_outcome>> seek(async_view_search_query_t q);
@@ -235,10 +251,12 @@ public:
     /// Return current manifest
     ///
     /// \return pointer to the current manifest or nullopt
-    std::optional<std::reference_wrapper<const spillover_manifest>>
+    std::optional<std::reference_wrapper<const partition_manifest>>
     manifest() const;
 
 private:
+    void on_timeout();
+
     /// Manifest view ref
     async_manifest_view& _view;
 
@@ -247,6 +265,9 @@ private:
     /// Full copy of the spillover manifests list (the assumption is that the
     /// list is relatively small)
     std::optional<spillover_manifest_list> _manifests;
+
+    ss::lowres_clock::duration _idle_timeout;
+    ss::timer<ss::lowres_clock> _timer;
 };
 
 /// Service that maintains a view of the entire
@@ -261,18 +282,25 @@ public:
       ss::sharded<remote>& remote,
       ss::sharded<cache>& cache,
       const partition_manifest& stm_manifest,
-      cloud_storage_clients::bucket_name bucket);
+      cloud_storage_clients::bucket_name bucket,
+      partition_probe& probe);
 
     ss::future<> start();
     ss::future<> stop();
 
-    ss::future<result<async_manifest_view_cursor, error_outcome>>
+    ss::future<
+      result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
     get_cursor(async_view_search_query_t q) noexcept;
 
     bool is_empty() const noexcept;
 
+    const model::ntp& get_ntp() const { return _stm_manifest.get_ntp(); }
+
 private:
     ss::future<> run_bg_loop();
+
+    /// Return true if 'maybe_scan_bucket' need to be called
+    bool scan_needed() const noexcept;
 
     /// Scan the bucket and update the list of spillover manifests in
     /// the cloud. The scan is only performed if the STM state changed.
@@ -307,7 +335,7 @@ private:
     ///     - repeat if the manifest is being downloaded already
     ///     - TODO
     ss::future<result<spillover_manifest, error_outcome>>
-    materialize_manifest(async_view_search_query_t base_offset) const noexcept;
+    materialize_manifest(remote_manifest_path path) const noexcept;
 
     /// Find index of the spillover manifest
     ///
@@ -343,9 +371,9 @@ private:
     /// Materialization request which is sent to background fiber
     struct materialization_request_t {
         spillover_manifest_path_components search_vec;
-        ss::promise<
-          result<ss::shared_ptr<materialized_manifest>, error_outcome>>
-          promise;
+        remote_manifest_path path;
+        size_t size_bytes;
+        ss::promise<result<manifest_section_t, error_outcome>> promise;
         std::unique_ptr<hdr_hist::measurement> _measurement;
     };
     std::deque<materialization_request_t> _requests;

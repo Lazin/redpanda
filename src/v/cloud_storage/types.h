@@ -206,6 +206,7 @@ enum class error_outcome {
     // Represent transient error that can be retried. This is the only error
     // outcome that shouldn't be bubbled up to the client.
     repeat,
+    timed_out,
 };
 
 struct error_outcome_category final : public std::error_category {
@@ -233,6 +234,8 @@ struct error_outcome_category final : public std::error_category {
             return "cloud storage segment not found";
         case error_outcome::repeat:
             return "cloud storage repeat operation";
+        case error_outcome::timed_out:
+            return "cloud storage operation timed out";
         default:
             return "unknown";
         }

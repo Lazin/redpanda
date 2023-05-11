@@ -26,7 +26,6 @@ struct spillover_manifest_path_components {
     model::timestamp last_ts;
     // This fields are filled not from the path itself but from the
     // list objects output
-    size_t size_bytes;
     int32_t index{-1};
 };
 
@@ -35,15 +34,14 @@ operator<<(std::ostream& o, const spillover_manifest_path_components& c) {
     fmt::print(
       o,
       "{{base: {}, last: {}, base_kafka: {}, next_kafka: {}, base_ts: {}, "
-      "last_ts: {}, index: {}, size_bytes: {}}}",
+      "last_ts: {}, index: {}}}",
       c.base,
       c.last,
       c.base_kafka,
       c.next_kafka,
       c.base_ts,
       c.last_ts,
-      c.index,
-      c.size_bytes);
+      c.index);
     return o;
 }
 

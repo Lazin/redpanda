@@ -858,13 +858,17 @@ configuration::configuration()
       *this,
       "storage_read_buffer_size",
       "Size of each read buffer (one per in-flight read, per log segment)",
-      {.example = "31768", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "31768",
+       .visibility = visibility::tunable},
       128_KiB)
   , storage_read_readahead_count(
       *this,
       "storage_read_readahead_count",
       "How many additional reads to issue ahead of current read location",
-      {.example = "1", .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no,
+       .example = "1",
+       .visibility = visibility::tunable},
       10)
   , segment_fallocation_step(
       *this,
@@ -1281,20 +1285,20 @@ configuration::configuration()
   , cloud_storage_initial_backoff_ms(
       *this,
       "cloud_storage_initial_backoff_ms",
-      "Initial backoff time for exponetial backoff algorithm (ms)",
-      {.visibility = visibility::tunable},
+      "Initial backoff time for exponential backoff algorithm (ms)",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       100ms)
   , cloud_storage_segment_upload_timeout_ms(
       *this,
       "cloud_storage_segment_upload_timeout_ms",
       "Log segment upload timeout (ms)",
-      {.visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       30s)
   , cloud_storage_manifest_upload_timeout_ms(
       *this,
       "cloud_storage_manifest_upload_timeout_ms",
       "Manifest upload timeout (ms)",
-      {.visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       10s)
   , cloud_storage_max_connection_idle_time_ms(
       *this,
