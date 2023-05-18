@@ -11,6 +11,8 @@
 #include "cloud_storage/async_manifest_view.h"
 #include "cloud_storage/spillover_manifest.h"
 #include "cloud_storage/tests/cloud_storage_fixture.h"
+#include "cloud_storage/tests/s3_imposter.h"
+#include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
 #include "test_utils/fixture.h"
@@ -480,7 +482,17 @@ SEASTAR_THREAD_TEST_CASE(test_materialized_manifest_cache_grow) {
     BOOST_REQUIRE(p1 != nullptr);
 }
 
-class async_manifest_view_fixture : public cloud_storage_fixture {
+class set_config_mixin {
+public:
+    set_config_mixin() {
+        config::shard_local_cfg().cloud_storage_manifest_cache_size.set_value(
+          (size_t)40960);
+    }
+};
+
+class async_manifest_view_fixture
+  : public cloud_storage_fixture
+  , set_config_mixin {
 public:
     async_manifest_view_fixture()
       : cloud_storage_fixture()
@@ -490,16 +502,19 @@ public:
       , ctxlog(test_log, rtc)
       , probe(manifest_ntp)
       , view(api, cache, stm_manifest, bucket, probe) {
+        stm_manifest.set_archive_start_offset(
+          model::offset{0}, model::offset_delta{0});
+        stm_manifest.set_archive_clean_offset(model::offset{0}, 0);
         view.start().get();
     }
 
+    ~async_manifest_view_fixture() { view.stop().get(); }
+
     // The current content of the manifest will be spilled over to the archive
-    // and new elements will be generated. On the first call the spillover
-    // manifest is not generated.
+    // and new elements will be generated.
     void generate_manifest_section(int num_segments, bool hydrate = true) {
         if (stm_manifest.empty()) {
             add_random_segments(stm_manifest, num_segments);
-            return;
         }
         auto so = model::next_offset(stm_manifest.get_last_offset());
         add_random_segments(stm_manifest, num_segments);
@@ -531,10 +546,12 @@ public:
 
     void listen() { set_expectations_and_listen(_expectations); }
 
-private:
+    void collect_segments_to(std::vector<segment_meta>& meta) {
+        all_segments = std::ref(meta);
+    }
+
     // Generate random segments and add them to the manifest
-    static void
-    add_random_segments(partition_manifest& manifest, int num_segments) {
+    void add_random_segments(partition_manifest& manifest, int num_segments) {
         auto base = manifest.empty()
                       ? model::offset(0)
                       : model::next_offset(manifest.get_last_offset());
@@ -558,10 +575,41 @@ private:
               .archiver_term = model::term_id(1),
               .segment_term = model::term_id(1),
               .delta_offset_end = delta_end,
+              .sname_format = segment_name_format::v3,
             };
             base = model::next_offset(last);
             delta = delta_end;
             manifest.add(meta);
+            if (all_segments.has_value()) {
+                all_segments->get().push_back(manifest.last_segment().value());
+            }
+        }
+    }
+
+    void print_diff(
+      const std::vector<segment_meta>& actual,
+      const std::vector<segment_meta>& expected,
+      int limit = 4) {
+        int quota = limit;
+        if (expected != actual) {
+            auto lhs = expected.begin();
+            auto rhs = actual.begin();
+            while (lhs != expected.end()) {
+                if (*lhs != *rhs) {
+                    vlog(
+                      test_log.info,
+                      "{} - expected: {}, actual: {}",
+                      limit - quota,
+                      *lhs,
+                      *rhs);
+                }
+                quota--;
+                if (quota > 0) {
+                    break;
+                }
+                ++lhs;
+                ++rhs;
+            }
         }
     }
 
@@ -574,13 +622,221 @@ private:
     async_manifest_view view;
     std::vector<expectation> _expectations;
     std::vector<model::offset> spillover_start_offsets;
+    model::offset _last_spillover_offset;
+    std::optional<std::reference_wrapper<std::vector<segment_meta>>>
+      all_segments;
 };
 
-FIXTURE_TEST(test_async_manifest_view, async_manifest_view_fixture) {
+FIXTURE_TEST(test_async_manifest_view_base, async_manifest_view_fixture) {
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    listen();
+
+    auto cursor = view.get_active(model::offset{0}).get();
+    BOOST_REQUIRE(cursor.has_value());
+}
+
+static void
+dump_manifest_debug_info(std::string_view name, const partition_manifest& m) {
+    std::stringstream s;
+    m.serialize(s);
+    vlog(test_log.debug, "Manifest {}: \n{}", name, s.str());
+}
+
+FIXTURE_TEST(test_async_manifest_view_fetch, async_manifest_view_fixture) {
+    // Generate series of spillover manifests and query them individually
+    // using `view.get_cursor(offset)` calls.
+    generate_manifest_section(100);
+    generate_manifest_section(100);
     generate_manifest_section(100);
     generate_manifest_section(100);
     generate_manifest_section(100);
     generate_manifest_section(100);
     generate_manifest_section(100);
     listen();
+
+    for (auto so : spillover_start_offsets) {
+        vlog(test_log.info, "Get cursor for offset {}", so);
+        auto cursor = view.get_active(so).get();
+        BOOST_REQUIRE(cursor.has_value());
+
+        cursor.value()->manifest([so](const partition_manifest& m) {
+            BOOST_REQUIRE_EQUAL(m.get_start_offset().value(), so);
+        });
+
+        auto next = std::upper_bound(
+          spillover_start_offsets.begin(), spillover_start_offsets.end(), so);
+
+        if (next != spillover_start_offsets.end()) {
+            cursor.value()->manifest([next](const partition_manifest& m) {
+                vlog(test_log.info, "Checking spillover manifest");
+                BOOST_REQUIRE_EQUAL(
+                  model::next_offset(m.get_last_offset()), *next);
+            });
+        } else {
+            cursor.value()->manifest([this](const partition_manifest& m) {
+                vlog(test_log.info, "Checking STM manifest");
+                BOOST_REQUIRE_EQUAL(
+                  m.get_start_offset(),
+                  stm_manifest.get_start_offset().value());
+            });
+        }
+    }
 }
+
+FIXTURE_TEST(test_async_manifest_view_iter, async_manifest_view_fixture) {
+    std::vector<segment_meta> expected;
+    collect_segments_to(expected);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    listen();
+
+    std::vector<segment_meta> actual;
+    model::offset so = model::offset{0};
+    auto maybe_cursor = view.get_active(so).get();
+    if (maybe_cursor.has_failure()) {
+        BOOST_REQUIRE(
+          maybe_cursor.error() == error_outcome::manifest_not_found);
+    }
+    auto cursor = std::move(maybe_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, expected);
+    BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
+    BOOST_REQUIRE(expected == actual);
+}
+
+FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
+    // Check that segments in the truncated part are not accessible
+    std::vector<segment_meta> expected;
+    collect_segments_to(expected);
+    generate_manifest_section(100);
+    auto clean_offset = stm_manifest.get_start_offset().value();
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    auto new_so = model::next_offset(
+      stm_manifest.last_segment()->committed_offset);
+    auto new_delta = stm_manifest.last_segment()->delta_offset_end;
+    std::vector<segment_meta> removed;
+    std::swap(expected, removed);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    listen();
+
+    stm_manifest.set_archive_start_offset(new_so, new_delta);
+
+    model::offset so = model::offset{0};
+    auto maybe_cursor = view.get_active(so).get();
+    BOOST_REQUIRE(maybe_cursor.has_failure());
+    BOOST_REQUIRE(maybe_cursor.error() == error_outcome::manifest_not_found);
+
+    maybe_cursor = view.get_active(new_so).get();
+    BOOST_REQUIRE(!maybe_cursor.has_failure());
+
+    std::vector<segment_meta> actual;
+    auto cursor = std::move(maybe_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, expected);
+    BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
+    BOOST_REQUIRE(expected == actual);
+
+    auto backlog_cursor = view.get_retention_backlog().get();
+    BOOST_REQUIRE(!backlog_cursor.has_failure());
+
+    actual.clear();
+    cursor = std::move(backlog_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, removed);
+    BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
+    BOOST_REQUIRE(removed == actual);
+
+    // Move clean offset and check that the backlog is updated
+    // correctly.
+    stm_manifest.set_archive_clean_offset(clean_offset, 0);
+    std::erase_if(removed, [clean_offset](const segment_meta& m) {
+        return m.committed_offset < clean_offset;
+    });
+    actual.clear();
+    backlog_cursor = view.get_retention_backlog().get();
+    BOOST_REQUIRE(!backlog_cursor.has_failure());
+    cursor = std::move(backlog_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, removed);
+    BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
+    BOOST_REQUIRE(removed == actual);
+}
+
+FIXTURE_TEST(test_async_manifest_view_evict, async_manifest_view_fixture) {
+    for (int i = 0; i < 10; i++) {
+        generate_manifest_section(100);
+    }
+    listen();
+
+    model::offset so = model::offset{0};
+    auto maybe_cursor = view.get_active(so).get();
+    BOOST_REQUIRE(!maybe_cursor.has_failure());
+    auto stale_cursor = std::move(maybe_cursor.value());
+
+    // Force eviction of the stale_cursor
+    vlog(test_log.debug, "Saturating cache");
+    std::vector<std::unique_ptr<cloud_storage::async_manifest_view_cursor>>
+      cursors;
+    for (auto it = std::next(spillover_start_offsets.begin());
+         it != spillover_start_offsets.end();
+         it++) {
+        auto o = *it;
+        vlog(test_log.debug, "Fetching manifest for offset {}", o);
+        auto tmp_cursor = view.get_active(o).get();
+        BOOST_REQUIRE(!tmp_cursor.has_failure());
+        auto cursor = std::move(tmp_cursor.value());
+        cursor->manifest([o](const partition_manifest& m) {
+            BOOST_REQUIRE_EQUAL(o, m.get_start_offset().value());
+        });
+        cursors.emplace_back(std::move(cursor));
+    }
+    BOOST_REQUIRE_EQUAL(cursors.size(), spillover_start_offsets.size() - 1);
+
+    ss::sleep(2s).get();
+
+    vlog(
+      test_log.debug,
+      "Cursor's actual status: {}, expected status: {}",
+      stale_cursor->get_status(),
+      async_manifest_view_cursor_status::evicted);
+    BOOST_REQUIRE(
+      stale_cursor->get_status() == async_manifest_view_cursor_status::evicted);
+}
+
+// TODO
+// Eviction

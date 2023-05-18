@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <exception>
 #include <iterator>
 #include <memory>
 #include <numeric>
