@@ -1441,6 +1441,13 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       std::nullopt,
       {.min = 4_KiB, .max = 4_MiB})
+  , cloud_storage_manifest_cache_size(
+      *this,
+      "cloud_storage_manifest_cache_size",
+      "Amount of memory that can be used to handle tiered-storage metadata",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      1_MiB,
+      {.min = 64_KiB, .max = 64_MiB})
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",

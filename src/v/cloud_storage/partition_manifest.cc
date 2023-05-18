@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <exception>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -1402,8 +1403,17 @@ struct partition_manifest_handler
 
 ss::future<> partition_manifest::update(ss::input_stream<char> is) {
     iobuf result;
-    auto os = make_iobuf_ref_output_stream(result);
-    co_await ss::copy(is, os);
+    std::exception_ptr e_ptr;
+    try {
+        auto os = make_iobuf_ref_output_stream(result);
+        co_await ss::copy(is, os);
+    } catch (...) {
+        e_ptr = std::current_exception();
+    }
+    co_await is.close();
+    if (e_ptr) {
+        std::rethrow_exception(e_ptr);
+    }
     iobuf_istreambuf ibuf(result);
     std::istream stream(&ibuf);
     json::IStreamWrapper wrapper(stream);

@@ -28,6 +28,7 @@
 #include <seastar/core/gate.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/with_scheduling_group.hh>
+#include <seastar/util/defer.hh>
 
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -37,6 +38,7 @@
 
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <variant>
 
 namespace cloud_storage {
@@ -95,9 +97,11 @@ ss::future<ss::semaphore_units<>> materialized_manifest_cache::prepare(
     ss::gate::holder h(_gate);
     if (size_bytes > _capacity_bytes) {
         vlog(
-          _ctxlog.trace,
-          "Oversized 'put' operation requested. Manifest size is {} bytes",
-          size_bytes);
+          _ctxlog.debug,
+          "Oversized 'put' operation requested. Manifest size is {} bytes, "
+          "capacity is {} bytes",
+          size_bytes,
+          _capacity_bytes);
         // Oversized manifest handling. The manifest could be larger than
         // capacity. If we will not allow this manifest to be added to the
         // cache the subsystem will stall. The only possible solution is to
@@ -108,7 +112,7 @@ ss::future<ss::semaphore_units<>> materialized_manifest_cache::prepare(
     auto maybe_units = ss::try_get_units(_sem, size_bytes);
     if (maybe_units.has_value()) {
         vlog(
-          _ctxlog.trace,
+          _ctxlog.debug,
           "{} units acquired without waiting, {} available",
           size_bytes,
           _sem.available_units());
@@ -340,7 +344,7 @@ ss::future<> materialized_manifest_cache::set_capacity(
 size_t materialized_manifest_cache::evict(
   map_t::iterator it, access_list_t& rollback) {
     vlog(
-      _ctxlog.trace,
+      _ctxlog.debug,
       "Requested to evict manifest with start offset: {}, use count: {}, "
       "units: {}",
       it->first,
@@ -400,16 +404,59 @@ void materialized_manifest_cache::discard_rollback_manifest(model::offset so) {
       so);
 }
 
+std::ostream& operator<<(std::ostream& o, async_manifest_view_cursor_status s) {
+    switch (s) {
+    case async_manifest_view_cursor_status::empty:
+        fmt::print(o, "empty");
+        break;
+    case async_manifest_view_cursor_status::evicted:
+        fmt::print(o, "evicted");
+        break;
+    case async_manifest_view_cursor_status::materialized_stm:
+        fmt::print(o, "materialized_stm");
+        break;
+    case async_manifest_view_cursor_status::materialized_spillover:
+        fmt::print(o, "materialized_spillover");
+        break;
+    }
+    return o;
+}
+
 async_manifest_view_cursor::async_manifest_view_cursor(
-  async_manifest_view& view, ss::lowres_clock::duration timeout)
+  async_manifest_view& view,
+  model::offset begin,
+  model::offset end_inclusive,
+  ss::lowres_clock::duration timeout)
   : _view(view)
   , _current(std::monostate())
-  , _idle_timeout(timeout) {
+  , _idle_timeout(timeout)
+  , _begin(begin)
+  , _end(end_inclusive) {
     _timer.set_callback([this] { on_timeout(); });
+}
+
+async_manifest_view_cursor_status
+async_manifest_view_cursor::get_status() const {
+    return ss::visit(
+      _current,
+      [](std::monostate) { return async_manifest_view_cursor_status::empty; },
+      [](stale_manifest) { return async_manifest_view_cursor_status::evicted; },
+      [](std::reference_wrapper<const partition_manifest>) {
+          return async_manifest_view_cursor_status::materialized_stm;
+      },
+      [](const ss::shared_ptr<materialized_manifest>&) {
+          return async_manifest_view_cursor_status::materialized_spillover;
+      });
 }
 
 ss::future<result<bool, error_outcome>>
 async_manifest_view_cursor::seek(async_view_search_query_t q) {
+    if (std::holds_alternative<model::offset>(q)) {
+        auto o = std::get<model::offset>(q);
+        if (_begin > o || o > _end) {
+            co_return false;
+        }
+    }
     auto satisfies_query = ss::visit(
       _current,
       [](std::monostate) { return false; },
@@ -433,9 +480,33 @@ async_manifest_view_cursor::seek(async_view_search_query_t q) {
           res.error());
         co_return res.as_failure();
     }
+    // Check that the manifest fits inside the offset range
+    // limit. The check has to be performed after the scheduling
+    // point for the list of manifest to be up to date.
+    if (unlikely(!manifest_in_range(res.value()))) {
+        co_return false;
+    }
     _current = res.value();
     _timer.rearm(_idle_timeout + ss::lowres_clock::now());
     co_return true;
+}
+
+bool async_manifest_view_cursor::manifest_in_range(
+  const manifest_section_t& m) {
+    return ss::visit(
+      m,
+      [](std::monostate) { return false; },
+      [](stale_manifest) { return false; },
+      [this](std::reference_wrapper<const partition_manifest> p) {
+          auto so = p.get().get_start_offset().value_or(model::offset{});
+          auto lo = p.get().get_last_offset();
+          return (_begin <= so && so <= _end) && (_begin <= lo && lo <= _end);
+      },
+      [this](const ss::shared_ptr<materialized_manifest>& m) {
+          auto so = m->manifest.get_start_offset().value_or(model::offset{});
+          auto lo = m->manifest.get_last_offset();
+          return (_begin <= so && so <= _end) && (_begin <= lo && lo <= _end);
+      });
 }
 
 ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
@@ -449,12 +520,15 @@ ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
           return model::next_offset(m->manifest.get_last_offset());
       });
 
-    if (next_base_offset == EOS) {
+    if (next_base_offset == EOS || next_base_offset > _end) {
         co_return false;
     }
     auto manifest = co_await _view.get_materialized_manifest(next_base_offset);
     if (manifest.has_failure()) {
         co_return manifest.as_failure();
+    }
+    if (unlikely(!manifest_in_range(manifest.value()))) {
+        co_return false;
     }
     _current = manifest.value();
     _timer.rearm(_idle_timeout + ss::lowres_clock::now());
@@ -493,10 +567,19 @@ void async_manifest_view_cursor::on_timeout() {
       [](std::reference_wrapper<const partition_manifest>) {
           return model::offset{};
       },
-      [](const ss::shared_ptr<materialized_manifest>& m) {
+      [this](const ss::shared_ptr<materialized_manifest>& m) {
           if (m->evicted) {
+              vlog(
+                _view._ctxlog.debug,
+                "Spillover manifest {} is being evicted, last offset: {}",
+                m->manifest.get_manifest_path(),
+                m->manifest.get_last_offset());
               return model::next_offset(m->manifest.get_last_offset());
           } else {
+              vlog(
+                _view._ctxlog.debug,
+                "Spillover manifest {} is not evicted, rearming",
+                m->manifest.get_manifest_path());
               return model::offset{};
           }
       });
@@ -525,22 +608,40 @@ async_manifest_view::async_manifest_view(
   , _backoff(config::shard_local_cfg().cloud_storage_initial_backoff_ms.bind())
   , _read_buffer_size(config::shard_local_cfg().storage_read_buffer_size.bind())
   , _readahead_size(
-      config::shard_local_cfg().storage_read_readahead_count.bind()) {}
+      config::shard_local_cfg().storage_read_readahead_count.bind())
+  , _manifest_cache(std::make_unique<materialized_manifest_cache>(
+      config::shard_local_cfg().cloud_storage_manifest_cache_size(), _ctxlog))
+  , _manifest_meta_size(
+      config::shard_local_cfg().cloud_storage_manifest_cache_size.bind()) {
+    _manifest_meta_size.watch([this] {
+        ssx::background = ss::with_gate(_gate, [this] {
+            vlog(
+              _ctxlog.info,
+              "Manifest cache capacity will be changed from {} to {}",
+              _manifest_cache->get_capacity(),
+              _manifest_meta_size());
+            return _manifest_cache->set_capacity(_manifest_meta_size());
+        });
+    });
+}
 
 ss::future<> async_manifest_view::start() {
+    co_await _manifest_cache->start();
     ssx::background = run_bg_loop();
     co_return;
 }
 
 ss::future<> async_manifest_view::stop() {
     _as.request_abort();
+    _cvar.broken();
+    co_await _manifest_cache->stop();
     co_await _gate.close();
 }
 
 ss::future<> async_manifest_view::run_bg_loop() {
     std::exception_ptr exc_ptr;
+    ss::gate::holder h(_gate);
     try {
-        ss::gate::holder h(_gate);
         while (!_as.abort_requested()) {
             co_await _cvar.when(
               [&] { return !_requests.empty() || _as.abort_requested(); });
@@ -568,6 +669,11 @@ ss::future<> async_manifest_view::run_bg_loop() {
                     if (!_manifest_cache->contains(front.search_vec.base)) {
                         // Manifest is not cached and has to be hydrated and/or
                         // materialized.
+                        vlog(
+                          _ctxlog.debug,
+                          "Preparing cache for manifest with {} bytes, path {}",
+                          front.size_bytes,
+                          front.path);
                         auto u = co_await _manifest_cache->prepare(
                           front.size_bytes); // TODO: use timeout
                         // At this point we have free memory to download the
@@ -592,13 +698,18 @@ ss::future<> async_manifest_view::run_bg_loop() {
                           static_cast<int64_t>(_manifest_cache->size_bytes()));
                         _probe.set_spillover_manifest_instances(
                           static_cast<int32_t>(_manifest_cache->size()));
+                    } else {
+                        vlog(_ctxlog.debug, "Manifest is already materialized");
                     }
                     auto cached = _manifest_cache->get(front.search_vec.base);
                     front.promise.set_value(cached);
                     vlog(
                       _ctxlog.debug,
-                      "Spillover manifest request {} processed successfully",
-                      front.search_vec);
+                      "Spillover manifest request {} processed successfully, "
+                      "found manifest that contains offset range [{}:{}]",
+                      front.search_vec,
+                      cached->manifest.get_start_offset(),
+                      cached->manifest.get_last_offset());
                 } catch (...) {
                     vlog(
                       _ctxlog.error,
@@ -638,7 +749,7 @@ static bool bucket_item_filter(
 }
 
 static spillover_manifest_path_components
-parse_spillover_manifest_path(const ss::sstring& path, int32_t index) {
+parse_spillover_manifest_path(const ss::sstring& path) {
     std::deque<ss::sstring> components;
     boost::split(components, path, boost::is_any_of(":"));
     spillover_manifest_path_components res{
@@ -648,17 +759,24 @@ parse_spillover_manifest_path(const ss::sstring& path, int32_t index) {
       .next_kafka = kafka::offset(boost::lexical_cast<int64_t>(components[4])),
       .base_ts = model::timestamp(boost::lexical_cast<int64_t>(components[5])),
       .last_ts = model::timestamp(boost::lexical_cast<int64_t>(components[6])),
-      .index = index,
     };
     return res;
 }
 
 ss::future<result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
-async_manifest_view::get_cursor(async_view_search_query_t query) noexcept {
+async_manifest_view::get_active(async_view_search_query_t query) noexcept {
     try {
         ss::gate::holder h(_gate);
+        if (!is_archive(query) && !is_stm(query)) {
+            // The view should contain manifest below archive start in
+            // order to be able to perform retention and advance metadata.
+            co_return error_outcome::offset_out_of_range;
+        }
         auto cursor = std::make_unique<async_manifest_view_cursor>(
-          *this, 10s); // TODO: use configured value
+          *this,
+          _stm_manifest.get_archive_start_offset(),
+          _stm_manifest.get_last_offset(),
+          1s); // TODO: use configured value
         // This calls 'get_materialized_manifest' internally which
         // could potentially schedule manifest hydration/materialization
         // in the background fiber.
@@ -668,6 +786,45 @@ async_manifest_view::get_cursor(async_view_search_query_t query) noexcept {
               _ctxlog.error,
               "failed to seek to offset {}, error: {}",
               query,
+              result.error());
+            co_return result.as_failure();
+        }
+        if (!result.value()) {
+            vlog(
+              _ctxlog.debug,
+              "failed to seek to offset {}, offset out of valid range",
+              query);
+            co_return error_outcome::offset_out_of_range;
+        }
+        co_return cursor;
+    } catch (...) {
+        vlog(
+          _ctxlog.error,
+          "Failed to create a cursor: {}",
+          std::current_exception());
+        co_return error_outcome::failure;
+    }
+}
+
+ss::future<result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
+async_manifest_view::get_retention_backlog() noexcept {
+    try {
+        ss::gate::holder h(_gate);
+        auto cursor = std::make_unique<async_manifest_view_cursor>(
+          *this,
+          _stm_manifest.get_archive_clean_offset(),
+          _stm_manifest.get_archive_start_offset(),
+          1s); // TODO: use configured value
+        // Query the beginning of the backlog. This will fail if for some reason
+        // the spillover manifest doesn't exist in the cloud. To avoid this we
+        // should never delete spillover manifests above the
+        auto q = _stm_manifest.get_archive_clean_offset();
+        auto result = co_await cursor->seek(q);
+        if (result.has_error()) {
+            vlog(
+              _ctxlog.error,
+              "failed to seek to offset {} in the retention backlog, error: {}",
+              q,
               result.error());
             co_return result.as_failure();
         }
@@ -686,15 +843,20 @@ bool async_manifest_view::is_empty() const noexcept {
 }
 
 bool async_manifest_view::is_archive(async_view_search_query_t o) {
+    if (_stm_manifest.get_archive_start_offset() == model::offset{}) {
+        return false;
+    }
     return ss::visit(
       o,
       [this](model::offset ro) {
-          return ro < _stm_manifest.get_start_offset().value_or(
-                   model::offset::max());
+          return ro >= _stm_manifest.get_archive_start_offset()
+                 && ro < _stm_manifest.get_start_offset().value_or(
+                      model::offset::min());
       },
       [this](kafka::offset ko) {
-          return ko < _stm_manifest.get_start_kafka_offset().value_or(
-                   kafka::offset::max());
+          return ko >= _stm_manifest.get_archive_start_kafka_offset()
+                 && ko < _stm_manifest.get_start_kafka_offset().value_or(
+                      kafka::offset::min());
       },
       [this](model::timestamp ts) {
           auto bt = _stm_manifest.begin()->base_timestamp;
@@ -725,6 +887,7 @@ async_manifest_view::get_materialized_manifest(
     try {
         ss::gate::holder h(_gate);
         if (is_stm(q)) {
+            vlog(_ctxlog.debug, "Query {} matches with STM manifest", q);
             // Fast path for STM reads
             co_return std::ref(_stm_manifest);
         }
@@ -739,6 +902,14 @@ async_manifest_view::get_materialized_manifest(
             vlog(_ctxlog.debug, "Can't scan the bucket, {}", scan_res.error());
             co_return scan_res.as_failure();
         }
+        if (!scan_res.value()) {
+            vlog(
+              _ctxlog.debug,
+              "Manifest list is up to date, STM start offset: {}, archive "
+              "start offset: {}",
+              _stm_manifest.get_start_offset(),
+              _stm_manifest.get_archive_start_offset());
+        }
         vassert(
           _manifests.has_value(),
           "Manifest list is not loaded, {}",
@@ -747,11 +918,18 @@ async_manifest_view::get_materialized_manifest(
         if (index < 0) {
             vlog(
               _ctxlog.debug, "Can't find requested manifest, {}", to_string(q));
-            co_return error_outcome::manifest_not_found;
+            co_return error_outcome::offset_out_of_range;
         }
-        auto vec = _manifests->components[index];
-        auto loc = _manifests->manifests[index];
+        vlog(
+          _ctxlog.debug,
+          "Fetching {}, num components: {}, num manifests: {}, num sizes: {}",
+          index,
+          _manifests->components.size(),
+          _manifests->manifests.size(),
+          _manifests->sizes.size());
         auto szb = _manifests->sizes[index];
+        auto loc = _manifests->manifests[index];
+        auto vec = _manifests->components[index];
         auto res = _manifest_cache->get(vec.base);
         if (res) {
             co_return res;
@@ -861,7 +1039,8 @@ int32_t async_manifest_view::search_spillover_manifests(
         return -1;
     }
 
-    return it->index;
+    return static_cast<int32_t>(
+      std::distance(_manifests->components.begin(), it));
 }
 
 ss::future<result<spillover_manifest, error_outcome>>
@@ -907,14 +1086,27 @@ async_manifest_view::materialize_manifest(
                 // upper layer is supposed to retry the call.
                 co_return error_outcome::repeat;
             }
-            ss::file_input_stream_options options{
-              .buffer_size = _read_buffer_size(),
-              .read_ahead = static_cast<uint32_t>(_readahead_size()),
-              .io_priority_class
-              = priority_manager::local().shadow_indexing_priority()};
-            auto data_stream = ss::make_file_input_stream(
-              res->body, 0, std::move(options));
-            co_await manifest.update(std::move(data_stream));
+            std::exception_ptr update_err;
+            try {
+                ss::file_input_stream_options options{
+                  .buffer_size = _read_buffer_size(),
+                  .read_ahead = static_cast<uint32_t>(_readahead_size()),
+                  .io_priority_class
+                  = priority_manager::local().shadow_indexing_priority()};
+                auto data_stream = ss::make_file_input_stream(
+                  res->body, 0, std::move(options));
+                co_await manifest.update(std::move(data_stream));
+            } catch (...) {
+                vlog(
+                  _ctxlog.error,
+                  "Error during manifest update: {}",
+                  std::current_exception());
+                update_err = std::current_exception();
+            }
+            co_await res->body.close();
+            if (update_err) {
+                std::rethrow_exception(update_err);
+            }
         } break;
         }
         _probe.on_spillover_manifest_materialization();
@@ -956,13 +1148,37 @@ async_manifest_view::maybe_scan_bucket() noexcept {
             co_return error_outcome::scan_bucket_error;
         }
         int32_t index = 0;
+        std::deque<int32_t> ix;
         for (const auto& it : res.value().contents) {
+            vlog(_ctxlog.debug, "scan found manifest {}", it.key);
             result.manifests.emplace_back(it.key);
-            result.components.push_back(
-              parse_spillover_manifest_path(it.key, index));
-            result.sizes.push_back(it.size_bytes), index++;
+            result.components.push_back(parse_spillover_manifest_path(it.key));
+            result.sizes.push_back(it.size_bytes);
+            ix.push_back(index);
+            index++;
         }
-        _manifests.emplace(std::move(result));
+        std::sort(ix.begin(), ix.end(), [&result](uint32_t lhs, uint32_t rhs) {
+            return result.components[lhs].base < result.components[rhs].base;
+        });
+        spillover_manifest_list sorted;
+        for (auto i : ix) {
+            sorted.manifests.emplace_back(result.manifests[i]);
+            sorted.components.push_back(result.components[i]);
+            sorted.sizes.push_back(result.sizes[i]);
+        }
+        // TODO: remove
+        for (size_t i = 0; i < sorted.manifests.size(); i++) {
+            vlog(
+              _ctxlog.info,
+              "components: {}, size: {}, manifest: {}",
+              sorted.components[i],
+              sorted.sizes[i],
+              sorted.manifests[i]);
+        }
+        _manifests.emplace(std::move(sorted));
+        _last_stm_start_offset = _stm_manifest.get_start_offset().value_or(
+          model::offset{});
+        _last_archive_start_offset = _stm_manifest.get_archive_start_offset();
     } catch (...) {
         vlog(
           _ctxlog.error,
