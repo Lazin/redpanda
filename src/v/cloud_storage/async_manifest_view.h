@@ -173,6 +173,8 @@ public:
       std::optional<ss::lowres_clock::duration> timeout = std::nullopt);
 
 private:
+    size_t get_capacity() const { return _capacity_bytes; }
+
     using map_t
       = std::map<model::offset, ss::shared_ptr<materialized_manifest>>;
 
@@ -243,44 +245,7 @@ struct spillover_manifest_list {
     std::deque<size_t> sizes;
 };
 
-/// The cursor can be used to traverse manifest
-/// asynchronously. The full content of the manifest
-/// can't b loaded into memory. Because of that the spillover
-/// manifests has to be loaded into memory asynchronously while
-/// the full manifest view is being traversed. This is done in
-/// batches in the 'refresh' call.
-class async_manifest_view_cursor {
-public:
-    explicit async_manifest_view_cursor(
-      async_manifest_view& view, ss::lowres_clock::duration timeout);
-
-    /// Seek to manifest that contains offset
-    ss::future<result<bool, error_outcome>> seek(async_view_search_query_t q);
-
-    /// Move to the next manifest or fail
-    ss::future<result<bool, error_outcome>> next();
-
-    /// Return current manifest
-    ///
-    /// \return pointer to the current manifest or nullopt
-    std::optional<std::reference_wrapper<const partition_manifest>>
-    manifest() const;
-
-private:
-    void on_timeout();
-
-    /// Manifest view ref
-    async_manifest_view& _view;
-
-    manifest_section_t _current;
-
-    /// Full copy of the spillover manifests list (the assumption is that the
-    /// list is relatively small)
-    std::optional<spillover_manifest_list> _manifests;
-
-    ss::lowres_clock::duration _idle_timeout;
-    ss::timer<ss::lowres_clock> _timer;
-};
+class async_manifest_view_cursor;
 
 /// Service that maintains a view of the entire
 /// partition metadata including STM manifest and
@@ -300,9 +265,20 @@ public:
     ss::future<> start();
     ss::future<> stop();
 
+    /// Get active spillover manifests asynchronously
+    ///
+    /// \note the method may hydrate manifests in the cache or
+    ///       wait until the memory for the manifest becomes
+    ///       available.
     ss::future<
       result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
-    get_cursor(async_view_search_query_t q) noexcept;
+    get_active(async_view_search_query_t q) noexcept;
+
+    /// Get inactive spillover manifests which are waiting for
+    /// retention
+    ss::future<
+      result<std::unique_ptr<async_manifest_view_cursor>, error_outcome>>
+    get_retention_backlog() noexcept;
 
     bool is_empty() const noexcept;
 
@@ -377,6 +353,7 @@ private:
 
     // Manifest in-memory storage
     std::unique_ptr<materialized_manifest_cache> _manifest_cache;
+    config::binding<size_t> _manifest_meta_size;
 
     // BG loop state
 
@@ -390,6 +367,92 @@ private:
     };
     std::deque<materialization_request_t> _requests;
     ss::condition_variable _cvar;
+};
+
+enum class async_manifest_view_cursor_status {
+    // The cursor is not set to any position and not materialized
+    empty,
+    // The cursor points to STM manifest
+    materialized_stm,
+    // The cursor points to spillover manifest
+    materialized_spillover,
+    // The materialized manifest that cursor pointed to was evicted
+    evicted,
+};
+
+std::ostream& operator<<(std::ostream&, async_manifest_view_cursor_status);
+
+/// The cursor can be used to traverse manifest
+/// asynchronously. The full content of the manifest
+/// can't b loaded into memory. Because of that the spillover
+/// manifests has to be loaded into memory asynchronously while
+/// the full manifest view is being traversed. This is done in
+/// batches in the 'refresh' call.
+///
+/// The cursor has two important properties:
+/// - offset range to cover, the cursor can only return manifests within the
+///   pre-defined offset range;
+/// - time budget limits amount of time the cursor can hold the materialized
+///   manifest
+class async_manifest_view_cursor {
+public:
+    /// Create cursor with allowed offset range limits
+    ///
+    /// \param view is an async_manifest_view instance
+    /// \param begin is a start of the allowed offset range
+    /// \param end_inclusive is an end of the allowed offset range
+    /// \param timeout is a time budget of the cursor
+    explicit async_manifest_view_cursor(
+      async_manifest_view& view,
+      model::offset begin,
+      model::offset end_inclusive,
+      ss::lowres_clock::duration timeout);
+
+    /// Seek to manifest that contains offset
+    ss::future<result<bool, error_outcome>> seek(async_view_search_query_t q);
+
+    async_manifest_view_cursor_status get_status() const;
+
+    /// Move to the next manifest or fail
+    ss::future<result<bool, error_outcome>> next();
+
+    /// Return current manifest
+    ///
+    /// \return pointer to the current manifest or nullopt
+    std::optional<std::reference_wrapper<const partition_manifest>>
+    manifest() const;
+
+    /// Pass current manifest to the functor
+    ///
+    /// The method guarantees absence of scheduling points between the
+    /// calls to manifest methods. The manifest could be evicted after
+    /// any scheduling point. The reference will be invalidated in this
+    /// case.
+    template<class Fn>
+    auto manifest(Fn fn) {
+        auto ref = manifest();
+        vassert(ref.has_value(), "Invalid cursor, {}", _view.get_ntp());
+        return fn(ref->get());
+    }
+
+private:
+    void on_timeout();
+
+    bool manifest_in_range(const manifest_section_t& m);
+
+    /// Manifest view ref
+    async_manifest_view& _view;
+
+    manifest_section_t _current;
+
+    /// Full copy of the spillover manifests list (the assumption is that the
+    /// list is relatively small)
+    std::optional<spillover_manifest_list> _manifests;
+
+    ss::lowres_clock::duration _idle_timeout;
+    ss::timer<ss::lowres_clock> _timer;
+    model::offset _begin;
+    model::offset _end;
 };
 
 } // namespace cloud_storage

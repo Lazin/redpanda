@@ -284,6 +284,7 @@ struct configuration final : public config_store {
     property<std::optional<ss::sstring>> cloud_storage_credentials_host;
     bounded_property<std::optional<size_t>>
       cloud_storage_spillover_manifest_size;
+    bounded_property<size_t> cloud_storage_manifest_cache_size;
 
     // Azure Blob Storage
     property<std::optional<ss::sstring>> cloud_storage_azure_storage_account;
