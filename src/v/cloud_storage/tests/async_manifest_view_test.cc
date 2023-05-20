@@ -15,6 +15,7 @@
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
+#include "model/timeout_clock.h"
 #include "test_utils/fixture.h"
 #include "utils/retry_chain_node.h"
 
@@ -28,6 +29,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chrono>
+#include <iterator>
+#include <numeric>
 
 using namespace cloud_storage;
 
@@ -484,15 +487,18 @@ SEASTAR_THREAD_TEST_CASE(test_materialized_manifest_cache_grow) {
 
 class set_config_mixin {
 public:
+    static constexpr std::chrono::milliseconds cache_ttl = 100ms;
     set_config_mixin() {
         config::shard_local_cfg().cloud_storage_manifest_cache_size.set_value(
           (size_t)40960);
+        config::shard_local_cfg().cloud_storage_manifest_cache_ttl_ms.set_value(
+          cache_ttl);
     }
 };
 
 class async_manifest_view_fixture
   : public cloud_storage_fixture
-  , set_config_mixin {
+  , public set_config_mixin {
 public:
     async_manifest_view_fixture()
       : cloud_storage_fixture()
@@ -506,6 +512,7 @@ public:
           model::offset{0}, model::offset_delta{0});
         stm_manifest.set_archive_clean_offset(model::offset{0}, 0);
         view.start().get();
+        base_timestamp = model::timestamp_clock::now() - storage_duration;
     }
 
     ~async_manifest_view_fixture() { view.stop().get(); }
@@ -568,8 +575,11 @@ public:
               .size_bytes = segment_size,
               .base_offset = base,
               .committed_offset = last,
-              .base_timestamp = model::timestamp(i * ts_step),
-              .max_timestamp = model::timestamp(i * ts_step + (ts_step - 1)),
+              .base_timestamp = model::to_timestamp(
+                base_timestamp + std::chrono::milliseconds(i * ts_step)),
+              .max_timestamp = model::to_timestamp(
+                base_timestamp
+                + std::chrono::milliseconds(i * ts_step + (ts_step - 1))),
               .delta_offset = delta,
               .ntp_revision = manifest_rev,
               .archiver_term = model::term_id(1),
@@ -625,6 +635,8 @@ public:
     model::offset _last_spillover_offset;
     std::optional<std::reference_wrapper<std::vector<segment_meta>>>
       all_segments;
+    model::timestamp_clock::time_point base_timestamp;
+    static constexpr std::chrono::milliseconds storage_duration = 10h;
 };
 
 FIXTURE_TEST(test_async_manifest_view_base, async_manifest_view_fixture) {
@@ -635,13 +647,6 @@ FIXTURE_TEST(test_async_manifest_view_base, async_manifest_view_fixture) {
 
     auto cursor = view.get_active(model::offset{0}).get();
     BOOST_REQUIRE(cursor.has_value());
-}
-
-static void
-dump_manifest_debug_info(std::string_view name, const partition_manifest& m) {
-    std::stringstream s;
-    m.serialize(s);
-    vlog(test_log.debug, "Manifest {}: \n{}", name, s.str());
 }
 
 FIXTURE_TEST(test_async_manifest_view_fetch, async_manifest_view_fixture) {
@@ -741,7 +746,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     model::offset so = model::offset{0};
     auto maybe_cursor = view.get_active(so).get();
     BOOST_REQUIRE(maybe_cursor.has_failure());
-    BOOST_REQUIRE(maybe_cursor.error() == error_outcome::manifest_not_found);
+    BOOST_REQUIRE(maybe_cursor.error() == error_outcome::out_of_range);
 
     maybe_cursor = view.get_active(new_so).get();
     BOOST_REQUIRE(!maybe_cursor.has_failure());
@@ -797,6 +802,79 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     BOOST_REQUIRE(removed == actual);
 }
 
+FIXTURE_TEST(
+  test_async_manifest_view_truncate_mid_manifest, async_manifest_view_fixture) {
+    // Check that segments in the truncated part are not accessible
+    std::vector<segment_meta> expected;
+    collect_segments_to(expected);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    auto [new_so, new_so_delta] = [this] {
+        model::offset so;
+        model::offset_delta delta;
+        auto quota = 20;
+        for (const auto& meta : stm_manifest) {
+            so = meta.base_offset;
+            delta = meta.delta_offset;
+            quota--;
+            if (quota == 0) {
+                break;
+            }
+        }
+        return std::make_tuple(so, delta);
+    }();
+    std::vector<segment_meta> removed;
+    auto eit = std::find_if(
+      expected.begin(), expected.end(), [o = new_so](segment_meta m) {
+          return m.base_offset == o;
+      });
+    std::copy(expected.begin(), eit, std::back_inserter(removed));
+    expected.erase(expected.begin(), eit);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    generate_manifest_section(100);
+    listen();
+
+    vlog(test_log.info, "Setting archive start offset to {}", new_so);
+    stm_manifest.set_archive_start_offset(new_so, new_so_delta);
+
+    auto maybe_cursor = view.get_active(new_so).get();
+    BOOST_REQUIRE(!maybe_cursor.has_failure());
+
+    vlog(test_log.info, "Validating async_manifest_view content");
+    std::vector<segment_meta> actual;
+    auto cursor = std::move(maybe_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, expected);
+    BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
+    BOOST_REQUIRE(expected == actual);
+
+    vlog(test_log.info, "Validating async_manifest_view backlog");
+    auto backlog_cursor = view.get_retention_backlog().get();
+    BOOST_REQUIRE(!backlog_cursor.has_failure());
+
+    actual.clear();
+    cursor = std::move(backlog_cursor.value());
+    do {
+        cursor->manifest([&](const partition_manifest& m) {
+            for (auto meta : m) {
+                actual.push_back(meta);
+            }
+        });
+    } while (cursor->next().get().value());
+    print_diff(actual, removed);
+    BOOST_REQUIRE_EQUAL(removed.size(), actual.size());
+    BOOST_REQUIRE(removed == actual);
+}
+
 FIXTURE_TEST(test_async_manifest_view_evict, async_manifest_view_fixture) {
     for (int i = 0; i < 10; i++) {
         generate_manifest_section(100);
@@ -827,7 +905,7 @@ FIXTURE_TEST(test_async_manifest_view_evict, async_manifest_view_fixture) {
     }
     BOOST_REQUIRE_EQUAL(cursors.size(), spillover_start_offsets.size() - 1);
 
-    ss::sleep(2s).get();
+    ss::sleep(cache_ttl * 2).get();
 
     vlog(
       test_log.debug,
@@ -838,5 +916,65 @@ FIXTURE_TEST(test_async_manifest_view_evict, async_manifest_view_fixture) {
       stale_cursor->get_status() == async_manifest_view_cursor_status::evicted);
 }
 
-// TODO
-// Eviction
+FIXTURE_TEST(test_async_manifest_view_retention, async_manifest_view_fixture) {
+    std::vector<segment_meta> expected;
+    collect_segments_to(expected);
+    for (int i = 0; i < 10; i++) {
+        generate_manifest_section(100);
+    }
+    listen();
+
+    size_t total_size = 0;
+    for (const auto& meta : expected) {
+        total_size += meta.size_bytes;
+    }
+
+    // Check the case when retention overshoots
+    auto rr1 = view.compute_retention(total_size * 2, std::nullopt).get();
+    BOOST_REQUIRE(rr1.has_value());
+    BOOST_REQUIRE(rr1.value().offset == model::offset{});
+    BOOST_REQUIRE(rr1.value().delta == model::offset_delta{});
+
+    auto rr2 = view.compute_retention(std::nullopt, storage_duration * 2).get();
+    BOOST_REQUIRE(rr2.has_value());
+    BOOST_REQUIRE(rr2.value().offset == model::offset{});
+    BOOST_REQUIRE(rr2.value().delta == model::offset_delta{});
+
+    auto rr3
+      = view.compute_retention(total_size * 2, storage_duration * 2).get();
+    BOOST_REQUIRE(rr3.has_value());
+    BOOST_REQUIRE(rr3.value().offset == model::offset{});
+    BOOST_REQUIRE(rr3.value().delta == model::offset_delta{});
+
+    // Check the case when time-based retention wins
+    int quota = 50;
+    size_t prefix_size = 0;
+    model::timestamp prefix_timestamp;
+    model::offset prefix_base_offset;
+    model::offset_delta prefix_delta;
+    for (const auto& meta : expected) {
+        prefix_size += meta.size_bytes;
+        prefix_timestamp = meta.base_timestamp;
+        prefix_base_offset = meta.base_offset;
+        prefix_delta = meta.delta_offset;
+        quota--;
+        if (quota == 0) {
+            break;
+        }
+    }
+
+    vlog(
+      test_log.info,
+      "Triggering size-based retention, {} bytes will be evicted, total size "
+      "is {} bytes",
+      prefix_size,
+      total_size);
+    auto rr4 = view
+                 .compute_retention(total_size - prefix_size, storage_duration)
+                 .get();
+    BOOST_REQUIRE(rr4.has_value());
+    BOOST_REQUIRE_EQUAL(rr4.value().offset, prefix_base_offset);
+    BOOST_REQUIRE_EQUAL(rr4.value().delta, prefix_delta);
+
+    // Check the case when size-based retention wins
+}

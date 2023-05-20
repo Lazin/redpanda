@@ -210,7 +210,7 @@ enum class error_outcome {
     // outcome that shouldn't be bubbled up to the client.
     repeat,
     timed_out,
-    offset_out_of_range,
+    out_of_range,
 };
 
 struct error_outcome_category final : public std::error_category {
@@ -240,8 +240,8 @@ struct error_outcome_category final : public std::error_category {
             return "cloud storage repeat operation";
         case error_outcome::timed_out:
             return "cloud storage operation timed out";
-        case error_outcome::offset_out_of_range:
-            return "cloud storage offset out of range";
+        case error_outcome::out_of_range:
+            return "cloud storage out of range";
         default:
             return "unknown";
         }
