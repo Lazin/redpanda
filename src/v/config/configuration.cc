@@ -1448,6 +1448,21 @@ configuration::configuration()
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1_MiB,
       {.min = 64_KiB, .max = 64_MiB})
+  , cloud_storage_manifest_cache_ttl_ms(
+      *this,
+      "cloud_storage_materialized_manifest_ttl_ms",
+      "The time interval that determins how long the materialized manifest can "
+      "stay in cache under contention. This parameter is used for performance "
+      "tuning. "
+      "When the spillover manifest is materialized and stored in cache and the "
+      "cache needs to evict it it will use "
+      "'cloud_storage_materialized_manifest_ttl_ms' value as a timeout. "
+      "The cursor that uses the spillover manifest uses this value as a TTL "
+      "interval after which it stops referencing the manifest making it "
+      "available for eviction. This only affects spillover manifests under "
+      "contention.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      10s)
   , cloud_storage_azure_storage_account(
       *this,
       "cloud_storage_azure_storage_account",

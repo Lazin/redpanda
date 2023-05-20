@@ -32,6 +32,7 @@
 #include <seastar/core/timed_out_error.hh>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <map>
 #include <variant>
@@ -272,7 +273,27 @@ public:
 
     const model::ntp& get_ntp() const { return _stm_manifest.get_ntp(); }
 
+    /// Structure that describes how the start archive offset has
+    /// to be advanced forward.
+    struct archive_start_offset_advance {
+        model::offset offset;
+        model::offset_delta delta;
+    };
+
+    /// Compute how the start archive offset has to be advanced based on current
+    /// log size and retention parameters.
+    ss::future<result<archive_start_offset_advance, error_outcome>>
+    compute_retention(
+      std::optional<size_t> size_limit,
+      std::optional<std::chrono::milliseconds> time_limit) noexcept;
+
 private:
+    ss::future<result<archive_start_offset_advance, error_outcome>>
+    time_based_retention(std::chrono::milliseconds time_limit) noexcept;
+
+    ss::future<result<archive_start_offset_advance, error_outcome>>
+    size_based_retention(size_t size_limit) noexcept;
+
     ss::future<> run_bg_loop();
 
     /// Return true if 'maybe_scan_bucket' need to be called
@@ -342,6 +363,7 @@ private:
     // Manifest in-memory storage
     std::unique_ptr<materialized_manifest_cache> _manifest_cache;
     config::binding<size_t> _manifest_meta_size;
+    config::binding<std::chrono::milliseconds> _manifest_meta_ttl;
 
     // BG loop state
 
