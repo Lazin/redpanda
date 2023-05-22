@@ -18,6 +18,7 @@
 #include "cloud_storage/types.h"
 #include "cloud_storage_clients/types.h"
 #include "config/configuration.h"
+#include "model/fundamental.h"
 #include "model/timestamp.h"
 #include "resource_mgmt/io_priority.h"
 #include "ssx/future-util.h"
@@ -132,7 +133,7 @@ ss::future<ss::semaphore_units<>> materialized_manifest_cache::prepare(
           !it->manifest.empty(),
           "Manifest can't be empty, ntp: {}",
           it->manifest.get_ntp());
-        auto so = it->manifest.begin()->base_offset;
+        auto so = it->manifest.get_start_offset().value_or(model::offset{});
         auto cit = _cache.find(so);
         vassert(cit != _cache.end(), "Manifest at {} already evicted", so);
         evicted.push_back(so);
@@ -200,11 +201,7 @@ void materialized_manifest_cache::put(
       !manifest.empty(),
       "Manifest can't be empty, ntp: {}",
       manifest.get_ntp());
-    // The start offset of the manifest might be advanced to
-    // avoid making visible segments below start_archive_offset. Because of that
-    // the manifest is addressed by the first offset it contains,
-    // not its start_offset value.
-    auto so = manifest.begin()->base_offset;
+    auto so = manifest.get_start_offset().value_or(model::offset{});
     vlog(_ctxlog.debug, "Cache PUT offset {}, {} units", so, s.count());
     if (!_eviction_rollback.empty()) {
         auto it = lookup_eviction_rollback_list(so);
@@ -513,6 +510,11 @@ async_manifest_view_cursor::seek(async_view_search_query_t q) {
     // limit. The check has to be performed after the scheduling
     // point for the list of manifest to be up to date.
     if (unlikely(!manifest_in_range(res.value()))) {
+        vlog(
+          _view._ctxlog.debug,
+          "Manifest is not in the specified range, range: [{}/{}]",
+          _begin,
+          _end);
         co_return false;
     }
     _current = res.value();
@@ -529,12 +531,12 @@ bool async_manifest_view_cursor::manifest_in_range(
       [this](std::reference_wrapper<const partition_manifest> p) {
           auto so = p.get().get_start_offset().value_or(model::offset{});
           auto lo = p.get().get_last_offset();
-          return (_begin <= so && so <= _end) && (_begin <= lo && lo <= _end);
+          return !(_end < so || _begin > lo);
       },
       [this](const ss::shared_ptr<materialized_manifest>& m) {
           auto so = m->manifest.get_start_offset().value_or(model::offset{});
           auto lo = m->manifest.get_last_offset();
-          return (_begin <= so && so <= _end) && (_begin <= lo && lo <= _end);
+          return !(_end < so || _begin > lo);
       });
 }
 
@@ -706,7 +708,7 @@ ss::future<> async_manifest_view::run_bg_loop() {
                           front.size_bytes,
                           front.path);
                         auto u = co_await _manifest_cache->prepare(
-                          front.size_bytes, _manifest_meta_ttl());
+                          front.size_bytes, _manifest_meta_ttl() * 2);
                         // At this point we have free memory to download the
                         // spillover manifest.
                         auto m_res = co_await materialize_manifest(front.path);
@@ -749,13 +751,7 @@ ss::future<> async_manifest_view::run_bg_loop() {
                     } else {
                         vlog(_ctxlog.debug, "Manifest is already materialized");
                     }
-                    /*TODO: remove*/ vlog(_ctxlog.debug, "Manifest cache GET");
                     auto cached = _manifest_cache->get(front.search_vec.base);
-                    /*TODO: remove*/ vlog(
-                      _ctxlog.debug,
-                      "Promise set_value, is nullptr: {}, path: {}",
-                      cached == nullptr,
-                      front.path);
                     front.promise.set_value(cached);
                     vlog(
                       _ctxlog.debug,
@@ -764,6 +760,14 @@ ss::future<> async_manifest_view::run_bg_loop() {
                       front.search_vec,
                       cached->manifest.get_start_offset(),
                       cached->manifest.get_last_offset());
+                } catch (const std::system_error& err) {
+                    vlog(
+                      _ctxlog.error,
+                      "Failed processing request {}, exception: {} : {}",
+                      front.search_vec,
+                      err.code(),
+                      err.what());
+                    front.promise.set_to_current_exception();
                 } catch (...) {
                     vlog(
                       _ctxlog.error,
@@ -867,7 +871,7 @@ async_manifest_view::get_retention_backlog() noexcept {
         auto cursor = std::make_unique<async_manifest_view_cursor>(
           *this,
           _stm_manifest.get_archive_clean_offset(),
-          _stm_manifest.get_archive_start_offset(),
+          model::prev_offset(_stm_manifest.get_archive_start_offset()),
           _manifest_meta_ttl());
         // Query the beginning of the backlog. This will fail if for some reason
         // the spillover manifest doesn't exist in the cloud. To avoid this we
@@ -1358,20 +1362,6 @@ async_manifest_view::materialize_manifest(
                   "Manifest is materialized, start offset {}, last offset {}",
                   manifest.get_start_offset(),
                   manifest.get_last_offset());
-                // Advance start offset if archive start offset is in the
-                // middle of the manifest.
-                if (
-                  manifest.get_start_offset()
-                  < _stm_manifest.get_archive_start_offset()) {
-                    manifest.advance_start_offset(
-                      _stm_manifest.get_archive_start_offset());
-                    vlog(
-                      _ctxlog.debug,
-                      "Materialized manifest is truncated, start offset: {}, "
-                      "last offset: {}",
-                      manifest.get_start_offset(),
-                      manifest.get_last_offset());
-                }
             } catch (...) {
                 vlog(
                   _ctxlog.error,
