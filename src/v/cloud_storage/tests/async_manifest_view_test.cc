@@ -741,6 +741,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     generate_manifest_section(100);
     listen();
 
+    vlog(test_log.info, "Set archive start offset to {}", new_so);
     stm_manifest.set_archive_start_offset(new_so, new_delta);
 
     model::offset so = model::offset{0};
@@ -755,6 +756,12 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     auto cursor = std::move(maybe_cursor.value());
     do {
         cursor->manifest([&](const partition_manifest& m) {
+            vlog(
+              test_log.info,
+              "Looking at the manifest [{}/{}], archive start: {}",
+              m.get_start_offset(),
+              m.get_last_offset(),
+              stm_manifest.get_archive_start_offset());
             for (auto meta : m) {
                 actual.push_back(meta);
             }
@@ -771,6 +778,13 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     cursor = std::move(backlog_cursor.value());
     do {
         cursor->manifest([&](const partition_manifest& m) {
+            vlog(
+              test_log.info,
+              "Looking at the backlog manifest [{}/{}], archive start: {}, "
+              "{}/{}",
+              m.get_start_offset(),
+              m.get_last_offset(),
+              stm_manifest.get_archive_start_offset());
             for (auto meta : m) {
                 actual.push_back(meta);
             }
@@ -792,6 +806,13 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
     cursor = std::move(backlog_cursor.value());
     do {
         cursor->manifest([&](const partition_manifest& m) {
+            vlog(
+              test_log.info,
+              "Looking at the backlog manifest [{}/{}], archive start: {}, "
+              "{}/{}",
+              m.get_start_offset(),
+              m.get_last_offset(),
+              stm_manifest.get_archive_start_offset());
             for (auto meta : m) {
                 actual.push_back(meta);
             }
@@ -829,6 +850,7 @@ FIXTURE_TEST(
       expected.begin(), expected.end(), [o = new_so](segment_meta m) {
           return m.base_offset == o;
       });
+    vlog(test_log.info, "Removing expected elements up to {}", *eit);
     std::copy(expected.begin(), eit, std::back_inserter(removed));
     expected.erase(expected.begin(), eit);
     generate_manifest_section(100);
@@ -848,7 +870,21 @@ FIXTURE_TEST(
     auto cursor = std::move(maybe_cursor.value());
     do {
         cursor->manifest([&](const partition_manifest& m) {
+            vlog(
+              test_log.info,
+              "Looking at the manifest {}/{}",
+              m.get_start_offset(),
+              m.get_last_offset());
             for (auto meta : m) {
+                if (
+                  meta.base_offset < stm_manifest.get_archive_start_offset()) {
+                    // The cursor only returns full manifests. If the new
+                    // archive start offset is in the middle of the manifest
+                    // it will return the whole manifest and the user has
+                    // to skip all segments below the archive start offset
+                    // manually.
+                    continue;
+                }
                 actual.push_back(meta);
             }
         });
@@ -865,7 +901,20 @@ FIXTURE_TEST(
     cursor = std::move(backlog_cursor.value());
     do {
         cursor->manifest([&](const partition_manifest& m) {
+            vlog(
+              test_log.info,
+              "Looking at the manifest {}/{}",
+              m.get_start_offset(),
+              m.get_last_offset());
             for (auto meta : m) {
+                if (
+                  meta.base_offset >= stm_manifest.get_archive_start_offset()) {
+                    // The cursor only returns full manifests. If the new
+                    // archive start offset is in the middle of the manifest
+                    // the backlog will contain full manifest and the user has
+                    // to read up until the start offset of the manifest.
+                    break;
+                }
                 actual.push_back(meta);
             }
         });
