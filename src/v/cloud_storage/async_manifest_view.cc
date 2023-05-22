@@ -707,6 +707,12 @@ ss::future<> async_manifest_view::run_bg_loop() {
                           "Preparing cache for manifest with {} bytes, path {}",
                           front.size_bytes,
                           front.path);
+                        // The timeout is TTL x2 because the cursor is allowed
+                        // to hold on to the manifest for up to TTL ms. This
+                        // means that waiting exactly TTL milliseconds is not
+                        // enough because we need some time for cache to evict
+                        // the item and then TTL milliseconds for the cursor
+                        // timer to fire.
                         auto u = co_await _manifest_cache->prepare(
                           front.size_bytes, _manifest_meta_ttl() * 2);
                         // At this point we have free memory to download the
