@@ -68,7 +68,8 @@ public:
       const partition_manifest& m,
       remote& api,
       cache& c,
-      cloud_storage_clients::bucket_name bucket);
+      cloud_storage_clients::bucket_name bucket,
+      partition_probe& probe);
 
     /// Start remote partition
     ss::future<> start();
@@ -248,7 +249,7 @@ private:
     /// called before destruction
     eviction_list_t _eviction_pending;
     segment_map_t _segments;
-    partition_probe _probe;
+    partition_probe& _probe;
 };
 
 } // namespace cloud_storage
