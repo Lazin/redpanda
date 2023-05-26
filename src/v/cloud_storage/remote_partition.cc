@@ -236,9 +236,11 @@ public:
         }
     }
     partition_record_batch_reader_impl(
-      partition_record_batch_reader_impl&& o) noexcept = delete;
+      partition_record_batch_reader_impl&& o) noexcept
+      = delete;
     partition_record_batch_reader_impl&
-    operator=(partition_record_batch_reader_impl&& o) noexcept = delete;
+    operator=(partition_record_batch_reader_impl&& o) noexcept
+      = delete;
     partition_record_batch_reader_impl(
       const partition_record_batch_reader_impl& o)
       = delete;
@@ -580,14 +582,15 @@ remote_partition::remote_partition(
   const partition_manifest& m,
   remote& api,
   cache& c,
-  cloud_storage_clients::bucket_name bucket)
+  cloud_storage_clients::bucket_name bucket,
+  partition_probe& probe)
   : _rtc(_as)
   , _ctxlog(cst_log, _rtc, m.get_ntp().path())
   , _api(api)
   , _cache(c)
   , _manifest(m)
   , _bucket(std::move(bucket))
-  , _probe(m.get_ntp()) {}
+  , _probe(probe) {}
 
 ss::future<> remote_partition::start() {
     // Fiber that consumers from _eviction_list and calls stop on items before

@@ -11,6 +11,8 @@
 
 #include "archival/ntp_archiver_service.h"
 #include "archival/upload_housekeeping_service.h"
+#include "cloud_storage/async_manifest_view.h"
+#include "cloud_storage/partition_probe.h"
 #include "cloud_storage/remote_partition.h"
 #include "cluster/logger.h"
 #include "cluster/tm_stm_cache_manager.h"
@@ -61,6 +63,8 @@ partition::partition(
   , _archival_conf(archival_conf)
   , _cloud_storage_api(cloud_storage_api)
   , _cloud_storage_cache(cloud_storage_cache)
+  , _cloud_storage_probe(
+      ss::make_shared<cloud_storage::partition_probe>(_raft->ntp()))
   , _upload_housekeeping(upload_hks) {
     auto stm_manager = _raft->log().stm_manager();
 
@@ -138,12 +142,22 @@ partition::partition(
                       "configuration property {} is not set",
                       bucket_config.name())};
                 }
+
+                _cloud_storage_manifest_view
+                  = ss::make_shared<cloud_storage::async_manifest_view>(
+                    _cloud_storage_api,
+                    cloud_storage_cache,
+                    _archival_meta_stm->manifest(),
+                    cloud_storage_clients::bucket_name{*bucket},
+                    *_cloud_storage_probe);
+
                 _cloud_storage_partition
                   = ss::make_shared<cloud_storage::remote_partition>(
                     _archival_meta_stm->manifest(),
                     _cloud_storage_api.local(),
                     cloud_storage_cache.local(),
-                    cloud_storage_clients::bucket_name{*bucket});
+                    cloud_storage_clients::bucket_name{*bucket},
+                    *_cloud_storage_probe);
             }
         }
 
@@ -686,7 +700,8 @@ void partition::maybe_construct_archiver() {
           _archival_conf,
           _cloud_storage_api.local(),
           _cloud_storage_cache.local(),
-          *this);
+          *this,
+          _cloud_storage_manifest_view);
         if (!ntp_config.is_read_replica_mode_enabled()) {
             _upload_housekeeping.local().register_jobs(
               _archiver->get_housekeeping_jobs());
