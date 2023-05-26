@@ -42,6 +42,7 @@
 #include <exception>
 #include <functional>
 #include <iterator>
+#include <regex>
 #include <variant>
 
 namespace cloud_storage {
@@ -809,20 +810,26 @@ ss::future<> async_manifest_view::run_bg_loop() {
 
 static bool bucket_item_filter(
   const cloud_storage_clients::client::list_bucket_item& item) {
-    return !boost::algorithm::ends_with(item.key, ".json");
+    return !boost::algorithm::ends_with(item.key, ".bin");
 }
 
 static spillover_manifest_path_components
 parse_spillover_manifest_path(const ss::sstring& path) {
     std::deque<ss::sstring> components;
-    boost::split(components, path, boost::is_any_of(":"));
+    static thread_local std::regex re(
+      R"(^.*manifest\.bin\.(\d*)\.(\d*).(\d*).(\d*).(\d*).(\d*)$)");
+    std::cmatch match;
+    if (!std::regex_match(path.c_str(), match, re)) {
+        throw std::runtime_error(fmt_with_ctx(
+          fmt::format, "Can't parse spillover manifest path {}", path));
+    }
     spillover_manifest_path_components res{
-      .base = model::offset(boost::lexical_cast<int64_t>(components[1])),
-      .last = model::offset(boost::lexical_cast<int64_t>(components[2])),
-      .base_kafka = kafka::offset(boost::lexical_cast<int64_t>(components[3])),
-      .next_kafka = kafka::offset(boost::lexical_cast<int64_t>(components[4])),
-      .base_ts = model::timestamp(boost::lexical_cast<int64_t>(components[5])),
-      .last_ts = model::timestamp(boost::lexical_cast<int64_t>(components[6])),
+      .base = model::offset(boost::lexical_cast<int64_t>(match[1])),
+      .last = model::offset(boost::lexical_cast<int64_t>(match[2])),
+      .base_kafka = kafka::offset(boost::lexical_cast<int64_t>(match[3])),
+      .next_kafka = kafka::offset(boost::lexical_cast<int64_t>(match[4])),
+      .base_ts = model::timestamp(boost::lexical_cast<int64_t>(match[5])),
+      .last_ts = model::timestamp(boost::lexical_cast<int64_t>(match[6])),
     };
     return res;
 }
@@ -1135,6 +1142,12 @@ async_manifest_view::size_based_retention(size_t size_limit) noexcept {
                     break;
                 }
             }
+        } else {
+            vlog(
+              _ctxlog.debug,
+              "Log size ({}) is withing the limit ({})",
+              cloud_log_size,
+              size_limit);
         }
     } catch (...) {
         vlog(

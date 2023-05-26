@@ -26,9 +26,7 @@ struct spillover_manifest_path_components {
     model::timestamp last_ts;
 };
 
-namespace {
-
-std::ostream&
+inline std::ostream&
 operator<<(std::ostream& o, const spillover_manifest_path_components& c) {
     fmt::print(
       o,
@@ -42,6 +40,8 @@ operator<<(std::ostream& o, const spillover_manifest_path_components& c) {
       c.last_ts);
     return o;
 }
+
+namespace {
 
 remote_manifest_path generate_spillover_manifest_path(
   const model::ntp& ntp,

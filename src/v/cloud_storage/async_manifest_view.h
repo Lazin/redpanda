@@ -173,9 +173,9 @@ public:
       size_t new_size,
       std::optional<ss::lowres_clock::duration> timeout = std::nullopt);
 
-private:
     size_t get_capacity() const { return _capacity_bytes; }
 
+private:
     using map_t
       = std::map<model::offset, ss::shared_ptr<materialized_manifest>>;
 

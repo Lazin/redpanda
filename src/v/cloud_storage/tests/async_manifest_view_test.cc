@@ -8,10 +8,12 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
+#include "bytes/iostream.h"
 #include "cloud_storage/async_manifest_view.h"
 #include "cloud_storage/spillover_manifest.h"
 #include "cloud_storage/tests/cloud_storage_fixture.h"
 #include "cloud_storage/tests/s3_imposter.h"
+#include "cloud_storage/tests/util.h"
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -525,7 +527,7 @@ public:
         }
         auto so = model::next_offset(stm_manifest.get_last_offset());
         add_random_segments(stm_manifest, num_segments);
-        auto tmp = stm_manifest.truncate(so);
+        auto tmp = stm_manifest.spillover(so);
         spillover_manifest spm(manifest_ntp, manifest_rev);
         for (const auto& meta : tmp) {
             spm.add(meta);
@@ -540,12 +542,16 @@ public:
             stream.stream.close().get();
         }
         // upload to the cloud
-        std::stringstream body;
-        spm.serialize(body);
-        BOOST_REQUIRE(!body.fail());
+        auto [in_stream, size_bytes] = spm.serialize().get();
+        iobuf tmp_buf;
+        auto out_stream = make_iobuf_ref_output_stream(tmp_buf);
+        ss::copy(in_stream, out_stream).get();
+        in_stream.close().get();
+        out_stream.close().get();
+        ss::sstring body = linearize_iobuf(std::move(tmp_buf));
         expectation exp{
           .url = path().string(),
-          .body = body.str(),
+          .body = body,
         };
         _expectations.push_back(std::move(exp));
         spillover_start_offsets.push_back(so);
@@ -925,7 +931,7 @@ FIXTURE_TEST(
 }
 
 FIXTURE_TEST(test_async_manifest_view_evict, async_manifest_view_fixture) {
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
         generate_manifest_section(100);
     }
     listen();
