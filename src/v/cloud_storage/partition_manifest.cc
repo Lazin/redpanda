@@ -1481,8 +1481,17 @@ void partition_manifest::update_with_json(iobuf buf) {
 ss::future<> partition_manifest::update(
   manifest_format serialization_format, ss::input_stream<char> is) {
     iobuf result;
-    auto os = make_iobuf_ref_output_stream(result);
-    co_await ss::copy(is, os);
+    std::exception_ptr e_ptr;
+    try {
+        auto os = make_iobuf_ref_output_stream(result);
+        co_await ss::copy(is, os);
+    } catch (...) {
+        e_ptr = std::current_exception();
+    }
+    co_await is.close();
+    if (e_ptr) {
+        std::rethrow_exception(e_ptr);
+    }
 
     switch (serialization_format) {
     case manifest_format::json:
