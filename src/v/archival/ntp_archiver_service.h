@@ -306,7 +306,8 @@ private:
       = "adjacent_segment_merger";
 
     /// Delete objects, return true on success and false otherwise
-    ss::future<bool> batch_delete(std::vector<cloud_storage_clients::object_key> paths);
+    ss::future<bool>
+    batch_delete(std::vector<cloud_storage_clients::object_key> paths);
 
     ss::future<bool> do_upload_local(
       upload_candidate_with_locks candidate,

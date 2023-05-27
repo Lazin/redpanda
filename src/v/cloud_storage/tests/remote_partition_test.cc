@@ -142,9 +142,9 @@ static model::record_batch_header read_single_batch_from_remote_partition(
       target, target, ss::default_priority_class());
 
     auto manifest = hydrate_manifest(fixture.api.local(), bucket);
-
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, fixture.api.local(), fixture.cache.local(), bucket);
+      manifest, fixture.api.local(), fixture.cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     auto reader = partition->make_reader(reader_config).get().reader;
@@ -854,8 +854,9 @@ FIXTURE_TEST(test_remote_partition_read_cached_index, cloud_storage_fixture) {
     // Read first segment using first remote_partition instance.
     // After this block finishes the segment will be hydrated.
     {
+        partition_probe probe(manifest.get_ntp());
         auto partition = ss::make_shared<remote_partition>(
-          manifest, api.local(), cache.local(), bucket);
+          manifest, api.local(), cache.local(), bucket, probe);
         auto partition_stop = ss::defer(
           [&partition] { partition->stop().get(); });
         partition->start().get();
@@ -875,8 +876,9 @@ FIXTURE_TEST(test_remote_partition_read_cached_index, cloud_storage_fixture) {
     // Read first segment using second remote_partition instance.
     // This will trigger offset_index materialization from cache.
     {
+        partition_probe probe(manifest.get_ntp());
         auto partition = ss::make_shared<remote_partition>(
-          manifest, api.local(), cache.local(), bucket);
+          manifest, api.local(), cache.local(), bucket, probe);
         auto partition_stop = ss::defer(
           [&partition] { partition->stop().get(); });
         partition->start().get();
@@ -942,8 +944,9 @@ FIXTURE_TEST(test_remote_partition_concurrent_truncate, cloud_storage_fixture) {
 
     auto manifest = hydrate_manifest(api.local(), bucket);
 
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, api.local(), cache.local(), bucket);
+      manifest, api.local(), cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();
@@ -1043,8 +1046,9 @@ FIXTURE_TEST(
 
     auto manifest = hydrate_manifest(api.local(), bucket);
 
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, api.local(), cache.local(), bucket);
+      manifest, api.local(), cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();
@@ -1128,8 +1132,9 @@ FIXTURE_TEST(
 
     auto manifest = hydrate_manifest(api.local(), bucket);
 
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, api.local(), cache.local(), bucket);
+      manifest, api.local(), cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();

@@ -653,8 +653,9 @@ std::vector<model::record_batch_header> scan_remote_partition_incrementally(
           maybe_max_readers);
     }
     auto manifest = hydrate_manifest(imposter.api.local(), bucket);
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, imposter.api.local(), imposter.cache.local(), bucket);
+      manifest, imposter.api.local(), imposter.cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();
@@ -729,9 +730,9 @@ std::vector<model::record_batch_header> scan_remote_partition(
       base, max, ss::default_priority_class());
 
     auto manifest = hydrate_manifest(imposter.api.local(), bucket);
-
+    partition_probe probe(manifest.get_ntp());
     auto partition = ss::make_shared<remote_partition>(
-      manifest, imposter.api.local(), imposter.cache.local(), bucket);
+      manifest, imposter.api.local(), imposter.cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();

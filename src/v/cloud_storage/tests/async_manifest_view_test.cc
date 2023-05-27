@@ -786,8 +786,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
         cursor->manifest([&](const partition_manifest& m) {
             vlog(
               test_log.info,
-              "Looking at the backlog manifest [{}/{}], archive start: {}, "
-              "{}/{}",
+              "Looking at the backlog manifest [{}/{}], archive start: {}",
               m.get_start_offset(),
               m.get_last_offset(),
               stm_manifest.get_archive_start_offset());
@@ -814,8 +813,7 @@ FIXTURE_TEST(test_async_manifest_view_truncate, async_manifest_view_fixture) {
         cursor->manifest([&](const partition_manifest& m) {
             vlog(
               test_log.info,
-              "Looking at the backlog manifest [{}/{}], archive start: {}, "
-              "{}/{}",
+              "Looking at the backlog manifest [{}/{}], archive start: {}",
               m.get_start_offset(),
               m.get_last_offset(),
               stm_manifest.get_archive_start_offset());

@@ -1979,12 +1979,12 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
         if (rem_batch.size() >= batch_size) {
             auto sz = rem_batch.size();
             if (co_await batch_delete(std::move(rem_batch))) {
-              successful_deletes += sz;
+                successful_deletes += sz;
             }
         }
     }
     if (co_await batch_delete(rem_batch)) {
-      successful_deletes += rem_batch.size();
+        successful_deletes += rem_batch.size();
     }
     rem_batch.clear();
 
@@ -2014,7 +2014,8 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
         auto sync_timeout = config::shard_local_cfg()
                               .cloud_storage_metadata_sync_timeout_ms.value();
         auto deadline = ss::lowres_clock::now() + sync_timeout;
-        auto error = co_await _parent.archival_meta_stm()->cleanup_archive(new_clean_offset, bytes_to_remove, deadline, _as);
+        auto error = co_await _parent.archival_meta_stm()->cleanup_archive(
+          new_clean_offset, bytes_to_remove, deadline, _as);
 
         if (error != cluster::errc::success) {
             vlog(
@@ -2022,19 +2023,21 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
               "Failed to clean up metadata after garbage collection: {}",
               error);
         } else {
-          // Remove manifests only if metadata no longer references them
-          for (const auto& path : manifests_to_remove) {
-              rem_batch.emplace_back(path);
-              if (rem_batch.size() >= batch_size) {
-                  co_await batch_delete(std::move(rem_batch));
-              }
-          }
-          co_await batch_delete(rem_batch);
+            // Remove manifests only if metadata no longer references them
+            for (const auto& path : manifests_to_remove) {
+                rem_batch.emplace_back(path);
+                if (rem_batch.size() >= batch_size) {
+                    co_await batch_delete(std::move(rem_batch));
+                }
+            }
+            co_await batch_delete(rem_batch);
         }
     }
     _probe->segments_deleted(static_cast<int64_t>(successful_deletes));
     vlog(
-      _rtclog.debug, "Deleted {} spillover segments from the cloud", successful_deletes);
+      _rtclog.debug,
+      "Deleted {} spillover segments from the cloud",
+      successful_deletes);
 }
 
 ss::future<bool> ntp_archiver::batch_delete(

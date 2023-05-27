@@ -236,11 +236,9 @@ public:
         }
     }
     partition_record_batch_reader_impl(
-      partition_record_batch_reader_impl&& o) noexcept
-      = delete;
+      partition_record_batch_reader_impl&& o) noexcept = delete;
     partition_record_batch_reader_impl&
-    operator=(partition_record_batch_reader_impl&& o) noexcept
-      = delete;
+    operator=(partition_record_batch_reader_impl&& o) noexcept = delete;
     partition_record_batch_reader_impl(
       const partition_record_batch_reader_impl& o)
       = delete;
