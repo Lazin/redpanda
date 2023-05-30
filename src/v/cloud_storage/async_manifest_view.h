@@ -26,6 +26,7 @@
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/condition-variable.hh>
+#include <seastar/core/loop.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/shared_ptr.hh>
@@ -285,6 +286,9 @@ public:
 
     const model::ntp& get_ntp() const { return _stm_manifest.get_ntp(); }
 
+    /// Return STM manifest
+    const partition_manifest& stm() const { return _stm_manifest; }
+
     /// Structure that describes how the start archive offset has
     /// to be advanced forward.
     struct archive_start_offset_advance {
@@ -437,6 +441,12 @@ public:
 
     /// Move to the next manifest or fail
     ss::future<result<bool, error_outcome>> next();
+
+    /// Shortcut to use with Seastar's future utils.
+    ///
+    /// The method returns 'stop_iteration' and it will also
+    /// throw an exception instead of returning an error code.
+    ss::future<ss::stop_iteration> next_iter();
 
     /// Return current manifest
     ///

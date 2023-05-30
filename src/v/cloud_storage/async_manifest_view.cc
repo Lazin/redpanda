@@ -29,6 +29,7 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/condition-variable.hh>
 #include <seastar/core/gate.hh>
+#include <seastar/core/loop.hh>
 #include <seastar/core/smp.hh>
 #include <seastar/core/with_scheduling_group.hh>
 #include <seastar/util/defer.hh>
@@ -43,6 +44,7 @@
 #include <functional>
 #include <iterator>
 #include <regex>
+#include <system_error>
 #include <variant>
 
 namespace cloud_storage {
@@ -565,6 +567,15 @@ ss::future<result<bool, error_outcome>> async_manifest_view_cursor::next() {
     _current = manifest.value();
     _timer.rearm(_idle_timeout + ss::lowres_clock::now());
     co_return true;
+}
+
+ss::future<ss::stop_iteration> async_manifest_view_cursor::next_iter() {
+    auto res = co_await next();
+    if (res.has_failure()) {
+        throw std::system_error(res.error());
+    }
+    co_return res.value() == true ? ss::stop_iteration::yes
+                                  : ss::stop_iteration::no;
 }
 
 std::optional<std::reference_wrapper<const partition_manifest>>
