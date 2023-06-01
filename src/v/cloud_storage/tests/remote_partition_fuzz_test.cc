@@ -9,6 +9,7 @@
  * by the Apache License, Version 2.0
  */
 
+#include "cloud_storage/async_manifest_view.h"
 #include "cloud_storage/tests/cloud_storage_fixture.h"
 #include "cloud_storage/tests/s3_imposter.h"
 #include "cloud_storage/tests/util.h"
@@ -46,8 +47,10 @@ scan_remote_partition_incrementally_with_reuploads(
 
     auto manifest = hydrate_manifest(fixt.api.local(), bucket);
     partition_probe probe(manifest.get_ntp());
+    auto manifest_view = ss::make_shared<async_manifest_view>(
+      fixt.api, fixt.cache, manifest, bucket, probe);
     auto partition = ss::make_shared<remote_partition>(
-      manifest, fixt.api.local(), fixt.cache.local(), bucket, probe);
+      manifest_view, fixt.api.local(), fixt.cache.local(), bucket, probe);
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 
     partition->start().get();
@@ -365,8 +368,10 @@ FIXTURE_TEST(test_scan_while_shutting_down, cloud_storage_fixture) {
     static auto bucket = cloud_storage_clients::bucket_name("bucket");
     auto manifest = hydrate_manifest(api.local(), bucket);
     partition_probe probe(manifest.get_ntp());
+    auto manifest_view = ss::make_shared<async_manifest_view>(
+      api, cache, manifest, bucket, probe);
     auto partition = ss::make_shared<remote_partition>(
-      manifest, api.local(), this->cache.local(), bucket, probe);
+      manifest_view, api.local(), this->cache.local(), bucket, probe);
     partition->start().get();
     auto partition_stop = ss::defer([&partition] { partition->stop().get(); });
 

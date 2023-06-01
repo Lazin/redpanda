@@ -483,17 +483,39 @@ async_manifest_view_cursor::seek(async_view_search_query_t q) {
     if (std::holds_alternative<model::offset>(q)) {
         auto o = std::get<model::offset>(q);
         if (_begin > o || o > _end) {
+            vlog(
+              _view._ctxlog.debug,
+              "Offset {} out of [{}-{}] range",
+              o,
+              _begin,
+              _end);
             co_return false;
         }
     }
     auto satisfies_query = ss::visit(
       _current,
-      [](std::monostate) { return false; },
-      [](stale_manifest) { return false; },
-      [q](std::reference_wrapper<const partition_manifest> p) {
+      [this](std::monostate) {
+          vlog(_view._ctxlog.debug, "Manifest is not initialized");
+          return false;
+      },
+      [this](stale_manifest) {
+          vlog(_view._ctxlog.debug, "Manifest is stale");
+          return false;
+      },
+      [this, q](std::reference_wrapper<const partition_manifest> p) {
+          vlog(
+            _view._ctxlog.debug,
+            "Seeking STM manifest [{}-{}]",
+            p.get().get_start_offset().value(),
+            p.get().get_last_offset());
           return contains(p, q);
       },
-      [q](const ss::shared_ptr<materialized_manifest>& m) {
+      [this, q](const ss::shared_ptr<materialized_manifest>& m) {
+          vlog(
+            _view._ctxlog.debug,
+            "Seeking spillover manifest [{}-{}]",
+            m->manifest.get_start_offset().value(),
+            m->manifest.get_last_offset());
           return contains(m->manifest, q);
       });
     if (satisfies_query) {
@@ -852,13 +874,23 @@ async_manifest_view::get_active(async_view_search_query_t query) noexcept {
         if (!is_archive(query) && !is_stm(query)) {
             // The view should contain manifest below archive start in
             // order to be able to perform retention and advance metadata.
+            vlog(
+              _ctxlog.debug,
+              "query {} is out of valid range, is-archive: {}, is-stm: {}",
+              to_string(query),
+              is_archive(query),
+              is_stm(query));
             co_return error_outcome::out_of_range;
         }
+        model::offset begin;
+        model::offset end = _stm_manifest.get_last_offset();
+        if (_stm_manifest.get_archive_start_offset() == model::offset{}) {
+            begin = _stm_manifest.get_start_offset().value_or(begin);
+        } else {
+            begin = _stm_manifest.get_archive_start_offset();
+        }
         auto cursor = std::make_unique<async_manifest_view_cursor>(
-          *this,
-          _stm_manifest.get_archive_start_offset(),
-          _stm_manifest.get_last_offset(),
-          _manifest_meta_ttl());
+          *this, begin, end, _manifest_meta_ttl());
         // This calls 'get_materialized_manifest' internally which
         // could potentially schedule manifest hydration/materialization
         // in the background fiber.
@@ -950,15 +982,20 @@ bool async_manifest_view::is_stm(async_view_search_query_t o) {
     return ss::visit(
       o,
       [this](model::offset ro) {
-          return ro >= _stm_manifest.get_start_offset().value_or(
-                   model::offset::max());
+          auto so = _stm_manifest.get_start_offset().value_or(
+            model::offset::max());
+          /*TODO: remove*/ vlog(_ctxlog.debug, "Start offset: {}", so);
+          return ro >= so;
       },
       [this](kafka::offset ko) {
-          return ko >= _stm_manifest.get_start_kafka_offset().value_or(
-                   kafka::offset::max());
+          auto sko = _stm_manifest.get_start_kafka_offset().value_or(
+            kafka::offset::max());
+          /*TODO: remove*/ vlog(_ctxlog.debug, "Start kafka offset: {}", sko);
+          return ko >= sko;
       },
       [this](model::timestamp ts) {
           auto sm = _stm_manifest.timequery(ts);
+          /*TODO: remove*/ vlog(_ctxlog.debug, "Timequery result: {}", sm);
           return sm.has_value();
       });
 }
@@ -1319,10 +1356,20 @@ int32_t async_manifest_view::search_spillover_manifests(
     }
 
     // Perform simple scan of the manifest list.
+    /*TODO: remove*/ vlog(
+      _ctxlog.debug,
+      "Scanning manifests list with {} elements, query: {}",
+      _manifests->components.size(),
+      to_string(query));
     auto it = std::find_if(
       _manifests->components.begin(),
       _manifests->components.end(),
-      [query](const spillover_manifest_path_components& c) {
+      [this, query](const spillover_manifest_path_components& c) {
+          /*TODO: remove*/ vlog(
+            _ctxlog.debug,
+            "Scanning manifest with components {}, query: {}",
+            c,
+            to_string(query));
           return contains(c, query);
       });
 
@@ -1429,6 +1476,14 @@ async_manifest_view::maybe_scan_bucket() noexcept {
           || _stm_manifest.get_archive_start_offset()
                == _last_archive_start_offset) {
             // In this case no new spillover manifests could be uploaded.
+            vlog(
+              _ctxlog.debug,
+              "List of manifests is up to date, STM offsets(LSO/archive): "
+              "{}/{}, cached: {}/{}",
+              _stm_manifest.get_start_offset(),
+              _stm_manifest.get_archive_start_offset(),
+              _last_stm_start_offset,
+              _last_archive_start_offset);
             co_return false;
         }
         vlog(
@@ -1454,9 +1509,14 @@ async_manifest_view::maybe_scan_bucket() noexcept {
         int32_t index = 0;
         std::deque<int32_t> ix;
         for (const auto& it : res.value().contents) {
-            vlog(_ctxlog.debug, "scan found manifest {}", it.key);
+            auto comp = parse_spillover_manifest_path(it.key);
+            vlog(
+              _ctxlog.debug,
+              "scan found manifest {}, components: {}",
+              it.key,
+              comp);
             result.manifests.emplace_back(it.key);
-            result.components.push_back(parse_spillover_manifest_path(it.key));
+            result.components.push_back(comp);
             result.sizes.push_back(it.size_bytes);
             ix.push_back(index);
             index++;

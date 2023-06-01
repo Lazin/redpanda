@@ -153,7 +153,7 @@ partition::partition(
 
                 _cloud_storage_partition
                   = ss::make_shared<cloud_storage::remote_partition>(
-                    _archival_meta_stm->manifest(),
+                    _cloud_storage_manifest_view,
                     _cloud_storage_api.local(),
                     cloud_storage_cache.local(),
                     cloud_storage_clients::bucket_name{*bucket},
@@ -452,6 +452,10 @@ ss::future<> partition::start() {
         f = f.then([this] { return _archival_meta_stm->start(); });
     }
 
+    if (_cloud_storage_manifest_view) {
+        f = f.then([this] { return _cloud_storage_manifest_view->start(); });
+    }
+
     if (_cloud_storage_partition) {
         f = f.then([this] { return _cloud_storage_partition->start(); });
     }
@@ -492,6 +496,14 @@ ss::future<> partition::stop() {
           "Stopping cloud_storage_partition on partition: {}",
           partition_ntp);
         co_await _cloud_storage_partition->stop();
+    }
+
+    if (_cloud_storage_manifest_view) {
+        vlog(
+          clusterlog.debug,
+          "Stopping cloud_storage_manifest_view on partition: {}",
+          partition_ntp);
+        co_await _cloud_storage_manifest_view->stop();
     }
 
     if (_id_allocator_stm) {

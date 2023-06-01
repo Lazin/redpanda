@@ -131,7 +131,6 @@ FIXTURE_TEST(test_remote_segment_timeout, cloud_storage_fixture) { // NOLINT
     auto conf = get_configuration();
     partition_manifest m(manifest_ntp, manifest_revision);
     auto name = segment_name("7-8-v1.log");
-    auto key = parse_segment_name(name).value();
     m.add(
       name,
       partition_manifest::segment_meta{

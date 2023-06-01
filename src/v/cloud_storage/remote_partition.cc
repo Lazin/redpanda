@@ -188,7 +188,6 @@ class partition_record_batch_reader_impl final
   : public model::record_batch_reader::impl {
 public:
     explicit partition_record_batch_reader_impl(
-      const storage::log_reader_config& config,
       ss::shared_ptr<remote_partition> part,
       ss::lw_shared_ptr<storage::offset_translator_state> ot_state) noexcept
       : _rtc(part->_as)
@@ -198,6 +197,9 @@ public:
       , _gate_guard(_partition->_gate) {
         auto ntp = _partition->get_ntp();
         vlog(_ctxlog.trace, "Constructing reader {}", ntp);
+    }
+
+    ss::future<> start(storage::log_reader_config config) {
         if (config.abort_source) {
             vlog(_ctxlog.debug, "abort_source is set");
             auto sub = config.abort_source->get().subscribe([this]() noexcept {
@@ -211,9 +213,7 @@ public:
                 _reader = {};
             }
         }
-        // Initialize reader in the background, the read path should use
-        // 'start_barrier' method to protect itself from race condition.
-        start_bg(config);
+        co_await init_cursor(config);
         _partition->_probe.reader_created();
     }
 
@@ -248,9 +248,11 @@ public:
         }
     }
     partition_record_batch_reader_impl(
-      partition_record_batch_reader_impl&& o) noexcept = delete;
+      partition_record_batch_reader_impl&& o) noexcept
+      = delete;
     partition_record_batch_reader_impl&
-    operator=(partition_record_batch_reader_impl&& o) noexcept = delete;
+    operator=(partition_record_batch_reader_impl&& o) noexcept
+      = delete;
     partition_record_batch_reader_impl(
       const partition_record_batch_reader_impl& o)
       = delete;
@@ -264,9 +266,6 @@ public:
     do_load_slice(model::timeout_clock::time_point deadline) override {
         std::exception_ptr unknown_exception_ptr = nullptr;
         try {
-            // Wait for all background initialization to be completed
-            co_await start_barrier();
-
             if (is_end_of_stream()) {
                 vlog(
                   _ctxlog.debug,
@@ -446,29 +445,10 @@ private:
         }
     }
 
-    void start_bg(storage::log_reader_config config) {
-        ss::gate::holder holder(_gate_guard);
-        auto units = ss::try_get_units(_start_barrier, 1);
-        vassert(units.has_value(), "start_bg called concurrently");
-        ssx::background = init_cursor(config, std::move(units.value()));
-    }
-
-    ss::future<> start_barrier() {
-        auto u = co_await ss::get_units(_start_barrier, 1);
-        u.return_all();
-        if (_view_cursor == nullptr) {
-            // This is possible if for some reason the cursor is not created
-            // correctly in the 'start_bg' method.
-            throw std::runtime_error(
-              fmt_with_ctx(fmt::format, "Tiered-storage is not ready"));
-        }
-    }
-
-    ss::future<> init_cursor(
-      storage::log_reader_config config, ss::semaphore_units<> units) {
+    ss::future<> init_cursor(storage::log_reader_config config) {
         // TODO: perform time query if needed
         auto res = co_await _partition->_manifest_view->get_active(
-          config.start_offset);
+          model::offset_cast(config.start_offset));
         if (res.has_failure()) {
             vlog(
               _ctxlog.error,
@@ -478,7 +458,6 @@ private:
         }
         _view_cursor = std::move(res.value());
         initialize_reader_state(_view_cursor->manifest().value(), config);
-        units.return_all();
         co_return;
     }
 
@@ -577,9 +556,11 @@ private:
             _partition->evict_reader(std::move(_reader));
             vlog(
               _ctxlog.debug,
-              "initializing new segment reader {}, next offset {}",
+              "initializing new segment reader {}, next offset {}, manifest "
+              "cursor status: {}",
               config.start_offset,
-              _next_segment_base_offset);
+              _next_segment_base_offset,
+              _view_cursor->get_status());
             auto maybe_manifest = _view_cursor->manifest();
             if (
               !maybe_manifest.has_value()
@@ -619,7 +600,6 @@ private:
     retry_chain_node _rtc;
     retry_chain_logger _ctxlog;
 
-    ss::semaphore _start_barrier{1};
     ss::shared_ptr<remote_partition> _partition;
     /// Manifest view cursor
     std::unique_ptr<async_manifest_view_cursor> _view_cursor;
@@ -689,7 +669,7 @@ kafka::offset remote_partition::first_uploaded_offset() {
       _manifest_view->stm().size() > 0,
       "The manifest for {} is not expected to be empty",
       _manifest_view->stm().get_ntp());
-    auto so = _manifest_view->stm().get_start_kafka_offset().value();
+    auto so = _manifest_view->stm().start_kafka_offset_full().value();
     vlog(_ctxlog.trace, "remote partition first_uploaded_offset: {}", so);
     return so;
 }
@@ -932,7 +912,8 @@ ss::future<storage::translating_reader> remote_partition::make_reader(
     auto ot_state = ss::make_lw_shared<storage::offset_translator_state>(
       get_ntp());
     auto impl = std::make_unique<partition_record_batch_reader_impl>(
-      config, shared_from_this(), ot_state);
+      shared_from_this(), ot_state);
+    co_await impl->start(config);
     co_return storage::translating_reader{
       model::record_batch_reader(std::move(impl)), std::move(ot_state)};
 }

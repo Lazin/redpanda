@@ -135,8 +135,8 @@ remote_segment::remote_segment(
   // possible. In the second case we should be able to hydrate the entire
   // segment in chunks at the same time. In the first case roughly half the
   // segment may be hydrated at a time.
-  , _chunks_in_segment(std::max(
-      static_cast<uint64_t>(ceil(_size / _chunk_size)), _chunks_in_segment)) {
+  , _chunks_in_segment(
+      std::max(static_cast<uint64_t>(ceil(_size / _chunk_size)), 1UL)) {
     if (
       meta.sname_format == segment_name_format::v3
       && meta.metadata_size_hint == 0) {
@@ -169,7 +169,7 @@ remote_segment::remote_segment(
       _size);
 
     vlog(
-      _ctxlog.trace,
+      _ctxlog.debug,
       "total {} chunks in segment of size {}, max hydrated chunks at a time: "
       "{}, chunk size: {}",
       _chunks_in_segment,
@@ -180,6 +180,7 @@ remote_segment::remote_segment(
     _chunks_api.emplace(*this, _max_hydrated_chunks);
 
     if (config::shard_local_cfg().cloud_storage_disable_chunk_reads) {
+        vlog(_ctxlog.debug, "fallback mode enabled");
         _fallback_mode = fallback_mode::yes;
     }
 

@@ -1978,7 +1978,9 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
         rem_batch.emplace_back(path);
         if (rem_batch.size() >= batch_size) {
             auto sz = rem_batch.size();
-            if (co_await batch_delete(std::move(rem_batch))) {
+            std::vector<cloud_storage_clients::object_key> tmp;
+            std::swap(tmp, rem_batch);
+            if (co_await batch_delete(std::move(tmp))) {
                 successful_deletes += sz;
             }
         }
@@ -2027,7 +2029,9 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
             for (const auto& path : manifests_to_remove) {
                 rem_batch.emplace_back(path);
                 if (rem_batch.size() >= batch_size) {
-                    co_await batch_delete(std::move(rem_batch));
+                    std::vector<cloud_storage_clients::object_key> tmp;
+                    std::swap(tmp, rem_batch);
+                    co_await batch_delete(std::move(tmp));
                 }
             }
             co_await batch_delete(rem_batch);
