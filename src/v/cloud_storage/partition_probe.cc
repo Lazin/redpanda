@@ -96,7 +96,8 @@ partition_probe::partition_probe(const model::ntp& ntp) {
                 _spillover_mat_latency);
           },
           sm::description(
-            "Spillover manifest materialization latency histogram")),
+            "Spillover manifest materialization latency histogram"),
+          labels),
       });
 }
 

@@ -446,17 +446,32 @@ private:
     }
 
     ss::future<> init_cursor(storage::log_reader_config config) {
-        // TODO: perform time query if needed
-        auto res = co_await _partition->_manifest_view->get_active(
-          model::offset_cast(config.start_offset));
-        if (res.has_failure()) {
-            vlog(
-              _ctxlog.error,
-              "Can't fetch spillover manifest, error: {}",
-              res.error());
-            co_return;
+        int retry_quota = 4;
+        async_view_search_query_t query;
+        if (config.first_timestamp.has_value()) {
+            query = config.first_timestamp.value();
+        } else {
+            // NOTE: config.start_offset actually contains kafka offset
+            // stored using model::offset type.
+            query = model::offset_cast(config.start_offset);
         }
-        _view_cursor = std::move(res.value());
+        // Find manifest that contains requested timestamp
+        while (true) {
+            auto cur = co_await _partition->_manifest_view->get_active(query);
+            if (cur.has_failure()) {
+                if (cur.error() == error_outcome::repeat && retry_quota-- > 0) {
+                    continue;
+                }
+                vlog(
+                  _ctxlog.error,
+                  "Failed to query spillover manifests: {}, query: {}",
+                  cur.error(),
+                  query);
+                co_return;
+            }
+            _view_cursor = std::move(cur.value());
+            break;
+        }
         initialize_reader_state(_view_cursor->manifest().value(), config);
         co_return;
     }

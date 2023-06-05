@@ -1839,25 +1839,24 @@ ss::future<> ntp_archiver::apply_archive_retention() {
     }
 
     const auto& ntp_conf = _parent.get_ntp_config();
-    std::optional<size_t> retention_bytes;
-    std::optional<std::chrono::milliseconds> retention_ms;
-
-    if (ntp_conf.retention_bytes()) {
-        retention_bytes = ntp_conf.retention_bytes();
-    }
-
-    if (ntp_conf.retention_duration()) {
-        retention_ms = ntp_conf.retention_duration();
-    }
+    std::optional<size_t> retention_bytes = ntp_conf.retention_bytes();
+    std::optional<std::chrono::milliseconds> retention_ms
+      = ntp_conf.retention_duration();
 
     auto res = co_await _manifest_view->compute_retention(
       retention_bytes, retention_ms);
+
     if (res.has_error()) {
         vlog(
           _rtclog.error,
           "Failed to compute archive retention: {}",
           res.error());
         throw std::system_error(res.error());
+    }
+
+    if (
+      res.value().offset == _manifest_view->stm().get_archive_start_offset()) {
+        co_return;
     }
 
     // Replicate metadata
@@ -1938,9 +1937,10 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
                       segments_to_remove.push_back(
                         cloud_storage::generate_remote_tx_path(path)());
                   } else {
-                      // This indicates that we had to stop in the middle of the
-                      // manifest and we need to 1) stop 2) remove the manifest
-                      // from the cloud storage bucket.
+                      // This indicates that we need to remove only some of the
+                      // segments from the manifest. In this case the outer loop
+                      // needs to stop and the current manifest shouldn't be
+                      // marked for deletion.
                       return true;
                   }
               }
@@ -1975,6 +1975,7 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
     const size_t batch_size = 1000;
     std::vector<cloud_storage_clients::object_key> rem_batch;
     for (const auto& path : segments_to_remove) {
+        vlog(_rtclog.info, "Deleting segment from cloud storage: {}", path);
         rem_batch.emplace_back(path);
         if (rem_batch.size() >= batch_size) {
             auto sz = rem_batch.size();
@@ -2027,6 +2028,10 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
         } else {
             // Remove manifests only if metadata no longer references them
             for (const auto& path : manifests_to_remove) {
+                vlog(
+                  _rtclog.info,
+                  "Deleting spillover manifest from cloud storage: {}",
+                  path);
                 rem_batch.emplace_back(path);
                 if (rem_batch.size() >= batch_size) {
                     std::vector<cloud_storage_clients::object_key> tmp;
@@ -2039,38 +2044,19 @@ ss::future<> ntp_archiver::garbage_collect_archive() {
     }
     _probe->segments_deleted(static_cast<int64_t>(successful_deletes));
     vlog(
-      _rtclog.debug,
+      _rtclog.info,
       "Deleted {} spillover segments from the cloud",
       successful_deletes);
 }
 
 ss::future<bool> ntp_archiver::batch_delete(
   std::vector<cloud_storage_clients::object_key> keys) {
-    if (_remote.is_batch_delete_supported()) {
-        // Do batch delete, the batch size should be below the limit
-        auto res = co_await _remote.delete_objects(
-          get_bucket_name(), std::move(keys), _rtcnode);
-        if (res != cloud_storage::upload_result::success) {
-            vlog(_rtclog.error, "Failed to delete objects", res);
-            co_return false;
-        }
-    } else {
-        // Delete 1by1
-        size_t failures = 0;
-        co_await ss::max_concurrent_for_each(
-          keys,
-          _concurrency,
-          [this, &failures](cloud_storage_clients::object_key key) {
-              return _remote.delete_object(get_bucket_name(), key, _rtcnode)
-                .then([&failures](cloud_storage::upload_result res) {
-                    if (res != cloud_storage::upload_result::success) {
-                        failures++;
-                    }
-                });
-          });
-        if (failures > 0) {
-            co_return false;
-        }
+    // Do batch delete, the batch size should be below the limit
+    auto res = co_await _remote.delete_objects(
+      get_bucket_name(), std::move(keys), _rtcnode);
+    if (res != cloud_storage::upload_result::success) {
+        vlog(_rtclog.error, "Failed to delete objects", res);
+        co_return false;
     }
     co_return true;
 }

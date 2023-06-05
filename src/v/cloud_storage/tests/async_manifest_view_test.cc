@@ -515,6 +515,7 @@ public:
         stm_manifest.set_archive_clean_offset(model::offset{0}, 0);
         view.start().get();
         base_timestamp = model::timestamp_clock::now() - storage_duration;
+        last_timestamp = base_timestamp;
     }
 
     ~async_manifest_view_fixture() { view.stop().get(); }
@@ -581,11 +582,8 @@ public:
               .size_bytes = segment_size,
               .base_offset = base,
               .committed_offset = last,
-              .base_timestamp = model::to_timestamp(
-                base_timestamp + std::chrono::milliseconds(i * ts_step)),
-              .max_timestamp = model::to_timestamp(
-                base_timestamp
-                + std::chrono::milliseconds(i * ts_step + (ts_step - 1))),
+              .base_timestamp = model::to_timestamp(last_timestamp),
+              .max_timestamp = model::to_timestamp(last_timestamp),
               .delta_offset = delta,
               .ntp_revision = manifest_rev,
               .archiver_term = model::term_id(1),
@@ -595,6 +593,7 @@ public:
             };
             base = model::next_offset(last);
             delta = delta_end;
+            last_timestamp += std::chrono::milliseconds(ts_step);
             manifest.add(meta);
             if (all_segments.has_value()) {
                 all_segments->get().push_back(manifest.last_segment().value());
@@ -642,6 +641,7 @@ public:
     std::optional<std::reference_wrapper<std::vector<segment_meta>>>
       all_segments;
     model::timestamp_clock::time_point base_timestamp;
+    model::timestamp_clock::time_point last_timestamp;
     static constexpr std::chrono::milliseconds storage_duration = 10h;
 };
 
@@ -1019,9 +1019,10 @@ FIXTURE_TEST(test_async_manifest_view_retention, async_manifest_view_fixture) {
     vlog(
       test_log.info,
       "Triggering size-based retention, {} bytes will be evicted, total size "
-      "is {} bytes",
+      "is {} bytes, expected new start offset: {}",
       prefix_size,
-      total_size);
+      total_size,
+      prefix_base_offset);
     auto rr4 = view
                  .compute_retention(total_size - prefix_size, storage_duration)
                  .get();
@@ -1030,4 +1031,20 @@ FIXTURE_TEST(test_async_manifest_view_retention, async_manifest_view_fixture) {
     BOOST_REQUIRE_EQUAL(rr4.value().delta, prefix_delta);
 
     // Check the case when size-based retention wins
+    auto now = model::timestamp::now();
+    auto delta = now - prefix_timestamp;
+    vlog(
+      test_log.info,
+      "Triggering time-based retention at {}, delta {}, expected new start "
+      "offset: {}",
+      prefix_timestamp,
+      delta,
+      prefix_base_offset);
+    auto rr5 = view
+                 .compute_retention(
+                   total_size, std::chrono::milliseconds(delta.value()))
+                 .get();
+    BOOST_REQUIRE(rr5.has_value());
+    BOOST_REQUIRE_EQUAL(rr5.value().offset, prefix_base_offset);
+    BOOST_REQUIRE_EQUAL(rr5.value().delta, prefix_delta);
 }

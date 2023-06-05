@@ -44,6 +44,8 @@ namespace cloud_storage {
 using async_view_search_query_t
   = std::variant<model::offset, kafka::offset, model::timestamp>;
 
+std::ostream& operator<<(std::ostream&, const async_view_search_query_t&);
+
 /// Materialized spillover manifest
 ///
 /// The object contains the manifest, semaphore units,
@@ -257,7 +259,7 @@ class async_manifest_view {
     friend class async_manifest_view_cursor;
 
 public:
-    explicit async_manifest_view(
+    async_manifest_view(
       ss::sharded<remote>& remote,
       ss::sharded<cache>& cache,
       const partition_manifest& stm_manifest,
@@ -428,7 +430,7 @@ public:
     /// \param begin is a start of the allowed offset range
     /// \param end_inclusive is an end of the allowed offset range
     /// \param timeout is a time budget of the cursor
-    explicit async_manifest_view_cursor(
+    async_manifest_view_cursor(
       async_manifest_view& view,
       model::offset begin,
       model::offset end_inclusive,

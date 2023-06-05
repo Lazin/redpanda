@@ -59,6 +59,11 @@ static ss::sstring to_string(const async_view_search_query_t& t) {
       [&](model::timestamp ts) { return ssx::sformat("[timestamp: {}]", ts); });
 }
 
+std::ostream& operator<<(std::ostream& s, const async_view_search_query_t& q) {
+    s << to_string(q);
+    return s;
+}
+
 static bool contains(
   const spillover_manifest_path_components& c,
   const async_view_search_query_t& query) {
@@ -984,19 +989,20 @@ bool async_manifest_view::is_stm(async_view_search_query_t o) {
       [this](model::offset ro) {
           auto so = _stm_manifest.get_start_offset().value_or(
             model::offset::max());
-          /*TODO: remove*/ vlog(_ctxlog.debug, "Start offset: {}", so);
           return ro >= so;
       },
       [this](kafka::offset ko) {
           auto sko = _stm_manifest.get_start_kafka_offset().value_or(
             kafka::offset::max());
-          /*TODO: remove*/ vlog(_ctxlog.debug, "Start kafka offset: {}", sko);
           return ko >= sko;
       },
       [this](model::timestamp ts) {
           auto sm = _stm_manifest.timequery(ts);
-          /*TODO: remove*/ vlog(_ctxlog.debug, "Timequery result: {}", sm);
-          return sm.has_value();
+          if (!sm.has_value()) {
+              return false;
+          }
+          return sm.value().base_timestamp <= ts
+                 && ts <= sm.value().max_timestamp;
       });
 }
 
@@ -1075,7 +1081,7 @@ async_manifest_view::time_based_retention(
                   model::offset prev_offset;
                   model::offset_delta prev_delta;
                   for (const auto& meta : manifest) {
-                      if (meta.max_timestamp >= boundary) {
+                      if (meta.base_timestamp > boundary) {
                           return std::make_tuple(prev_offset, prev_delta);
                       }
                       prev_offset = meta.base_offset;
@@ -1187,6 +1193,11 @@ async_manifest_view::size_based_retention(size_t size_limit) noexcept {
                         co_return r.as_failure();
                     }
                 } else {
+                    vlog(
+                      _ctxlog.debug,
+                      "Retention found offset {} with delta {}",
+                      result.offset,
+                      result.delta);
                     break;
                 }
             }
@@ -1356,8 +1367,8 @@ int32_t async_manifest_view::search_spillover_manifests(
     }
 
     // Perform simple scan of the manifest list.
-    /*TODO: remove*/ vlog(
-      _ctxlog.debug,
+    vlog(
+      _ctxlog.trace,
       "Scanning manifests list with {} elements, query: {}",
       _manifests->components.size(),
       to_string(query));
@@ -1365,8 +1376,8 @@ int32_t async_manifest_view::search_spillover_manifests(
       _manifests->components.begin(),
       _manifests->components.end(),
       [this, query](const spillover_manifest_path_components& c) {
-          /*TODO: remove*/ vlog(
-            _ctxlog.debug,
+          vlog(
+            _ctxlog.trace,
             "Scanning manifest with components {}, query: {}",
             c,
             to_string(query));
@@ -1487,7 +1498,7 @@ async_manifest_view::maybe_scan_bucket() noexcept {
             co_return false;
         }
         vlog(
-          _ctxlog.debug,
+          _ctxlog.info,
           "Re-scan needed, STM offsets(LSO/archive): {}/{}, cached: {}/{}",
           _stm_manifest.get_start_offset(),
           _stm_manifest.get_archive_start_offset(),
