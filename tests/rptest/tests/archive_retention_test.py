@@ -23,7 +23,7 @@ from rptest.tests.redpanda_test import RedpandaTest
 from rptest.util import (produce_until_segments, produce_total_bytes,
                          wait_for_local_storage_truncate, segments_count,
                          expect_exception)
-from rptest.utils.si_utils import BucketView
+from rptest.utils.si_utils import BucketView, NTP
 
 
 class CloudArchiveRetentionTest(RedpandaTest):
@@ -118,9 +118,32 @@ class CloudArchiveRetentionTest(RedpandaTest):
         # Enable cloud retention for the topic to force deleting data
         # from the 'archive'
         wait_for_topic()
+
+        view = BucketView(self.redpanda, [topic], scan_segments=True)
+
+        ntp0 = NTP(ns='kafka', topic=topic.name, partition=0)
+        summaries = view.segment_summaries(ntp0)
+        if retention_type == 'retention.bytes':
+            retention_value = 0
+            retention_value = view.cloud_log_size_for_ntp(
+                ntp0.topic, ntp0.partition)
+            for s in summaries[0:(len(summaries) // 2)]:
+                retention_value -= s.size_bytes
+        else:
+            retention_value = 1000
+            retention_value = summaries[len(summaries) // 2].base_timestamp
+
         self.client().alter_topic_config(topic.name, retention_type, 1000)
 
-        wait_until(lambda: self.num_segments_deleted() > 50,
+        wait_until(lambda: self.num_segments_deleted() > 0,
                    timeout_sec=100,
                    backoff_sec=5,
                    err_msg=f"Segments were not removed from the cloud")
+
+        view.reset()
+        for partition_id in range(0, topic.partition_count):
+            wait_until(lambda: view.is_archive_cleanup_complete(
+                NTP(ns='kafka', topic=topic.name, partition=partition_id)),
+                       timeout_sec=100,
+                       backoff_sec=5,
+                       err_msg=f"Archive GC is not completed")
