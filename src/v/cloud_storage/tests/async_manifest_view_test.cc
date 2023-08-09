@@ -22,8 +22,10 @@
 #include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
+#include <seastar/core/file-types.hh>
 #include <seastar/core/io_priority_class.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/core/seastar.hh>
 #include <seastar/core/timed_out_error.hh>
 #include <seastar/testing/seastar_test.hh>
 #include <seastar/testing/thread_test_case.hh>
@@ -99,6 +101,70 @@ public:
           .url = path().string(),
           .body = body,
         };
+    }
+
+    /// List of files with serialized spillover manifests
+    /// and STM manifest.
+    struct manifest_files {
+        ss::sstring stm_path;
+        std::vector<ss::sstring> spills;
+    };
+
+    void load_stm_manifest_from_file(const ss::sstring& stm_path) {
+        // Load the manifest from file
+        iobuf body;
+        auto stm_file = ss::open_file_dma(stm_path, ss::open_flags::ro).get();
+        auto inp_str = ss::make_file_input_stream(stm_file);
+        auto out_str = make_iobuf_ref_output_stream(body);
+        ss::copy(inp_str, out_str).get();
+
+        // The stm_manifest is created with different ntp/rev
+        stm_manifest.from_iobuf(std::move(body));
+        // No need to upload to S3
+    }
+
+    void put_spill_to_cache(const spillover_manifest& spm) {
+        auto path = spm.get_manifest_path();
+        auto stream = spm.serialize().get();
+        auto reservation = cache.local().reserve_space(123, 1).get();
+        cache.local()
+          .put(path, stream.stream, reservation, ss::default_priority_class())
+          .get();
+        stream.stream.close().get();
+    }
+
+    void load_spillover_manifest_from_file(const ss::sstring& spill_path) {
+        iobuf body;
+        auto file = ss::open_file_dma(spill_path, ss::open_flags::ro).get();
+        auto inp_str = ss::make_file_input_stream(file);
+        auto out_str = make_iobuf_ref_output_stream(body);
+        ss::copy(inp_str, out_str).get();
+
+        // Try to use different ntp and rev
+        spillover_manifest spm(manifest_ntp, manifest_rev);
+        spm.from_iobuf(std::move(body));
+        upload_to_s3_imposter(spm);
+        put_spill_to_cache(spm);
+    }
+
+    // Upload the manifest to the "cloud storage"
+    void upload_to_s3_imposter(const partition_manifest& pm) {
+        auto [in_stream, size_bytes] = pm.serialize().get();
+        iobuf tmp_buf;
+        auto out_stream = make_iobuf_ref_output_stream(tmp_buf);
+        ss::copy(in_stream, out_stream).get();
+        in_stream.close().get();
+        out_stream.close().get();
+        ss::sstring body = linearize_iobuf(std::move(tmp_buf));
+        auto path = pm.get_manifest_path();
+        _expectations.push_back({
+          .url = path().string(),
+          .body = body,
+        });
+        vlog(
+          test_log.info,
+          "Spillover manifest uploaded to {}",
+          _expectations.back().url);
     }
 
     // The current content of the manifest will be spilled over to the archive
@@ -1007,4 +1073,45 @@ FIXTURE_TEST(test_async_manifest_view_test_iter2, async_manifest_view_fixture) {
     print_diff(actual, expected);
     BOOST_REQUIRE_EQUAL(expected.size(), actual.size());
     BOOST_REQUIRE(expected == actual);
+}
+
+FIXTURE_TEST(test_async_manifest_view_repro, async_manifest_view_fixture) {
+    load_stm_manifest_from_file("/home/lazin/workspace/0_87/manifest.bin");
+    std::vector<ss::sstring> spills = {
+      "/home/lazin/workspace/0_87/"
+      "manifest.bin.0.2249996641.0.2249993616.1677002790140.1681223608478",
+      "/home/lazin/workspace/0_87/"
+      "manifest.bin.2249996642.3456804257.2249993616.3456798131.1681223608480."
+      "1683812773442",
+      "/home/lazin/workspace/0_87/"
+      "manifest.bin.3456804258.4724554875.3456798131.4724545623.1683812773443."
+      "1686669618356",
+    };
+    for (const auto& p : spills) {
+        load_spillover_manifest_from_file(p);
+    }
+    listen();
+
+    // std::vector<segment_meta> actual;
+    model::offset so = model::offset{0};
+    auto maybe_cursor = view.get_cursor(so).get();
+    auto cursor = std::move(maybe_cursor.value());
+    auto target = model::timestamp(1691456400000);
+    cloud_storage::for_each_manifest(
+      std::move(cursor),
+      [&](ssx::task_local_ptr<const cloud_storage::partition_manifest>
+            p) mutable {
+          for (const auto& m : *p) {
+              if (m.base_timestamp <= target && target <= m.max_timestamp) {
+                  vlog(test_log.info, "Segment {}", m);
+                  // actual.push_back(m);
+              }
+          }
+          return ss::stop_iteration::no;
+      })
+      .get();
+
+    vlog(test_log.debug, "Query timestamp {}", target);
+    auto res = view.get_cursor(target).get();
+    BOOST_REQUIRE(res.has_failure() == false);
 }

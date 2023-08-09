@@ -10,6 +10,7 @@
 
 #include "cloud_storage/segment_meta_cstore.h"
 
+#include "cloud_storage/logger.h"
 #include "cloud_storage/types.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -570,6 +571,71 @@ public:
         }
 
         auto hint = hint_it->second;
+        vlog(
+          cst_log.info,
+          "is_compacted hint: initial={}, offset={}",
+          hint->at(0).initial,
+          hint->at(0).offset);
+        vlog(
+          cst_log.info,
+          "size_bytes hint: initial={}, offset={}",
+          hint->at(1).initial,
+          hint->at(1).offset);
+        vlog(
+          cst_log.info,
+          "base_offset hint: initial={}, offset={}",
+          hint->at(2).initial,
+          hint->at(2).offset);
+        vlog(
+          cst_log.info,
+          "committed_offset hint: initial={}, offset={}",
+          hint->at(3).initial,
+          hint->at(3).offset);
+        vlog(
+          cst_log.info,
+          "base_timestamp hint: initial={}, offset={}",
+          hint->at(4).initial,
+          hint->at(4).offset);
+        vlog(
+          cst_log.info,
+          "max_timestamp hint: initial={}, offset={}",
+          hint->at(5).initial,
+          hint->at(5).offset);
+        vlog(
+          cst_log.info,
+          "delta_offset hint: initial={}, offset={}",
+          hint->at(6).initial,
+          hint->at(6).offset);
+        vlog(
+          cst_log.info,
+          "ntp_revision hint: initial={}, offset={}",
+          hint->at(7).initial,
+          hint->at(7).offset);
+        vlog(
+          cst_log.info,
+          "archiver_term hint: initial={}, offset={}",
+          hint->at(8).initial,
+          hint->at(8).offset);
+        vlog(
+          cst_log.info,
+          "segment_term hint: initial={}, offset={}",
+          hint->at(9).initial,
+          hint->at(9).offset);
+        vlog(
+          cst_log.info,
+          "delta_offset_end hint: initial={}, offset={}",
+          hint->at(10).initial,
+          hint->at(10).offset);
+        vlog(
+          cst_log.info,
+          "sname_format hint: initial={}, offset={}",
+          hint->at(11).initial,
+          hint->at(11).offset);
+        vlog(
+          cst_log.info,
+          "meta_size_hint hint: initial={}, offset={}",
+          hint->at(12).initial,
+          hint->at(12).offset);
         return iterators_t(
           at_with_hint<segment_meta_ix::is_compacted>(_is_compacted, ix, hint),
           at_with_hint<segment_meta_ix::size_bytes>(_size_bytes, ix, hint),
