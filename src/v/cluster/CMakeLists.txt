@@ -183,6 +183,7 @@ v_cc_library(
     ../archival/adjacent_segment_merger.cc
     ../archival/purger.cc
     ../archival/scrubber.cc
+    ../archival/async_data_uploader.cc
     cloud_metadata/cluster_manifest.cc
     cloud_metadata/key_utils.cc
     cloud_metadata/manifest_downloads.cc
