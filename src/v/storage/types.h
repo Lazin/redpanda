@@ -326,6 +326,11 @@ struct log_reader_config {
     // historical read-once workloads like compaction).
     bool skip_batch_cache{false};
 
+    // do not reuse cached readers. if this field is set to true the make_reader
+    // method will proceed with creating a new reader without checking the
+    // readers cache.
+    bool skip_readers_cache{false};
+
     log_reader_config(
       model::offset start_offset,
       model::offset max_offset,
