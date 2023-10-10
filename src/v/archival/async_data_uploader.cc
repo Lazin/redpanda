@@ -22,6 +22,7 @@
 #include "storage/offset_to_filepos.h"
 #include "storage/parser.h"
 #include "storage/segment_appender_utils.h"
+#include "storage/segment_index.h"
 #include "utils/retry_chain_node.h"
 #include "vlog.h"
 
@@ -206,6 +207,23 @@ segment_upload::make_segment_upload(
     co_return std::move(upl);
 }
 
+ss::future<result<std::unique_ptr<segment_upload>>>
+segment_upload::make_segment_upload(
+  ss::lw_shared_ptr<cluster::partition> part,
+  size_limited_offset_range range,
+  size_t read_buffer_size,
+  ss::scheduling_group sg,
+  model::timeout_clock::time_point deadline) {
+    std::unique_ptr<segment_upload> upl(
+      new segment_upload(part, read_buffer_size, sg));
+
+    auto res = co_await upl->initialize(range, deadline);
+    if (res.has_failure()) {
+        co_return res.as_failure();
+    }
+    co_return std::move(upl);
+}
+
 ss::future<result<void>> segment_upload::initialize(
   inclusive_offset_range range, model::timeout_clock::time_point deadline) {
     auto holder = _gate.hold();
@@ -227,6 +245,33 @@ ss::future<result<void>> segment_upload::initialize(
       std::move(reader),
       _rd_buffer_size,
       range,
+      model::duration_to(deadline));
+    co_return outcome::success();
+}
+
+ss::future<result<void>> segment_upload::initialize(
+  size_limited_offset_range range, model::timeout_clock::time_point deadline) {
+    auto holder = _gate.hold();
+    auto params = co_await compute_upload_parameters(range, deadline);
+    if (params.has_failure()) {
+        co_return params.as_failure();
+    }
+    _params = std::move(params.value());
+    // Create a log reader config to scan the uploaded offset
+    // range. We should skip the batch cache.
+    storage::log_reader_config reader_cfg(
+      params.value().offsets.base,
+      params.value().offsets.last,
+      priority_manager::local().archival_priority());
+    reader_cfg.skip_batch_cache = true;
+    reader_cfg.skip_readers_cache = true;
+    vlog(_ctxlog.debug, "Creating log reader, config: {}", reader_cfg);
+    auto reader = co_await _part->make_reader(reader_cfg);
+    _stream = make_reader_input_stream(
+      _ntp,
+      std::move(reader),
+      _rd_buffer_size,
+      params.value().offsets,
       model::duration_to(deadline));
     co_return outcome::success();
 }
@@ -446,6 +491,150 @@ segment_upload::compute_upload_parameters(
 
         co_return result;
 
+    } catch (...) {
+        if (ssx::is_shutdown_exception(std::current_exception())) {
+            vlog(
+              _ctxlog.debug,
+              "Shutdown exception: {}",
+              std::current_exception());
+            co_return make_error_code(error_outcome::shutting_down);
+        }
+        vlog(
+          _ctxlog.error, "Unexpected exception: {}", std::current_exception());
+        co_return make_error_code(error_outcome::unexpected_failure);
+    }
+}
+
+ss::future<result<cloud_upload_parameters>>
+segment_upload::compute_upload_parameters(
+  size_limited_offset_range range, model::timeout_clock::time_point deadline) {
+    if (range.max_size < storage::segment_index::default_data_buffer_step) {
+        co_return make_error_code(error_outcome::not_enough_data);
+    }
+    auto holder = _gate.hold();
+    std::optional<inclusive_offset_range> discovered_offset_range;
+    try {
+        auto log = _part->log();
+        auto dli = dynamic_cast<const storage::disk_log_impl*>(log.get());
+        auto base_it = dli->segments().lower_bound(range.base);
+        std::vector<ss::lw_shared_ptr<storage::segment>> segments;
+        size_t current_size = 0;
+        size_t base_file_pos = 0;
+
+        for (auto it = base_it; it != dli->segments().end(); it++) {
+            const auto& offsets = it->get()->offsets();
+            if (offsets.committed_offset < range.base) {
+                continue;
+            }
+            auto r_lock = co_await it->get()->read_lock();
+            if (
+              offsets.base_offset < range.base
+              && offsets.committed_offset > range.base) {
+                // The segment is first in the range and it only
+                // fits inside the range partially. We're doing subscan here but
+                // most of the time it won't require the actual scanning because
+                // in this mode the upload will end on index entry or segment
+                // end. When we subsequently creating uploads using this method
+                // only the first upload will have to do scanning to find the
+                // offset.
+                auto subscan_res = co_await subscan_left(
+                  {*it}, range.base, deadline);
+                if (subscan_res.has_failure()) {
+                    co_return subscan_res.as_failure();
+                }
+                auto sz = it->get()->file_size() - subscan_res.value().filepos;
+                current_size += sz;
+                base_file_pos = sz;
+            } else {
+                auto sz = it->get()->file_size();
+                current_size += sz;
+            }
+            segments.push_back(*it);
+            if (current_size > range.max_size) {
+                // TODO: set limit on max_size
+                // We accumulated enough segments to create the upload. There're
+                // few cases:
+                // - The beginning and the end of the upload is inside the same
+                // segment. The 'segments' collection will have only one element
+                // if this is the case.
+                // - The beginning and the end are located in different
+                // segments. In both cases we need to find the finish line. The
+                // size calculation is affected by these two possibilities.
+                vlog(
+                  _ctxlog.debug,
+                  "Segment upload size overshoot by {}, current segment size "
+                  "{}",
+                  current_size - range.max_size,
+                  it->get()->file_size());
+                size_t truncate_after = 0;
+                if (segments.size() == 1) {
+                    // At this point it's guaranteed that 'base_index_entry'
+                    // contains value and the 'current_size' contains 'file_size
+                    // - base_index_entry->file_pos'. The expression below is
+                    // guaranteed to not underflow. The 'file_size - filepos' is
+                    // greater than 'range.max_size' because 'current_size >
+                    // 'range.max_size'.
+                    truncate_after = it->get()->file_size() - base_file_pos
+                                     - range.max_size;
+                } else {
+                    auto prev = current_size - it->get()->file_size();
+                    auto delta = current_size - range.max_size;
+                    truncate_after = prev + delta;
+                }
+                auto last_index_entry = it->get()->index().find_nearest(
+                  truncate_after);
+                if (
+                  last_index_entry.has_value()
+                  && model::prev_offset(last_index_entry->offset)
+                       > range.base) {
+                    vlog(
+                      _ctxlog.debug,
+                      "Updating offset range to {} - {}, {} bytes of the last "
+                      "segments are included",
+                      range.base,
+                      last_index_entry->offset,
+                      truncate_after);
+                    discovered_offset_range = inclusive_offset_range(
+                      range.base, model::prev_offset(last_index_entry->offset));
+                } else {
+                    vlog(
+                      _ctxlog.debug,
+                      "Updating offset range to {} - {} (end of segment)",
+                      range.base,
+                      it->get()->offsets().committed_offset);
+                    discovered_offset_range = inclusive_offset_range(
+                      range.base, it->get()->offsets().committed_offset);
+                }
+                break;
+            } else if (current_size > range.min_size) {
+                vlog(
+                  _ctxlog.debug,
+                  "Updating offset range to {} - {}",
+                  range.base,
+                  range.base,
+                  it->get()->offsets().committed_offset);
+                // We can include full segment to the list of uploaded segments
+                discovered_offset_range = inclusive_offset_range(
+                  range.base, it->get()->offsets().committed_offset);
+                continue;
+            }
+        }
+        if (current_size < range.min_size) {
+            co_return make_error_code(error_outcome::offset_not_found);
+        }
+
+        if (segments.empty()) {
+            vlog(_ctxlog.error, "Can't find log segments to lock");
+            co_return make_error_code(error_outcome::offset_not_found);
+        }
+
+        if (!discovered_offset_range.has_value()) {
+            vlog(_ctxlog.error, "Can't find enough segments to lock");
+            co_return make_error_code(error_outcome::offset_not_found);
+        }
+
+        co_return co_await compute_upload_parameters(
+          *discovered_offset_range, deadline);
     } catch (...) {
         if (ssx::is_shutdown_exception(std::current_exception())) {
             vlog(

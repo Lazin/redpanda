@@ -155,6 +155,16 @@ public:
         return _params.value();
     }
 
+    /// \brief Make new segment upload
+    ///
+    /// \note Make an upload that begins and ends at precise offsets.
+    /// \param part is a partition
+    /// \param range is an offset range to upload
+    /// \param read_buffer_size is a buffer size used to upload data
+    /// \param sg is a scheduling group used to upload the data
+    /// \param deadline is a deadline for the upload object to be created (not
+    ///                 for the actual upload to happen)
+    /// \return initialized segment_upload object
     static ss::future<result<std::unique_ptr<segment_upload>>>
     make_segment_upload(
       ss::lw_shared_ptr<cluster::partition> part,
@@ -163,6 +173,32 @@ public:
       ss::scheduling_group sg,
       model::timeout_clock::time_point deadline);
 
+    /// \brief Make new segment upload
+    ///
+    /// \note Make an upload that begins at certain offset and has certain size.
+    /// This method is supposed to be used when the new upload is started.
+    /// E.g. when we want to upload 1GiB segments we will use this code:
+    ///
+    /// \code
+    /// auto upl = co_await segment_upload::make_segment_upload(
+    ///                         _part,
+    ///                         size_limited_offset_range(last_offset, 1_GiB),
+    ///                         0x8000,
+    ///                         _sg,
+    ///                         10s);
+    /// \endcode
+    ///
+    /// Note that the precision of this method is limited by index sampling
+    /// rate. End of every upload created this way will be aligned with the
+    /// index.
+    ///
+    /// \param part is a partition
+    /// \param range is an offset range to upload
+    /// \param read_buffer_size is a buffer size used to upload data
+    /// \param sg is a scheduling group used to upload the data
+    /// \param deadline is a deadline for the upload object to be created (not
+    ///                 for the actual upload to happen)
+    /// \return initialized segment_upload object
     static ss::future<result<std::unique_ptr<segment_upload>>>
     make_segment_upload(
       ss::lw_shared_ptr<cluster::partition> part,
@@ -180,6 +216,11 @@ private:
     /// Initialize segment upload using offset range
     ss::future<result<void>> initialize(
       inclusive_offset_range offsets,
+      model::timeout_clock::time_point deadline);
+
+    /// Initialize segment upload using offset range
+    ss::future<result<void>> initialize(
+      size_limited_offset_range range,
       model::timeout_clock::time_point deadline);
 
     void throw_if_not_initialized(std::string_view caller) const;
@@ -216,6 +257,11 @@ private:
     /// Calculate upload size using segment indexes
     ss::future<result<cloud_upload_parameters>> compute_upload_parameters(
       inclusive_offset_range range, model::timeout_clock::time_point deadline);
+
+    /// Calculate upload size using segment indexes
+    ss::future<result<cloud_upload_parameters>> compute_upload_parameters(
+      size_limited_offset_range range,
+      model::timeout_clock::time_point deadline);
 
     // Scan te beginning of the segment range
     ss::future<result<subscan_res>> subscan_left(
