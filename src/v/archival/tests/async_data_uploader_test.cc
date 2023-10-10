@@ -190,6 +190,7 @@ public:
         std::vector<model::offset> last_offsets;
         std::vector<model::timestamp> timestamps;
         std::vector<model::record_batch_type> batch_types;
+        std::vector<size_t> batch_sizes;
     };
     /// Get start offset of every record batch in the partition
     log_map get_log_map() {
@@ -209,6 +210,7 @@ public:
                 _map.last_offsets.push_back(batch.header().last_offset());
                 _map.timestamps.push_back(batch.header().first_timestamp);
                 _map.batch_types.push_back(batch.header().type);
+                _map.batch_sizes.push_back(batch.size_bytes());
                 co_return ss::stop_iteration::no;
             }
             bool end_of_stream() const { return false; }
@@ -218,6 +220,105 @@ public:
         };
         rdr.consume(consumer(res), model::timeout_clock::now() + 1s).get();
         return res;
+    }
+
+    struct size_limited_upl_result {
+        iobuf payload;
+        inclusive_offset_range range;
+    };
+
+    /// Load arbitrary offset range using segment_upload class
+    std::optional<size_limited_upl_result>
+    read_offset_range(size_limited_offset_range range) {
+        vlog(
+          test_log.info,
+          "Query range: {}, max size {}, min size {}",
+          range.base,
+          range.min_size,
+          range.max_size);
+
+        auto partition = get_test_partition();
+        const auto& offsets = partition->log()->offsets();
+
+        vlog(
+          test_log.info,
+          "Partition offset range: {}-{}",
+          offsets.start_offset,
+          offsets.committed_offset);
+
+        for (const auto& s : get_partition_log()->segments()) {
+            vlog(
+              test_log.info,
+              "Segment {}, size {}, offsets {}",
+              s.get()->filename(),
+              s.get()->file_size(),
+              s.get()->offsets());
+        }
+
+        iobuf actual;
+        auto out_s = make_iobuf_ref_output_stream(actual);
+
+        auto upl_res = segment_upload::make_segment_upload(
+                         get_test_partition(),
+                         range,
+                         0x1000,
+                         ss::default_scheduling_group(),
+                         model::time_from_now(100ms))
+                         .get();
+
+        if (upl_res.has_failure()) {
+            vlog(
+              test_log.info,
+              "Failed to initialize segment_upload {}",
+              upl_res.error().message());
+            return std::nullopt;
+        }
+        auto actual_offset_range = upl_res.value()->get_meta().offsets;
+        auto first_data_offset = upl_res.value()->get_meta().first_real_offset;
+        auto first_data_timestamp
+          = upl_res.value()->get_meta().first_data_timestamp;
+        auto last_data_timestamp
+          = upl_res.value()->get_meta().last_data_timestamp;
+        auto meta_size_bytes = upl_res.value()->get_meta().size_bytes;
+
+        // Check metadata first
+        BOOST_REQUIRE_EQUAL(range.base, actual_offset_range.base);
+        // Actual last offset should overshoot a bit
+        BOOST_REQUIRE_LE(range.base, first_data_offset);
+        BOOST_REQUIRE_LT(first_data_timestamp, model::timestamp(10000));
+        BOOST_REQUIRE_LT(last_data_timestamp, model::timestamp(10000));
+        BOOST_REQUIRE_LE(first_data_timestamp, last_data_timestamp);
+
+        auto upl_size = upl_res.value()->get_size_bytes();
+        auto inp_s = std::move(*upl_res.value()).detach_stream().get();
+        auto closer = ss::defer([&] {
+            out_s.close().get();
+            inp_s.close().get();
+        });
+
+        ss::copy(inp_s, out_s).get();
+
+        vlog(
+          test_log.info,
+          "Actual size: {}, \n{}",
+          actual.size_bytes(),
+          actual.hexdump(1024));
+
+        BOOST_REQUIRE_GT(actual.size_bytes(), 0);
+
+        // Check size computation
+        vlog(
+          test_log.info,
+          "Computed size: {}, actual size: {}",
+          upl_size,
+          actual.size_bytes());
+        BOOST_REQUIRE_EQUAL(actual.size_bytes(), upl_size);
+        BOOST_REQUIRE_EQUAL(actual.size_bytes(), meta_size_bytes);
+
+        return size_limited_upl_result{
+          .payload = std::move(actual),
+          .range = actual_offset_range,
+        };
     }
 
     /// Load arbitrary offset range using segment_upload class
@@ -559,6 +660,7 @@ struct fuzz_test_case {
     model::timestamp expected_last_ts;
 
     bool upload_possible{false};
+    size_t expected_size{0};
 };
 
 template<class Fn>
@@ -607,12 +709,18 @@ inline void get_random_test_cases_impl(
             vlog(
               test_log.debug, "Test case #{} last timestamp can't be found", i);
         }
+        // compute size of the offset range
+        size_t range_size = 0;
+        for (size_t ix = ix_first; ix <= ix_second; ix++) {
+            range_size += map.batch_sizes.at(ix);
+        }
         fuzz_test_case tc{
           .base = map.base_offsets.at(ix_first),
           .last = map.last_offsets.at(ix_second),
           .expected_base_ts = ts_base.value_or(model::timestamp(-1)),
           .expected_last_ts = ts_last.value_or(model::timestamp(-1)),
           .upload_possible = ts_base.has_value() && ts_last.has_value(),
+          .expected_size = range_size,
         };
         vlog(
           test_log.debug,
@@ -741,7 +849,8 @@ FIXTURE_TEST(
 
         if (tc.upload_possible) {
             BOOST_REQUIRE(actual.has_value());
-            BOOST_REQUIRE(actual.value() == expected);
+            BOOST_REQUIRE_EQUAL(actual.value(), expected);
+            BOOST_REQUIRE_EQUAL(actual.value().size_bytes(), tc.expected_size);
         } else {
             BOOST_REQUIRE(actual.has_value() == false);
         }
@@ -819,10 +928,91 @@ FIXTURE_TEST(
         if (tc.upload_possible) {
             BOOST_REQUIRE(actual.has_value());
             BOOST_REQUIRE(actual.value() == expected);
+            BOOST_REQUIRE(actual.value().size_bytes() == tc.expected_size);
         } else {
             BOOST_REQUIRE(actual.has_value() == false);
         }
     }
+}
+
+FIXTURE_TEST(
+  test_segment_upload_random_size_limited_not_compacted,
+  async_data_uploader_fixture) {
+    vlog(
+      test_log.info,
+      "Seed used for the test: {}",
+      random_generators::internal::seed);
+    create_topic();
+    for (int i = 0; i < 10; i++) {
+        random_records_generator generator;
+        produce_data(100, generator);
+        ss::abort_source as;
+        get_test_partition()
+          ->archival_meta_stm()
+          ->cleanup_archive(
+            model::offset(0), 0, ss::lowres_clock::now() + 1s, as)
+          .get();
+        roll_segment();
+    }
+    auto log_map = get_log_map();
+    auto partition = get_test_partition();
+
+    std::vector<fuzz_test_case> cases;
+    get_random_test_cases(cases, log_map, 100);
+    get_random_single_batch_test_cases(cases, log_map, 100);
+    get_random_test_cases_that_start_on_config_batches(cases, log_map, 100);
+
+    const auto& offsets = partition->log()->offsets();
+    vlog(
+      test_log.info,
+      "Partition offset range: {}-{}",
+      offsets.start_offset,
+      offsets.committed_offset);
+
+    size_t progress = 0;
+    for (auto tc : cases) {
+        vlog(
+          test_log.info,
+          "Test case, offsets: {}-{}, timestamps: {}-{}, upload is possible: "
+          "{}",
+          tc.base,
+          tc.last,
+          tc.expected_base_ts,
+          tc.expected_last_ts,
+          tc.upload_possible);
+
+        auto range = size_limited_offset_range(tc.base, tc.expected_size);
+        auto actual = read_offset_range(range);
+
+        if (!actual.has_value()) {
+            vlog(
+              test_log.info,
+              "Test case ignored, offsets: {}-{}, timestamps: {}-{}, upload is "
+              "possible: "
+              "{}",
+              tc.base,
+              tc.last,
+              tc.expected_base_ts,
+              tc.expected_last_ts,
+              tc.upload_possible);
+            continue;
+        }
+
+        auto i_range = actual->range;
+        auto expected = load_log_segment_concat(i_range);
+
+        if (tc.upload_possible) {
+            BOOST_REQUIRE(actual.has_value());
+            BOOST_REQUIRE_EQUAL(actual.value().payload, expected);
+            BOOST_REQUIRE_EQUAL(
+              actual.value().payload.size_bytes(), expected.size_bytes());
+            progress++;
+        } else {
+            BOOST_REQUIRE(actual.has_value() == false);
+        }
+    }
+
+    BOOST_REQUIRE(progress > 0);
 }
 
 #endif

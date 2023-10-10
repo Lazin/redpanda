@@ -153,6 +153,8 @@ public:
       size_t filepos);
     std::optional<entry> find_nearest(model::offset);
     std::optional<entry> find_nearest(model::timestamp);
+    /// Find entry by file offset
+    std::optional<entry> find_nearest(size_t distance);
 
     /// Fallback timestamp search for if the recorded max ts appears to be
     /// invalid, e.g. too far in the future
