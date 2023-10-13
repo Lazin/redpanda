@@ -42,6 +42,10 @@
 
 #include <boost/test/tools/old/interface.hpp>
 
+#ifndef _NDEBUG
+// The following code contains randomized tests which may take too much time
+// on CI in the debug build.
+
 using namespace std::chrono_literals;
 using namespace archival;
 
@@ -820,3 +824,5 @@ FIXTURE_TEST(
         }
     }
 }
+
+#endif
