@@ -34,6 +34,7 @@ else()
       SOURCES 
         upload_housekeeping_service_test.cc
         scrubber_scheduler_test.cc
+        upload_scheduler_test.cc
       DEFINITIONS BOOST_TEST_DYN_LINK
       LIBRARIES 
         v::seastar_testing_main 
