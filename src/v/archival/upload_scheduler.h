@@ -19,8 +19,8 @@
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "ssx/semaphore.h"
-#include "utils/fragmented_vector.h"
-#include "utils/intrusive_list_helpers.h"
+#include "container/fragmented_vector.h"
+#include "container/intrusive_list_helpers.h"
 #include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
