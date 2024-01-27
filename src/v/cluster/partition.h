@@ -11,9 +11,9 @@
 
 #pragma once
 
+#include "archival/archival_metadata_stm.h"
 #include "archival/fwd.h"
 #include "cloud_storage/fwd.h"
-#include "cluster/archival_metadata_stm.h"
 #include "cluster/distributed_kv_stm.h"
 #include "cluster/fwd.h"
 #include "cluster/id_allocator_stm.h"
