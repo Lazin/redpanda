@@ -27,6 +27,24 @@ else()
     )
 
     rp_test(
+      FIXTURE_TEST
+      BINARY_NAME test_archival_service_smp
+      SOURCES 
+        archival_service_test.cc
+      DEFINITIONS BOOST_TEST_DYN_LINK
+      LIBRARIES 
+        v::seastar_testing_main 
+        v::application 
+        Boost::unit_test_framework 
+        v::cluster
+        v::storage_test_utils 
+        v::cloud_roles
+        v::http_test_utils
+      ARGS "-- -c 2"
+      LABELS archival
+    )
+
+    rp_test(
       UNIT_TEST
       BINARY_NAME test_archival_service
       SOURCES 
