@@ -55,7 +55,7 @@ public:
         std::optional<std::error_code> errc;
 
         bool operator==(const suspend_upload_arg& o) const noexcept {
-            return put_requests_used == o.put_requests_used
+            return ntp == o.ntp && put_requests_used == o.put_requests_used
                    && manifest_dirty == o.manifest_dirty
                    && uploaded_bytes == o.uploaded_bytes && errc == o.errc;
         }
@@ -104,14 +104,50 @@ public:
 
     /// Applies throttling or backoff to uploads
     ///
-    /// \param usage describes resources used by the partition
-    /// \returns true if throttling was applied
+    /// \param arg describes resources used by the partition
+    /// \returns error or the hint for the workflow
     virtual ss::future<result<next_upload_action_hint>>
-      maybe_suspend_upload(suspend_upload_arg) noexcept = 0;
+    maybe_suspend_upload(suspend_upload_arg arg) noexcept = 0;
 
-    // TODO: add suspend_housekeeping_arg
-    // TODO: add next_housekeeping_action_hint
-    // TODO: add maybe_suspend_housekeeping
+    struct suspend_housekeeping_arg {
+        model::ktp ntp;
+        size_t num_delete_requests_used{0};
+        std::optional<std::error_code> errc;
+
+        bool operator==(const suspend_housekeeping_arg& o) const noexcept {
+            return ntp == o.ntp
+                   && num_delete_requests_used == o.num_delete_requests_used
+                   && errc == o.errc;
+        }
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const suspend_housekeeping_arg& s) {
+            std::stringstream err;
+            if (s.errc.has_value()) {
+                err << s.errc.value();
+            } else {
+                err << "na";
+            }
+            fmt::print(
+              o,
+              "suspend_housekeeping_arg(ntp={}, delete_requests={}, errc={})",
+              s.ntp,
+              s.num_delete_requests_used,
+              err.str());
+            return o;
+        }
+    };
+
+    struct next_housekeeping_action_hint {
+        // TODO: add resource quota for the housekeeping
+    };
+
+    /// Applies throttling or backoff to the housekeeping
+    ///
+    /// \param arg describes resources used by the partition
+    /// \returns error or the hint for the workflow
+    virtual ss::future<result<next_housekeeping_action_hint>>
+    maybe_suspend_housekeeping(suspend_housekeeping_arg arg) noexcept = 0;
 };
 
 std::ostream&
