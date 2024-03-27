@@ -159,7 +159,7 @@ public:
       (suspend_upload_arg),
       (override, noexcept));
 
-    void expect_maybe_suspend(
+    void expect_maybe_suspend_upload(
       suspend_upload_arg expected_input,
       result<next_upload_action_hint> expected_output) {
         auto out = ss::make_ready_future<
@@ -170,12 +170,42 @@ public:
           .WillOnce(::testing::Return(std::move(out)));
     }
 
-    void expect_maybe_suspend(
+    void expect_maybe_suspend_upload(
       suspend_upload_arg expected_input, std::exception_ptr expected_output) {
         auto out = ss::make_exception_future<
           result<archiver_scheduler_api::next_upload_action_hint>>(
           expected_output);
         EXPECT_CALL(*this, maybe_suspend_upload(std::move(expected_input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(out)));
+    }
+
+    MOCK_METHOD(
+      ss::future<result<archiver_scheduler_api::next_housekeeping_action_hint>>,
+      maybe_suspend_housekeeping,
+      (suspend_housekeeping_arg),
+      (override, noexcept));
+
+    void expect_maybe_suspend_housekeeping(
+      suspend_housekeeping_arg expected_input,
+      result<next_housekeeping_action_hint> expected_output) {
+        auto out = ss::make_ready_future<
+          result<archiver_scheduler_api::next_housekeeping_action_hint>>(
+          expected_output);
+        EXPECT_CALL(
+          *this, maybe_suspend_housekeeping(std::move(expected_input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(out)));
+    }
+
+    void expect_maybe_suspend_housekeeping(
+      suspend_housekeeping_arg expected_input,
+      std::exception_ptr expected_output) {
+        auto out = ss::make_exception_future<
+          result<archiver_scheduler_api::next_housekeeping_action_hint>>(
+          expected_output);
+        EXPECT_CALL(
+          *this, maybe_suspend_housekeeping(std::move(expected_input)))
           .Times(1)
           .WillOnce(::testing::Return(std::move(out)));
     }
@@ -282,7 +312,7 @@ TEST(data_upload_workflow_test, test_immediate_shutdown) {
     // a shutdown event immediately.
     auto [wf, rm_api, op_api, cfg] = setup_test_suite();
 
-    rm_api->expect_maybe_suspend(
+    rm_api->expect_maybe_suspend_upload(
       suspend_request{
         .ntp = ntp,
         .manifest_dirty = true,
@@ -303,7 +333,7 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
         ::testing::InSequence seq;
 
         // Kick off workflow
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -311,7 +341,7 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
           next_action_hint{.type = next_action_type::segment_upload});
 
         // Triggered by last 'admit_uploads' call
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           expected_suspend_request(),
           make_error_code(error_outcome::shutting_down));
     }
@@ -363,7 +393,7 @@ TEST(data_upload_workflow_test, test_reconciliation_recoverable_errc) {
     // returns shutdown error.
     {
         // Starts the loop
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -371,7 +401,7 @@ TEST(data_upload_workflow_test, test_reconciliation_recoverable_errc) {
           next_action_hint{.type = next_action_type::segment_upload});
 
         // Triggered by the failed 'find_upload_candidates' call
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .errc = expected_error,
@@ -398,7 +428,7 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_exception) {
 
     // Set up maybe_suspend. The call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -427,7 +457,7 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_errc) {
 
     // Set up maybe_suspend. The call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -456,7 +486,7 @@ TEST(data_upload_workflow_test, test_reconciliation_fatal_error) {
 
     // Set up maybe_suspend. The call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -486,7 +516,7 @@ TEST(data_upload_workflow_test, test_upload_shutdown_exception) {
 
     // Set up maybe_suspend. The call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -532,7 +562,7 @@ TEST(data_upload_workflow_test, test_upload_shutdown_errc) {
 
     // Set up maybe_suspend. The only call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -577,7 +607,7 @@ TEST(data_upload_workflow_test, test_upload_fatal_error) {
 
     // Set up maybe_suspend. The only call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -625,7 +655,7 @@ TEST(data_upload_workflow_test, test_upload_recoverable_errc) {
     // Set up maybe_suspend to make two calls. First returns success
     // and the second returns shutdown.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -633,7 +663,7 @@ TEST(data_upload_workflow_test, test_upload_recoverable_errc) {
           next_action_hint{.type = next_action_type::segment_upload});
 
         // Triggered by failed 'schedule_uploads' call
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .errc = expected_error,
@@ -678,7 +708,7 @@ TEST(data_upload_workflow_test, test_admit_shutdown_exception) {
 
     // Set up maybe_suspend. The only call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -731,7 +761,7 @@ TEST(data_upload_workflow_test, test_admit_shutdown_errc) {
 
     // Set up maybe_suspend. The call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -783,7 +813,7 @@ TEST(data_upload_workflow_test, test_admit_fatal_error) {
 
     // Set up maybe_suspend. The only call returns success.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -838,7 +868,7 @@ TEST(data_upload_workflow_test, test_admit_recoverable_errc) {
     // Set up maybe_suspend. First call returns success, second call returns an
     // error.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -846,7 +876,7 @@ TEST(data_upload_workflow_test, test_admit_recoverable_errc) {
           next_action_hint{.type = next_action_type::segment_upload});
 
         // This one is called after 'admit_uploads' fails
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .errc = expected_error,
@@ -899,7 +929,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_cycle) {
     // Setup maybe_suspend. The first call triggers manifest upload.
     // The second call triggers shutdown of the workflow.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -907,7 +937,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_cycle) {
           next_action_hint{.type = next_action_type::manifest_upload});
 
         // called after 'upload_manifest' succeeds
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = false,
@@ -938,7 +968,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_exception) {
     // Setup maybe_suspend. The first call triggers manifest upload.
     // The second call triggers shutdown of the workflow.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -966,7 +996,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_errc) {
     // Setup maybe_suspend. The first call triggers manifest upload.
     // The second call triggers shutdown of the workflow.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -993,7 +1023,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_fatal_error) {
     // Setup maybe_suspend. The first call triggers manifest upload.
     // The second call triggers shutdown of the workflow.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -1022,7 +1052,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_recoverable_errc) {
     // Setup maybe_suspend. The first call triggers manifest upload.
     // The second call triggers shutdown of the workflow.
     {
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .manifest_dirty = true,
@@ -1030,7 +1060,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_recoverable_errc) {
           next_action_hint{.type = next_action_type::manifest_upload});
 
         // called after 'upload_manifest' returns error
-        rm_api->expect_maybe_suspend(
+        rm_api->expect_maybe_suspend_upload(
           {
             .ntp = ntp,
             .errc = error,
