@@ -654,7 +654,7 @@ public:
       , _term(term)
       , _rtc(_as)
       , _log(
-          archival_log, _rtc, ssx::sformat("{}-{}", ntp.to_ntp().path(), term))
+          archival_log, _rtc, ssx::sformat("{}-{}", _ntp.to_ntp().path(), term))
       , _local_segment_size(config::shard_local_cfg().log_segment_size.bind())
       , _target_segment_size(
           config::shard_local_cfg().cloud_storage_segment_size_target.bind())
@@ -677,14 +677,11 @@ public:
           config::shard_local_cfg()
             .cloud_storage_enable_compacted_topic_reupload.bind()) {}
 
-    // Default no-transition handler.
-    // template<class FSM, class Event>
-    // void no_transition(const Event&, FSM&, int) {}
-
     // Default exception handler.
     template<class FSM, class Event>
-    void exception_caught(const Event&, FSM&, std::exception& err) {
-        vassert(false, "Unexpected exception {}", err);
+    void exception_caught(const Event&, FSM& fsm, std::exception& err) {
+        vlog(_log.error, "Unexpected exception {}", err);
+        fsm.process_event(ev_fatal_error{.err = std::make_exception_ptr(err)});
     }
 
 private:
