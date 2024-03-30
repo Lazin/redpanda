@@ -163,9 +163,37 @@ public:
         operator<<(std::ostream& o, const manifest_upload_result& arg);
     };
 
+    // Metadata management
+
     /// Reupload manifest and replicate configuration batch
     virtual ss::future<result<manifest_upload_result>>
     upload_manifest(retry_chain_node&, manifest_upload_arg) noexcept = 0;
+
+    // Housekeeping functions
+
+    /// Controls retention applied to spillover region of the log (aka archive)
+    struct apply_archive_retention_arg {
+        model::ktp ntp;
+
+        // How many delete operations are allowed per round.
+        // This value should be higher for cloud storage providers that
+        // support plural delete.
+        size_t delete_op_quota{0};
+    };
+
+    /// Result of the archive retention
+    /// contains number of segments/manifests to GC
+    struct apply_archive_retention_result {
+        model::ktp ntp;
+
+        size_t archive_segments_removed{0};
+        size_t spillover_manifests_removed{0};
+    };
+
+    virtual ss::future<result<apply_archive_retention_result>>
+    apply_archive_retention(
+      retry_chain_node&, apply_archive_retention_arg) noexcept
+      = 0;
 };
 
 } // namespace archival

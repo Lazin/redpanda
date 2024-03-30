@@ -44,6 +44,9 @@ public:
     ss::future<> stop() override { co_return; }
 
 private:
+    ss::future<> run_bg_loop() {
+        co_return;
+    }
     model::ktp _ntp;
     model::term_id _id;
     ss::shared_ptr<archiver_operations_api> _operations;
