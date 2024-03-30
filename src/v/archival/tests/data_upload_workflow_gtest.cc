@@ -67,6 +67,12 @@ public:
       (retry_chain_node&, manifest_upload_arg),
       (override, noexcept));
 
+    MOCK_METHOD(
+      ss::future<result<apply_archive_retention_result>>,
+      apply_archive_retention,
+      (retry_chain_node&, apply_archive_retention_arg),
+      (override, noexcept));
+
     void expect_find_upload_candidates(
       find_upload_candidates_arg input,
       result<find_upload_candidates_result> output) {
@@ -141,6 +147,29 @@ public:
           = ss::make_exception_future<result<manifest_upload_result>>(
             std::move(output));
         EXPECT_CALL(*this, upload_manifest(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(failure)));
+    }
+
+    void expect_apply_archive_retention(
+      apply_archive_retention_arg input,
+      result<apply_archive_retention_result> output) {
+        auto success
+          = ss::make_ready_future<result<apply_archive_retention_result>>(
+            std::move(output));
+        EXPECT_CALL(
+          *this, apply_archive_retention(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(success)));
+    }
+
+    void expect_apply_archive_retention(
+      apply_archive_retention_arg input, std::exception_ptr output) {
+        auto failure
+          = ss::make_exception_future<result<apply_archive_retention_result>>(
+            std::move(output));
+        EXPECT_CALL(
+          *this, apply_archive_retention(testing::_, std::move(input)))
           .Times(1)
           .WillOnce(::testing::Return(std::move(failure)));
     }
