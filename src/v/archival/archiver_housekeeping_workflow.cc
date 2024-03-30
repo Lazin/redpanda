@@ -15,6 +15,7 @@
 #include "archival/archiver_workflow_api.h"
 #include "archival/logger.h"
 #include "archival/types.h"
+#include "base/outcome.h"
 #include "config/configuration.h"
 #include "model/fundamental.h"
 #include "ssx/future-util.h"
@@ -40,17 +41,84 @@ namespace archival {
 
 class archiver_housekeeping_workflow_api : public archiver_workflow_api {
 public:
-    ss::future<> start() override { co_return; }
-    ss::future<> stop() override { co_return; }
+    archiver_housekeeping_workflow_api(
+      model::ktp ntp,
+      model::term_id term,
+      ss::shared_ptr<archiver_operations_api> ops,
+      ss::shared_ptr<archiver_scheduler_api> sched)
+      : _ntp(std::move(ntp))
+      , _id(term)
+      , _operations(std::move(ops))
+      , _scheduler(std::move(sched))
+      , _rtc(_as)
+      , _log(
+          archival_log,
+          _rtc,
+          ssx::sformat("{}-{}", _ntp.to_ntp().path(), _id)) {}
+
+    ss::future<> start() override {
+        ssx::spawn_with_gate(_gate, [this] { return run_bg_loop(); });
+        co_return;
+    }
+
+    ss::future<> stop() override {
+        co_await _gate.close();
+        if (_fatal) {
+            std::rethrow_exception(_fatal);
+        }
+    }
 
 private:
     ss::future<> run_bg_loop() {
+        auto h = _gate.hold();
+        while (true) {
+            archiver_scheduler_api::suspend_housekeeping_arg suspend_req{
+              .ntp = _ntp,
+              .num_delete_requests_used = 0, // TODO: propagate value from GC
+            };
+            auto suspend_res = co_await _scheduler->maybe_suspend_housekeeping(
+              suspend_req);
+            if (
+              suspend_res.has_error()
+              && suspend_res.error() == error_outcome::shutting_down) {
+                // Graceful shutdown
+                vlog(_log.debug, "Shutting down housekeeping workflow");
+                co_return;
+            }
+            if (suspend_res.has_error()) {
+                vlog(
+                  _log.warn,
+                  "Shutting down housekeeping workflow due to error: {}",
+                  suspend_res.error());
+                co_return;
+            }
+            archiver_operations_api::apply_archive_retention_arg apply_arch_req{
+              .ntp = _ntp,
+              .delete_op_quota = 1000, // TODO: use value from the config
+            };
+            auto apply_arch_res = co_await _operations->apply_archive_retention(
+              _rtc, apply_arch_req);
+            if (apply_arch_res.has_error()) {
+                // Recoverable error
+                vlog(
+                  _log.warn,
+                  "Housekeeping error (apply archive retention): {}",
+                  apply_arch_res.error());
+                continue;
+            }
+            // TODO: add remaining housekeeping ops
+        }
         co_return;
     }
     model::ktp _ntp;
     model::term_id _id;
     ss::shared_ptr<archiver_operations_api> _operations;
     ss::shared_ptr<archiver_scheduler_api> _scheduler;
+    ss::abort_source _as;
+    retry_chain_node _rtc;
+    retry_chain_logger _log;
+    ss::gate _gate;
+    std::exception_ptr _fatal;
 };
 
 ss::shared_ptr<archiver_workflow_api> make_housekeeping_workflow(
