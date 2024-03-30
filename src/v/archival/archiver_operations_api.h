@@ -179,6 +179,12 @@ public:
         // This value should be higher for cloud storage providers that
         // support plural delete.
         size_t delete_op_quota{0};
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const apply_archive_retention_arg& a);
+
+        bool operator==(const apply_archive_retention_arg&) const noexcept
+          = default;
     };
 
     /// Result of the archive retention
@@ -188,6 +194,12 @@ public:
 
         size_t archive_segments_removed{0};
         size_t spillover_manifests_removed{0};
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const apply_archive_retention_result& a);
+
+        bool operator==(const apply_archive_retention_result&) const noexcept
+          = default;
     };
 
     virtual ss::future<result<apply_archive_retention_result>>
