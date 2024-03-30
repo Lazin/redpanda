@@ -10,8 +10,9 @@
 #include "archival/archiver_data_upload_workflow.h"
 #include "archival/archiver_operations_api.h"
 #include "archival/archiver_scheduler_api.h"
-#include "archival/tests/archiver_operations_api_mock.h"
 #include "archival/logger.h"
+#include "archival/tests/archiver_operations_api_mock.h"
+#include "archival/tests/archiver_scheduler_api_mock.h"
 #include "archival/types.h"
 #include "base/vlog.h"
 #include "bytes/iostream.h"
@@ -31,75 +32,6 @@
 #include <stdexcept>
 
 namespace archival {
-
-class archiver_scheduler_mock : public archiver_scheduler_api {
-public:
-    /// Applies throttling or backoff
-    ///
-    /// \param usage describes resources used by the partition
-    /// \param ntp is an partition that invokes the manager
-    /// \returns true if throttling was applied
-    MOCK_METHOD(
-      ss::future<result<archiver_scheduler_api::next_upload_action_hint>>,
-      maybe_suspend_upload,
-      (suspend_upload_arg),
-      (override, noexcept));
-
-    void expect_maybe_suspend_upload(
-      suspend_upload_arg expected_input,
-      result<next_upload_action_hint> expected_output) {
-        auto out = ss::make_ready_future<
-          result<archiver_scheduler_api::next_upload_action_hint>>(
-          expected_output);
-        EXPECT_CALL(*this, maybe_suspend_upload(std::move(expected_input)))
-          .Times(1)
-          .WillOnce(::testing::Return(std::move(out)));
-    }
-
-    void expect_maybe_suspend_upload(
-      suspend_upload_arg expected_input, std::exception_ptr expected_output) {
-        auto out = ss::make_exception_future<
-          result<archiver_scheduler_api::next_upload_action_hint>>(
-          expected_output);
-        EXPECT_CALL(*this, maybe_suspend_upload(std::move(expected_input)))
-          .Times(1)
-          .WillOnce(::testing::Return(std::move(out)));
-    }
-
-    MOCK_METHOD(
-      ss::future<result<archiver_scheduler_api::next_housekeeping_action_hint>>,
-      maybe_suspend_housekeeping,
-      (suspend_housekeeping_arg),
-      (override, noexcept));
-
-    void expect_maybe_suspend_housekeeping(
-      suspend_housekeeping_arg expected_input,
-      result<next_housekeeping_action_hint> expected_output) {
-        auto out = ss::make_ready_future<
-          result<archiver_scheduler_api::next_housekeeping_action_hint>>(
-          expected_output);
-        EXPECT_CALL(
-          *this, maybe_suspend_housekeeping(std::move(expected_input)))
-          .Times(1)
-          .WillOnce(::testing::Return(std::move(out)));
-    }
-
-    void expect_maybe_suspend_housekeeping(
-      suspend_housekeeping_arg expected_input,
-      std::exception_ptr expected_output) {
-        auto out = ss::make_exception_future<
-          result<archiver_scheduler_api::next_housekeeping_action_hint>>(
-          expected_output);
-        EXPECT_CALL(
-          *this, maybe_suspend_housekeeping(std::move(expected_input)))
-          .Times(1)
-          .WillOnce(::testing::Return(std::move(out)));
-    }
-};
-
-using next_action_hint = archiver_scheduler_api::next_upload_action_hint;
-using suspend_request = archiver_scheduler_api::suspend_upload_arg;
-using next_action_type = archiver_scheduler_api::next_upload_action_type;
 
 const model::ktp ntp(model::topic("panda-topic"), model::partition_id(137));
 const model::offset read_write_fence(137);
