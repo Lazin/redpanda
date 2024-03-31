@@ -63,6 +63,12 @@ public:
       (retry_chain_node&, apply_archive_retention_arg),
       (override, noexcept));
 
+    MOCK_METHOD(
+      ss::future<result<garbage_collect_archive_result>>,
+      garbage_collect_archive,
+      (retry_chain_node&, apply_archive_retention_result),
+      (override, noexcept));
+
     void expect_find_upload_candidates(
       find_upload_candidates_arg input,
       result<find_upload_candidates_result> output) {
@@ -160,6 +166,48 @@ public:
             std::move(output));
         EXPECT_CALL(
           *this, apply_archive_retention(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(failure)));
+    }
+
+    void expect_garbage_collect_archive(
+      apply_archive_retention_result input,
+      result<garbage_collect_archive_result> output) {
+        auto success
+          = ss::make_ready_future<result<garbage_collect_archive_result>>(
+            std::move(output));
+        EXPECT_CALL(
+          *this, garbage_collect_archive(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(success)));
+    }
+
+    void expect_garbage_collect_archive(
+      apply_archive_retention_result input, std::exception_ptr output) {
+        auto failure
+          = ss::make_exception_future<result<garbage_collect_archive_result>>(
+            std::move(output));
+        EXPECT_CALL(
+          *this, garbage_collect_archive(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(failure)));
+    }
+
+    void expect_garbage_collect_stm(
+      apply_stm_retention_result input, result<garbage_collect_result> output) {
+        auto success = ss::make_ready_future<result<garbage_collect_result>>(
+          std::move(output));
+        EXPECT_CALL(*this, garbage_collect(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(success)));
+    }
+
+    void expect_garbage_collect_stm(
+      apply_stm_retention_result input, std::exception_ptr output) {
+        auto failure
+          = ss::make_exception_future<result<garbage_collect_result>>(
+            std::move(output));
+        EXPECT_CALL(*this, garbage_collect(testing::_, std::move(input)))
           .Times(1)
           .WillOnce(::testing::Return(std::move(failure)));
     }

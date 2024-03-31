@@ -194,6 +194,8 @@ public:
 
         size_t archive_segments_removed{0};
         size_t spillover_manifests_removed{0};
+        // Read-write fence acquired by 'apply_archive_retention' call.
+        model::offset read_write_fence;
 
         friend std::ostream&
         operator<<(std::ostream& o, const apply_archive_retention_result& a);
@@ -205,6 +207,42 @@ public:
     virtual ss::future<result<apply_archive_retention_result>>
     apply_archive_retention(
       retry_chain_node&, apply_archive_retention_arg) noexcept
+      = 0;
+
+    struct garbage_collect_archive_result {
+        model::ktp ntp;
+
+        size_t num_delete_requests{0};
+        size_t num_failures{0};
+        bool manifest_dirty{false};
+        // Read-write fence acquired by 'garbage_collect_archive' call.
+        model::offset read_write_fence;
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const garbage_collect_archive_result& a) {
+            fmt::print(
+              o,
+              "garbage_collect_archive_result({}, {}, {}, {}, {})",
+              a.ntp,
+              a.num_delete_requests,
+              a.num_failures,
+              a.manifest_dirty,
+              a.read_write_fence);
+            return o;
+        }
+
+        bool operator==(const garbage_collect_archive_result&) const noexcept
+          = default;
+    };
+
+    /// Remove segments from the backlog and replicate the command that clears
+    /// the backlog.
+    /// The result contains read-write fence offset that can be used to
+    /// replicate next batch. It also contains number of 'delete' requests used
+    /// by the operation.
+    virtual ss::future<result<garbage_collect_archive_result>>
+    garbage_collect_archive(
+      retry_chain_node&, apply_archive_retention_result) noexcept
       = 0;
 };
 
