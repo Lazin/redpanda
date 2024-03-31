@@ -28,6 +28,19 @@ namespace archival {
 
 archiver_scheduler_api::~archiver_scheduler_api() = default;
 
+std::ostream& operator<<(
+  std::ostream& o, const archiver_scheduler_api::suspend_upload_arg& s) {
+    fmt::print(
+      o,
+      "suspend_request({}, {}, {}, {}, {})",
+      s.ntp,
+      s.manifest_dirty,
+      s.put_requests_used,
+      s.uploaded_bytes,
+      s.errc);
+    return o;
+}
+
 std::ostream&
 operator<<(std::ostream& o, archiver_scheduler_api::next_upload_action_type t) {
     switch (t) {
@@ -44,7 +57,44 @@ operator<<(std::ostream& o, archiver_scheduler_api::next_upload_action_type t) {
 
 std::ostream&
 operator<<(std::ostream& o, archiver_scheduler_api::next_upload_action_hint t) {
-    return o << "next_action_hint{" << t.type << "}";
+    fmt::print(o, "next_upload_action_hint({})", t.type);
+    return o;
+}
+
+std::ostream& operator<<(
+  std::ostream& o, const archiver_scheduler_api::suspend_housekeeping_arg& s) {
+    fmt::print(
+      o,
+      "suspend_housekeeping_arg(ntp={}, delete_requests={}, manifest_dirty={}, "
+      "errc={})",
+      s.ntp,
+      s.num_delete_requests_used,
+      s.manifest_dirty,
+      s.errc);
+    return o;
+}
+
+std::ostream& operator<<(
+  std::ostream& o, archiver_scheduler_api::next_housekeeping_action_type t) {
+    switch (t) {
+        using enum archiver_scheduler_api::next_housekeeping_action_type;
+    case stm_housekeeping:
+        return o << "stm_housekeeping";
+    case archive_housekeeping:
+        return o << "manifest_upload";
+    }
+    return o;
+}
+
+std::ostream& operator<<(
+  std::ostream& o,
+  archiver_scheduler_api::next_housekeeping_action_hint& hint) {
+    fmt::print(
+      o,
+      "next_housekeeping_action_hint({}, {})",
+      hint.type,
+      hint.requests_quota);
+    return o;
 }
 
 } // namespace archival

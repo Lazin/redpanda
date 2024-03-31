@@ -54,35 +54,7 @@ public:
         // Set if error occurred (other fields are ignored in this case)
         std::optional<std::error_code> errc;
 
-        bool operator==(const suspend_upload_arg& o) const noexcept {
-            return ntp == o.ntp && put_requests_used == o.put_requests_used
-                   && manifest_dirty == o.manifest_dirty
-                   && uploaded_bytes == o.uploaded_bytes && errc == o.errc;
-        }
-        friend std::ostream&
-        operator<<(std::ostream& o, const suspend_upload_arg& s) {
-            std::stringstream dirty;
-            if (s.manifest_dirty.has_value()) {
-                dirty << s.manifest_dirty.value();
-            } else {
-                dirty << "na";
-            }
-            std::stringstream errc;
-            if (s.errc.has_value()) {
-                errc << s.errc.value();
-            } else {
-                errc << "na";
-            }
-            fmt::print(
-              o,
-              "suspend_request({}, {}, {}, {}, {})",
-              s.ntp,
-              dirty.str(),
-              s.put_requests_used,
-              s.uploaded_bytes,
-              errc.str());
-            return o;
-        }
+        bool operator==(const suspend_upload_arg& o) const noexcept = default;
     };
 
     enum class next_upload_action_type {
@@ -112,34 +84,26 @@ public:
     struct suspend_housekeeping_arg {
         model::ktp ntp;
         size_t num_delete_requests_used{0};
+        std::optional<bool> manifest_dirty;
         std::optional<std::error_code> errc;
 
-        bool operator==(const suspend_housekeeping_arg& o) const noexcept {
-            return ntp == o.ntp
-                   && num_delete_requests_used == o.num_delete_requests_used
-                   && errc == o.errc;
-        }
+        bool operator==(const suspend_housekeeping_arg& o) const noexcept
+          = default;
+    };
 
-        friend std::ostream&
-        operator<<(std::ostream& o, const suspend_housekeeping_arg& s) {
-            std::stringstream err;
-            if (s.errc.has_value()) {
-                err << s.errc.value();
-            } else {
-                err << "na";
-            }
-            fmt::print(
-              o,
-              "suspend_housekeeping_arg(ntp={}, delete_requests={}, errc={})",
-              s.ntp,
-              s.num_delete_requests_used,
-              err.str());
-            return o;
-        }
+    // Type of the housekeeping job that should be performed next
+    enum class next_housekeeping_action_type {
+        stm_housekeeping,
+        archive_housekeeping,
     };
 
     struct next_housekeeping_action_hint {
-        // TODO: add resource quota for the housekeeping
+        next_housekeeping_action_type type{
+          next_housekeeping_action_type::stm_housekeeping};
+        size_t requests_quota{0};
+
+        bool operator==(const next_housekeeping_action_hint&) const noexcept
+          = default;
     };
 
     /// Applies throttling or backoff to the housekeeping
@@ -150,10 +114,22 @@ public:
     maybe_suspend_housekeeping(suspend_housekeeping_arg arg) noexcept = 0;
 };
 
+std::ostream& operator<<(
+  std::ostream& o, const archiver_scheduler_api::suspend_upload_arg& s);
+
 std::ostream&
 operator<<(std::ostream& o, archiver_scheduler_api::next_upload_action_type t);
 
 std::ostream&
 operator<<(std::ostream& o, archiver_scheduler_api::next_upload_action_hint t);
+
+std::ostream& operator<<(
+  std::ostream& o, const archiver_scheduler_api::suspend_housekeeping_arg& s);
+
+std::ostream& operator<<(
+  std::ostream& o, archiver_scheduler_api::next_housekeeping_action_type t);
+
+std::ostream& operator<<(
+  std::ostream& o, archiver_scheduler_api::next_housekeeping_action_type t);
 
 } // namespace archival
