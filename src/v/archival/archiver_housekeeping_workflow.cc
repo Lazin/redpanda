@@ -72,10 +72,11 @@ public:
 
 private:
     ss::future<> run_bg_loop_until_shutdown() {
-        while (true) {
+        auto h = _gate.hold();
         size_t prev_num_delete_requests = 0;
         std::optional<std::error_code> prev_errc;
-        while (!_as.abort_requested()) {
+        std::optional<bool> manifest_dirty;
+        while (true) {
             // The loop is repeating the following steps:
             // - if archiver_housekeeping was started by the scheduler
             //   - Apply retention to spillover region
@@ -118,20 +119,20 @@ private:
                 co_return;
             }
             switch (suspend_res.value().type) {
-                auto res = co_await perform_stm_housekeeping(
+                using enum archiver_scheduler_api::
                   next_housekeeping_action_type;
             case stm_housekeeping: {
-                auto res = co_await perform_archive_housekeeping(
+                auto res = co_await perform_stm_housekeeping(
                   suspend_res.value().requests_quota);
                 if (res.has_error()) {
                     auto errc = res.error();
                     if (
+                      errc == error_outcome::shutting_down
+                      || errc == cloud_storage::error_outcome::shutting_down) {
+                        // Shutting down gracefully
                         vlog(
                           _log.debug,
                           "Shutting down STM housekeeping operation");
-                      || errc == cloud_storage::error_outcome::shutting_down) {
-                        // Shutting down gracefully
-                        vlog(_log.debug, "Shutting down housekeeping workflow");
                         co_return;
                     }
                     // Otherwise the errc is a recoverable error
@@ -146,9 +147,30 @@ private:
                     manifest_dirty = true;
                 }
             } break;
-            case archive_housekeeping:
-                vassert(false, "Not implemented");
-                break;
+            case archive_housekeeping: {
+                auto res = co_await perform_archive_housekeeping(
+                  suspend_res.value().requests_quota);
+                if (res.has_error()) {
+                    auto errc = res.error();
+                    if (
+                      errc == error_outcome::shutting_down
+                      || errc == cloud_storage::error_outcome::shutting_down) {
+                        // Shutting down gracefully
+                        vlog(
+                          _log.debug,
+                          "Shutting down archive housekeeping operation");
+                        co_return;
+                    }
+                    prev_errc = errc;
+                    prev_num_delete_requests = 0;
+                    manifest_dirty = false;
+                    continue;
+                } else {
+                    prev_errc = {};
+                    prev_num_delete_requests = res.value().quota_used;
+                    manifest_dirty = true;
+                }
+            } break;
             }
         }
         co_return;
@@ -199,6 +221,48 @@ private:
               });
             co_return archive_housekeeping_result{
               .quota_used = arch_gc_res.value().num_delete_requests};
+        } catch (...) {
+            _fatal = std::current_exception();
+            co_return error_outcome::shutting_down;
+        }
+    }
+
+    struct stm_housekeeping_result {
+        size_t quota_used{0};
+    };
+
+    ss::future<result<stm_housekeeping_result>>
+    perform_stm_housekeeping(size_t request_quota) {
+        vlog(
+          _log.debug,
+          "STM housekeeping started, request_quota={}",
+          request_quota);
+        try {
+            // Apply retention to manifest
+            archiver_operations_api::apply_stm_retention_arg apply_stm_req{
+              .ntp = _ntp,
+              .delete_op_quota = request_quota,
+            };
+            auto apply_stm_res = co_await _operations->apply_stm_retention(
+              _rtc, apply_stm_req);
+            if (apply_stm_res.has_error()) {
+                vlog(
+                  _log.warn,
+                  "Housekeeping error (apply STM retention): {}",
+                  apply_stm_res.error());
+                co_return apply_stm_res.error();
+            }
+
+            // Run GC
+            auto gc_res = co_await _operations->garbage_collect(
+              _rtc, apply_stm_res.value());
+            if (gc_res.has_error()) {
+                vlog(
+                  _log.warn, "Housekeeping error (STM GC): {}", gc_res.error());
+                co_return gc_res.error();
+            }
+            co_return archive_housekeeping_result{
+              .quota_used = gc_res.value().num_delete_requests};
         } catch (...) {
             _fatal = std::current_exception();
             co_return error_outcome::shutting_down;
