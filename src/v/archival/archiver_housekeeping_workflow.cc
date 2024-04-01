@@ -40,6 +40,74 @@
 
 namespace archival {
 
+/* Archival housekeeping workflow is implemented as an
+implicit FSM. The code is running a background fiber which
+is controlled by the gate/abort_source.
+
+The FSM diagram is presented below:
+                 ┌────────────┐
+      ┌──────────┤   stm GC   ├───┐
+      │ fatal err└────────────┘   │
+      | or shutdown    ▲          |
+      |                |          |
+      |          ┌─────┴──────┐   |
+      ├──────────┤ arch. GC   ├───┤
+      │ fatal err└────────────┘   │
+      │ or shutdown    ▲  success │
+      │                │          │
+      │          ┌─────┴──────┐   │
+      ├──────────┤ arch ret.  ├───┤
+      │          └────────────┘   │
+      │                ▲    error │
+      ▼                │          │
+┌───────────┐    ┌─────┴──────┐   │   ┌───────────┐
+│ terminal  │◄───┤ suspended  │◄──┼───┤ initial   │
+└───────────┘    └─────┬──────┘   │   └───────────┘
+      ▲                │          │
+      │                ▼    error │
+      │          ┌────────────┐   │
+      ├──────────┤ stm ret.   ├───┤
+      │          └─────┬──────┘   │
+      │                │          │
+      │ fatal error    ▼  success │
+      │ shutdown ┌────────────┐   │
+      └──────────┤ stm GC     ├───┘
+                 └────────────┘
+
+The FSM starts by transitioning into 'suspended' state. In this
+state it invokes 'maybe_suspend_housekeeping' method of the scheduler.
+When the method returns either archive housekeeping or STM housekeeping
+is performed (based on the result of the suspend call). When the housekeeping
+is done the FSM transitions to the 'suspended' state on success or to the
+'terminal' state in case of fatal error or shutdown.
+
+The decision to perform archive housekeeping vs the STM housekeeping is made
+based on the state of the manifest. We can do STM housekeeping only if the
+archive is empty. Even if we're performing archive housekeeping we still have
+to perform STM GC to remove replaced segments, otherwise they will pile  up.
+
+The STM housekeeping has two steps:
+- STM retention is calculating the backlog and replicates the STM command
+  that moves the 'start_offset' field of the manifest forward.
+- STM GC removes segments from the retention backlog (replaced segments and
+  segment below the 'start_offset') from the manifest and replicates STM 'clean'
+  command that removes replaced segments from the manifest.
+
+The archive housekeeping has three steps:
+- archive retention is calculating the backlog and replicates the STM command
+  that moves the 'archive_start_offset' field of the manifest forward.
+- archive GC deletes spillover manifests and segments below the
+  'archive_start_offset' offset and replicates the command that moves
+  'archive_clean_offset' field forward.
+- STM GC removes replaced segments from the manifest and replicates STM 'clean'
+  command that removes replaced segments from the manifest.
+
+Note that every housekeeping run uses certain number of requests. This number is
+propagated to the 'maybe_suspend_housekeeping' call so the scheduler would know
+how many resources the housekeeping have used. This will allow it to throttle
+or prioritize different partitions based on usage.
+*/
+
 class archiver_housekeeping_workflow_api : public archiver_workflow_api {
 public:
     archiver_housekeeping_workflow_api(
@@ -65,17 +133,19 @@ public:
 
     ss::future<> stop() override {
         co_await _gate.close();
-        if (_fatal) {
+        if (_fatal && !ssx::is_shutdown_exception(_fatal)) {
+            vlog(_log.error, "Fatal error {}", _fatal);
             std::rethrow_exception(_fatal);
         }
     }
 
 private:
     ss::future<> run_bg_loop_until_shutdown() {
-        while (true) {
+        auto h = _gate.hold();
         size_t prev_num_delete_requests = 0;
         std::optional<std::error_code> prev_errc;
-        while (!_as.abort_requested()) {
+        std::optional<bool> manifest_dirty;
+        while (true) {
             // The loop is repeating the following steps:
             // - if archiver_housekeeping was started by the scheduler
             //   - Apply retention to spillover region
@@ -101,9 +171,9 @@ private:
               .errc = prev_errc,
             };
             prev_num_delete_requests = 0;
-            auto suspend_res = co_await _scheduler->maybe_suspend_housekeeping(
             manifest_dirty = std::nullopt;
             prev_errc = {};
+            auto suspend_res = co_await _scheduler->maybe_suspend_housekeeping(
               suspend_req);
             if (
               suspend_res.has_error()
@@ -120,49 +190,100 @@ private:
                 co_return;
             }
             switch (suspend_res.value().type) {
-                auto res = co_await perform_stm_housekeeping(
+                using enum archiver_scheduler_api::
                   next_housekeeping_action_type;
             case stm_housekeeping: {
-                auto res = co_await perform_archive_housekeeping(
+                auto res = co_await perform_stm_housekeeping(
                   suspend_res.value().requests_quota);
-                if (res.has_error()) {
-                    auto errc = res.error();
+                if (res.maybe_error) {
+                    auto errc = res.maybe_error;
+                    vlog(_log.debug, "STM housekeeping error {}", errc);
                     if (
-                        vlog(
-                          _log.debug,
-                          "Shutting down STM housekeeping operation");
+                      errc == error_outcome::shutting_down
                       || errc == cloud_storage::error_outcome::shutting_down) {
                         // Shutting down gracefully
-                        vlog(_log.debug, "Shutting down housekeeping workflow");
+                        vlog(_log.debug, "Shutting down STM housekeeping loop");
+                        co_return;
+                    }
+                    if (_fatal) {
+                        // Fatal error
+                        vlog(
+                          _log.error,
+                          "Shutting down STM housekeeping loop due to "
+                          "fatal error: {}",
+                          _fatal);
                         co_return;
                     }
                     // Otherwise the errc is a recoverable error
                     // cycle back to the scheduler
                     prev_errc = errc;
-                    prev_num_delete_requests = 0;
-                    manifest_dirty = false;
+                    prev_num_delete_requests = res.quota_used;
+                    // Manifest could still be dirty if we happened to
+                    // replicate something
+                    manifest_dirty = res.manifest_dirty;
                     continue;
                 } else {
                     prev_errc = {};
-                    prev_num_delete_requests = res.value().quota_used;
-                    manifest_dirty = true;
+                    prev_num_delete_requests = res.quota_used;
+                    // Here the manifest could be not dirty if the
+                    // housekeeping didn't find anything to upload
+                    manifest_dirty = res.manifest_dirty;
                 }
             } break;
-            case archive_housekeeping:
-                vassert(false, "Not implemented");
-                break;
+            case archive_housekeeping: {
+                auto res = co_await perform_archive_housekeeping(
+                  suspend_res.value().requests_quota);
+                if (res.maybe_error) {
+                    auto errc = res.maybe_error;
+                    vlog(_log.debug, "Archive housekeeping error {}", errc);
+                    if (
+                      errc == error_outcome::shutting_down
+                      || errc == cloud_storage::error_outcome::shutting_down) {
+                        // Shutting down gracefully
+                        vlog(
+                          _log.debug,
+                          "Shutting down archive housekeeping loop gracefully");
+                        co_return;
+                    }
+                    if (_fatal) {
+                        // Fatal error
+                        vlog(
+                          _log.error,
+                          "Shutting down archive housekeeping loop due to "
+                          "fatal error: {}",
+                          _fatal);
+                        co_return;
+                    }
+                    prev_errc = errc;
+                    prev_num_delete_requests = res.quota_used;
+                    manifest_dirty = res.manifest_dirty;
+                    continue;
+                } else {
+                    prev_errc = {};
+                    prev_num_delete_requests = res.quota_used;
+                    manifest_dirty = res.manifest_dirty;
+                }
+            } break;
             }
         }
         co_return;
     }
 
-    struct archive_housekeeping_result {
+    struct housekeeping_result {
+        // Indicates how many operations out of request quota are used.
         size_t quota_used{0};
+        // Set to true if the manifest was updated. Could be set to true
+        // even in case of error (if GC failed but retention was applied
+        // successfully)
+        bool manifest_dirty;
+        // Indicates an error
+        std::error_code maybe_error;
     };
 
     // Apply retention and GC to the spillover region of the log
-    ss::future<result<archive_housekeeping_result>>
+    ss::future<housekeeping_result>
     perform_archive_housekeeping(size_t request_quota) noexcept {
+        housekeeping_result result{};
         try {
             // Apply retention
             archiver_operations_api::apply_archive_retention_arg apply_arch_req{
@@ -176,8 +297,18 @@ private:
                   _log.warn,
                   "Housekeeping error (apply archive retention): {}",
                   apply_arch_res.error());
-                co_return apply_arch_res.error();
+                result.maybe_error = apply_arch_res.error();
+                co_return result;
             }
+            // The state of the manifest could change at this point.
+            result.manifest_dirty
+              = apply_arch_res.value().archive_segments_removed > 0;
+
+            // Early exit if no work is done
+            if (apply_arch_res.value().archive_segments_removed == 0) {
+                co_return result;
+            }
+
             // Run archive GC
             auto arch_gc_res = co_await _operations->garbage_collect_archive(
               _rtc, apply_arch_res.value());
@@ -186,8 +317,13 @@ private:
                   _log.warn,
                   "Housekeeping error (archive GC): {}",
                   arch_gc_res.error());
-                co_return arch_gc_res.error();
+                result.maybe_error = arch_gc_res.error();
+                co_return result;
             }
+            // If we got here the manifest is already dirty so we can ignore
+            // manifest_dirty field of the result.
+            result.quota_used = arch_gc_res.value().num_delete_requests;
+
             // Run STM GC to remove replaced segments.
             // Without this step replaced segments will accumulate in the
             // manifest. We will run out of memory eventually.
@@ -199,17 +335,68 @@ private:
                 = arch_gc_res.value().num_replaced_segments_to_remove,
                 .read_write_fence = arch_gc_res.value().read_write_fence,
               });
+
             if (gc_res.has_error()) {
                 vlog(
                   _log.warn, "Housekeeping error (STM GC): {}", gc_res.error());
-                co_return gc_res.error();
+                result.maybe_error = gc_res.error();
+                co_return result;
             }
-            co_return archive_housekeeping_result{
-              .quota_used = arch_gc_res.value().num_delete_requests};
+            // The remaining fields of the gc_res can be ignored at this point.
+            result.quota_used += gc_res.value().num_delete_requests;
         } catch (...) {
             _fatal = std::current_exception();
-            co_return error_outcome::shutting_down;
+            if (ssx::is_shutdown_exception(_fatal)) {
+                result.maybe_error = error_outcome::shutting_down;
+            }
+            result.maybe_error = error_outcome::unexpected_failure;
         }
+        co_return result;
+    }
+
+    ss::future<housekeeping_result>
+    perform_stm_housekeeping(size_t request_quota) {
+        housekeeping_result result{};
+        vlog(
+          _log.debug,
+          "STM housekeeping started, request_quota={}",
+          request_quota);
+        try {
+            // Apply retention to manifest
+            archiver_operations_api::apply_stm_retention_arg apply_stm_req{
+              .ntp = _ntp,
+              .delete_op_quota = request_quota,
+            };
+            auto apply_stm_res = co_await _operations->apply_stm_retention(
+              _rtc, apply_stm_req);
+            if (apply_stm_res.has_error()) {
+                vlog(
+                  _log.warn,
+                  "Housekeeping error (apply STM retention): {}",
+                  apply_stm_res.error());
+                result.maybe_error = apply_stm_res.error();
+                co_return result;
+            }
+            result.manifest_dirty = apply_stm_res.value().segments_removed > 0;
+
+            // Run GC
+            auto gc_res = co_await _operations->garbage_collect(
+              _rtc, apply_stm_res.value());
+            if (gc_res.has_error()) {
+                vlog(
+                  _log.warn, "Housekeeping error (STM GC): {}", gc_res.error());
+                result.maybe_error = gc_res.error();
+                co_return result;
+            }
+            result.quota_used = gc_res.value().num_delete_requests;
+        } catch (...) {
+            _fatal = std::current_exception();
+            if (ssx::is_shutdown_exception(_fatal)) {
+                result.maybe_error = error_outcome::shutting_down;
+            }
+            result.maybe_error = error_outcome::unexpected_failure;
+        }
+        co_return result;
     }
 
     model::ktp _ntp;
@@ -232,5 +419,3 @@ ss::shared_ptr<archiver_workflow_api> make_housekeeping_workflow(
       ntp, id, api, quota);
 }
 } // namespace archival
-        vlog(_log.info, "NEEDLE5");
-        co_return result;
