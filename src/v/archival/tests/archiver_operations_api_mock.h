@@ -64,9 +64,21 @@ public:
       (override, noexcept));
 
     MOCK_METHOD(
-      ss::future<result<garbage_collect_archive_result>>,
+      ss::future<result<garbage_collect_result>>,
       garbage_collect_archive,
       (retry_chain_node&, apply_archive_retention_result),
+      (override, noexcept));
+
+    MOCK_METHOD(
+      ss::future<result<apply_stm_retention_result>>,
+      apply_stm_retention,
+      (retry_chain_node&, apply_stm_retention_arg),
+      (override, noexcept));
+
+    MOCK_METHOD(
+      ss::future<result<garbage_collect_result>>,
+      garbage_collect,
+      (retry_chain_node&, apply_stm_retention_result),
       (override, noexcept));
 
     void expect_find_upload_candidates(
@@ -170,12 +182,32 @@ public:
           .WillOnce(::testing::Return(std::move(failure)));
     }
 
+    void expect_apply_stm_retention(
+      apply_stm_retention_arg input,
+      result<apply_stm_retention_result> output) {
+        auto success
+          = ss::make_ready_future<result<apply_stm_retention_result>>(
+            std::move(output));
+        EXPECT_CALL(*this, apply_stm_retention(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(success)));
+    }
+
+    void expect_apply_stm_retention(
+      apply_stm_retention_arg input, std::exception_ptr output) {
+        auto failure
+          = ss::make_exception_future<result<apply_stm_retention_result>>(
+            std::move(output));
+        EXPECT_CALL(*this, apply_stm_retention(testing::_, std::move(input)))
+          .Times(1)
+          .WillOnce(::testing::Return(std::move(failure)));
+    }
+
     void expect_garbage_collect_archive(
       apply_archive_retention_result input,
-      result<garbage_collect_archive_result> output) {
-        auto success
-          = ss::make_ready_future<result<garbage_collect_archive_result>>(
-            std::move(output));
+      result<garbage_collect_result> output) {
+        auto success = ss::make_ready_future<result<garbage_collect_result>>(
+          std::move(output));
         EXPECT_CALL(
           *this, garbage_collect_archive(testing::_, std::move(input)))
           .Times(1)
@@ -185,7 +217,7 @@ public:
     void expect_garbage_collect_archive(
       apply_archive_retention_result input, std::exception_ptr output) {
         auto failure
-          = ss::make_exception_future<result<garbage_collect_archive_result>>(
+          = ss::make_exception_future<result<garbage_collect_result>>(
             std::move(output));
         EXPECT_CALL(
           *this, garbage_collect_archive(testing::_, std::move(input)))
@@ -227,5 +259,15 @@ using manifest_upload_arg
   = archival::archiver_operations_api::manifest_upload_arg;
 using manifest_upload_result
   = archival::archiver_operations_api::manifest_upload_result;
+using apply_archive_retention_arg
+  = archival::archiver_operations_api::apply_archive_retention_arg;
+using apply_archive_retention_result
+  = archival::archiver_operations_api::apply_archive_retention_result;
+using apply_stm_retention_arg
+  = archival::archiver_operations_api::apply_stm_retention_arg;
+using apply_stm_retention_result
+  = archival::archiver_operations_api::apply_stm_retention_result;
+using garbage_collect_result
+  = archival::archiver_operations_api::garbage_collect_result;
 
 } // namespace archival

@@ -209,30 +209,29 @@ public:
       retry_chain_node&, apply_archive_retention_arg) noexcept
       = 0;
 
-    struct garbage_collect_archive_result {
+    enum class gc_type {
+        stm,
+        archive,
+    };
+    struct garbage_collect_result {
         model::ktp ntp;
+        gc_type type;
 
         size_t num_delete_requests{0};
         size_t num_failures{0};
         bool manifest_dirty{false};
+
+        // Used by archive GC to communicate expected amount of work that normal
+        // GC has to do.
+        size_t num_replaced_segments_to_remove;
+
         // Read-write fence acquired by 'garbage_collect_archive' call.
         model::offset read_write_fence;
 
         friend std::ostream&
-        operator<<(std::ostream& o, const garbage_collect_archive_result& a) {
-            fmt::print(
-              o,
-              "garbage_collect_archive_result({}, {}, {}, {}, {})",
-              a.ntp,
-              a.num_delete_requests,
-              a.num_failures,
-              a.manifest_dirty,
-              a.read_write_fence);
-            return o;
-        }
+        operator<<(std::ostream& o, const garbage_collect_result& a);
 
-        bool operator==(const garbage_collect_archive_result&) const noexcept
-          = default;
+        bool operator==(const garbage_collect_result&) const noexcept = default;
     };
 
     /// Remove segments from the backlog and replicate the command that clears
@@ -240,10 +239,52 @@ public:
     /// The result contains read-write fence offset that can be used to
     /// replicate next batch. It also contains number of 'delete' requests used
     /// by the operation.
-    virtual ss::future<result<garbage_collect_archive_result>>
-    garbage_collect_archive(
+    virtual ss::future<result<garbage_collect_result>> garbage_collect_archive(
       retry_chain_node&, apply_archive_retention_result) noexcept
       = 0;
+
+    /// Controls retention applied to STM region of the log
+    struct apply_stm_retention_arg {
+        model::ktp ntp;
+
+        // How many delete operations are allowed per round.
+        // This value should be higher for cloud storage providers that
+        // support plural delete.
+        size_t delete_op_quota{0};
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const apply_stm_retention_arg& a);
+
+        bool operator==(const apply_stm_retention_arg&) const noexcept
+          = default;
+    };
+
+    /// Result of the STM region retention
+    struct apply_stm_retention_result {
+        model::ktp ntp;
+        size_t segments_removed{0};
+
+        model::offset read_write_fence;
+
+        friend std::ostream&
+        operator<<(std::ostream& o, const apply_stm_retention_result& a);
+
+        bool operator==(const apply_stm_retention_result&) const noexcept
+          = default;
+    };
+
+    /// Apply retention to the region of the log managed by the STM
+    virtual ss::future<result<apply_stm_retention_result>>
+    apply_stm_retention(retry_chain_node&, apply_stm_retention_arg) noexcept
+      = 0;
+
+    /// Remove segments from the backlog and replicate the command that clears
+    /// the backlog.
+    /// The result contains read-write fence offset that can be used to
+    /// replicate next batch. It also contains number of 'delete' requests used
+    /// by the operation.
+    virtual ss::future<result<garbage_collect_result>>
+    garbage_collect(retry_chain_node&, apply_stm_retention_result) noexcept = 0;
 };
 
 } // namespace archival
