@@ -40,6 +40,74 @@
 
 namespace archival {
 
+/* Archival housekeeping workflow is implemented as an
+implicit FSM. The code is running a background fiber which
+is controlled by the gate/abort_source.
+
+The FSM diagram is presented below:
+                 ┌────────────┐
+      ┌──────────┤   stm GC   ├───┐
+      │ fatal err└────────────┘   │
+      | or shutdown    ▲          |
+      |                |          |
+      |          ┌─────┴──────┐   |
+      ┌──────────┤ arch. GC   ├───┐
+      │ fatal err└────────────┘   │
+      │ or shutdown    ▲  success │
+      │                │          │
+      │          ┌─────┴──────┐   │
+      ├──────────┤ arch ret.  ├───┤
+      │          └────────────┘   │
+      │                ▲    error │
+      ▼                │          │
+┌───────────┐    ┌─────┴──────┐   │   ┌───────────┐
+│ terminal  │◄───┤ suspended  │◄──┼───┤ initial   │
+└───────────┘    └─────┬──────┘   │   └───────────┘
+      ▲                │          │
+      │                ▼    error │
+      │          ┌────────────┐   │
+      ├──────────┤ stm ret.   ├───┤
+      │          └─────┬──────┘   │
+      │                │          │
+      │ fatal error    ▼  success │
+      │ shutdown ┌────────────┐   │
+      └──────────┤ stm GC     ├───┘
+                 └────────────┘
+
+The FSM starts by transitioning into 'suspended' state. In this
+state it invokes 'maybe_suspend_housekeeping' method of the scheduler.
+When the method returns either archive housekeeping or STM housekeeping
+is performed (based on the result of the suspend call). When the housekeeping
+is done the FSM transitions to the 'suspended' state on success or to the
+'terminal' state in case of fatal error or shutdown.
+
+The decision to perform archive housekeeping vs the STM housekeeping is made
+based on the state of the manifest. We can do STM housekeeping only if the
+archive is empty. Even if we're performing archive housekeeping we still have
+to perform STM GC to remove replaced segments, otherwise they will pile  up.
+
+The STM housekeeping has two steps:
+- STM retention is calculating the backlog and replicates the STM command
+  that moves the 'start_offset' field of the manifest forward.
+- STM GC removes segments from the retention backlog (replaced segments and
+  segment below the 'start_offset') from the manifest and replicates STM 'clean'
+  command that removes replaced segments from the manifest.
+
+The archive housekeeping has three steps:
+- archive retention is calculating the backlog and replicates the STM command
+  that moves the 'archive_start_offset' field of the manifest forward.
+- archive GC deletes spillover manifests and segments below the
+  'archive_start_offset' offset and replicates the command that moves
+  'archive_clean_offset' field forward.
+- STM GC removes replaced segments from the manifest and replicates STM 'clean'
+  command that removes replaced segments from the manifest.
+
+Note that every housekeeping run uses certain number of requests. This number is
+propagated to the 'maybe_suspend_housekeeping' call so the scheduler would know
+how many resources the housekeeping have used. This will allow it to throttle
+or prioritize different partitions based on usage.
+*/
+
 class archiver_housekeeping_workflow_api : public archiver_workflow_api {
 public:
     archiver_housekeeping_workflow_api(
@@ -261,7 +329,7 @@ private:
                   _log.warn, "Housekeeping error (STM GC): {}", gc_res.error());
                 co_return gc_res.error();
             }
-            co_return archive_housekeeping_result{
+            co_return stm_housekeeping_result{
               .quota_used = gc_res.value().num_delete_requests};
         } catch (...) {
             _fatal = std::current_exception();
