@@ -246,3 +246,8 @@ inline std::error_code make_error_code(error_outcome e) noexcept {
 }
 
 } // namespace archival
+
+namespace std {
+template<>
+struct is_error_code_enum<archival::error_outcome> : true_type {};
+} // namespace std
