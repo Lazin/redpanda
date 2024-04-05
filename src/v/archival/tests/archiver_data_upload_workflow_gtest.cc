@@ -81,7 +81,7 @@ auto expected_upload_candidate_result() {
 }
 
 auto expected_suspend_request() {
-    return suspend_request{
+    return suspend_upload_request{
       .ntp = ntp,
       .manifest_dirty = true,
       .put_requests_used = expected_num_put_requests,
@@ -97,7 +97,7 @@ auto expected_admit_uploads_result() {
 }
 
 /// Create workflow and its dependencies
-auto setup_test_suite() {
+inline auto setup_test_suite() {
     auto rm_api = ss::make_shared<archiver_scheduler_mock>();
     auto op_api = ss::make_shared<ops_api_mock>();
     auto wf = make_data_upload_workflow(ntp, archiver_term, op_api, rm_api);
@@ -117,7 +117,7 @@ TEST(data_upload_workflow_test, test_immediate_shutdown) {
     auto [wf, rm_api, op_api, cfg] = setup_test_suite();
 
     rm_api->expect_maybe_suspend_upload(
-      suspend_request{
+      suspend_upload_request{
         .ntp = ntp,
         .manifest_dirty = true,
       },
@@ -142,7 +142,8 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
 
         // Triggered by last 'admit_uploads' call
         rm_api->expect_maybe_suspend_upload(
@@ -202,7 +203,8 @@ TEST(data_upload_workflow_test, test_reconciliation_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
 
         // Triggered by the failed 'find_upload_candidates' call
         rm_api->expect_maybe_suspend_upload(
@@ -237,7 +239,8 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -266,7 +269,8 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -295,7 +299,8 @@ TEST(data_upload_workflow_test, test_reconciliation_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -325,7 +330,8 @@ TEST(data_upload_workflow_test, test_upload_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -371,7 +377,8 @@ TEST(data_upload_workflow_test, test_upload_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -416,7 +423,8 @@ TEST(data_upload_workflow_test, test_upload_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -464,7 +472,8 @@ TEST(data_upload_workflow_test, test_upload_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
 
         // Triggered by failed 'schedule_uploads' call
         rm_api->expect_maybe_suspend_upload(
@@ -517,7 +526,8 @@ TEST(data_upload_workflow_test, test_admit_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -570,7 +580,8 @@ TEST(data_upload_workflow_test, test_admit_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -622,7 +633,8 @@ TEST(data_upload_workflow_test, test_admit_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -677,7 +689,8 @@ TEST(data_upload_workflow_test, test_admit_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::segment_upload});
 
         // This one is called after 'admit_uploads' fails
         rm_api->expect_maybe_suspend_upload(
@@ -738,7 +751,8 @@ TEST(data_upload_workflow_test, test_reupload_manifest_cycle) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::manifest_upload});
 
         // called after 'upload_manifest' succeeds
         rm_api->expect_maybe_suspend_upload(
@@ -777,7 +791,8 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::manifest_upload});
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -805,7 +820,8 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::manifest_upload});
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -832,7 +848,8 @@ TEST(data_upload_workflow_test, test_reupload_manifest_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::manifest_upload});
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -861,7 +878,8 @@ TEST(data_upload_workflow_test, test_reupload_manifest_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          next_upload_action_hint{
+            .type = next_upload_action_type::manifest_upload});
 
         // called after 'upload_manifest' returns error
         rm_api->expect_maybe_suspend_upload(
