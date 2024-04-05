@@ -42,6 +42,7 @@ const std::optional<size_t> target_segment_size = 0x8000;
 const std::optional<size_t> min_segment_size = 0x2000;
 const size_t expected_num_put_requests = 3;
 const size_t expected_num_bytes_sent = 0x1000;
+const bool expected_inline_manifest = true;
 
 auto expected_upload_result() {
     std::deque<std::optional<cloud_storage::segment_record_stats>> stats;
@@ -56,23 +57,29 @@ auto expected_upload_result() {
     };
 }
 
-auto expected_upload_candidate_input() {
+auto expected_upload_candidate_input(bool inline_manifest = true) {
     find_upload_candidates_arg input{
       .ntp = ntp,
       .target_size = *target_segment_size,
       .min_size = *min_segment_size,
-      .upload_interval = config::shard_local_cfg()
-                           .cloud_storage_segment_max_upload_interval_sec(),
+      .upload_size_quota = expected_num_bytes_sent,
+      .upload_requests_quota = expected_num_put_requests,
       .compacted_reupload = config::shard_local_cfg()
                               .cloud_storage_enable_compacted_topic_reupload(),
+      .inline_manifest = inline_manifest,
     };
     return input;
+}
+
+auto make_empty_stream() {
+    iobuf empty;
+    return make_iobuf_input_stream(std::move(empty));
 }
 
 auto expected_upload_candidate_result() {
     return segment_upload_candidate_t{
       .ntp = ntp,
-      .payload = make_iobuf_input_stream(iobuf()),
+      .payload = make_empty_stream(),
       .size_bytes = 1,
       .metadata = cloud_storage::segment_meta{
         .base_offset = model::offset(0),
@@ -81,7 +88,7 @@ auto expected_upload_candidate_result() {
 }
 
 auto expected_suspend_request() {
-    return suspend_request{
+    return suspend_upload_request{
       .ntp = ntp,
       .manifest_dirty = true,
       .put_requests_used = expected_num_put_requests,
@@ -96,8 +103,25 @@ auto expected_admit_uploads_result() {
       .manifest_dirty_offset = manifest_dirty_offset};
 }
 
+auto expected_next_upload_action_hint(bool inline_manifest = true) {
+    return next_upload_action_hint{
+      .type = inline_manifest ? next_upload_action_type::segment_with_manifest
+                              : next_upload_action_type::segment_upload,
+      .requests_quota = expected_num_put_requests,
+      .upload_size_quota = expected_num_bytes_sent,
+    };
+}
+
+auto expected_next_manifest_upload_action_hint() {
+    return next_upload_action_hint{
+      .type = next_upload_action_type::manifest_upload,
+      .requests_quota = expected_num_put_requests,
+      .upload_size_quota = expected_num_bytes_sent,
+    };
+}
+
 /// Create workflow and its dependencies
-auto setup_test_suite() {
+inline auto setup_test_suite() {
     auto rm_api = ss::make_shared<archiver_scheduler_mock>();
     auto op_api = ss::make_shared<ops_api_mock>();
     auto wf = make_data_upload_workflow(ntp, archiver_term, op_api, rm_api);
@@ -117,7 +141,7 @@ TEST(data_upload_workflow_test, test_immediate_shutdown) {
     auto [wf, rm_api, op_api, cfg] = setup_test_suite();
 
     rm_api->expect_maybe_suspend_upload(
-      suspend_request{
+      suspend_upload_request{
         .ntp = ntp,
         .manifest_dirty = true,
       },
@@ -127,7 +151,7 @@ TEST(data_upload_workflow_test, test_immediate_shutdown) {
     wf->stop().get();
 }
 
-TEST(data_upload_workflow_test, test_single_upload_cycle) {
+void test_single_upload_cycle(bool inline_manifest) {
     // Test case: the workflow executes one full upload cycle.
     auto [wf, rm_api, op_api, cfg] = setup_test_suite();
 
@@ -142,7 +166,7 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint(inline_manifest));
 
         // Triggered by last 'admit_uploads' call
         rm_api->expect_maybe_suspend_upload(
@@ -152,7 +176,7 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
 
     // Set up find_upload_candidates call to return one upload candidate.
     {
-        auto input = expected_upload_candidate_input();
+        auto input = expected_upload_candidate_input(inline_manifest);
 
         auto candidate = ss::make_lw_shared<segment_upload_candidate_t>(
           expected_upload_candidate_result());
@@ -172,7 +196,8 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_upload_result());
+        op_api->expect_schedule_uploads(
+          input, inline_manifest, expected_upload_result());
     }
 
     // Set up admit_uploads
@@ -185,6 +210,14 @@ TEST(data_upload_workflow_test, test_single_upload_cycle) {
     auto f = wf->stop();
     wf->start().get();
     std::move(f).get();
+}
+
+TEST(data_upload_workflow_test, test_single_upload_cycle_inline_manifest) {
+    test_single_upload_cycle(true);
+}
+
+TEST(data_upload_workflow_test, test_single_upload_cycle_no_manifest) {
+    test_single_upload_cycle(false);
 }
 
 TEST(data_upload_workflow_test, test_reconciliation_recoverable_errc) {
@@ -202,7 +235,7 @@ TEST(data_upload_workflow_test, test_reconciliation_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
 
         // Triggered by the failed 'find_upload_candidates' call
         rm_api->expect_maybe_suspend_upload(
@@ -237,7 +270,7 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -266,7 +299,7 @@ TEST(data_upload_workflow_test, test_reconciliation_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -295,7 +328,7 @@ TEST(data_upload_workflow_test, test_reconciliation_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -325,7 +358,7 @@ TEST(data_upload_workflow_test, test_upload_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -351,7 +384,9 @@ TEST(data_upload_workflow_test, test_upload_shutdown_exception) {
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
         op_api->expect_schedule_uploads(
-          input, std::make_exception_ptr(ss::abort_requested_exception()));
+          input,
+          expected_inline_manifest,
+          std::make_exception_ptr(ss::abort_requested_exception()));
     }
 
     auto f = wf->stop();
@@ -371,52 +406,7 @@ TEST(data_upload_workflow_test, test_upload_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
-    }
-
-    // Set up find_upload_candidates call to return one upload candidate.
-    {
-        auto input = expected_upload_candidate_input();
-
-        auto candidate = ss::make_lw_shared<segment_upload_candidate_t>(
-          expected_upload_candidate_result());
-
-        find_upload_candidates_result output;
-        output.ntp = ntp;
-        output.results.push_back(std::move(candidate));
-        output.read_write_fence = read_write_fence;
-
-        op_api->expect_find_upload_candidates(input, output);
-    }
-
-    // Set up schedule_uploads call.
-    {
-        auto candidate = ss::make_lw_shared<segment_upload_candidate_t>(
-          expected_upload_candidate_result());
-        find_upload_candidates_result input;
-        input.results.push_back(std::move(candidate));
-        input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, error_outcome::shutting_down);
-    }
-
-    auto f = wf->stop();
-    wf->start().get();
-    std::move(f).get();
-}
-
-TEST(data_upload_workflow_test, test_upload_fatal_error) {
-    // Test case: the workflow goes up to upload step
-    // and then shutdown is triggered by throwing an exception.
-    auto [wf, rm_api, op_api, cfg] = setup_test_suite();
-
-    // Set up maybe_suspend. The only call returns success.
-    {
-        rm_api->expect_maybe_suspend_upload(
-          {
-            .ntp = ntp,
-            .manifest_dirty = true,
-          },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -442,7 +432,55 @@ TEST(data_upload_workflow_test, test_upload_fatal_error) {
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
         op_api->expect_schedule_uploads(
-          input, std::make_exception_ptr(std::runtime_error("fatal error")));
+          input, expected_inline_manifest, error_outcome::shutting_down);
+    }
+
+    auto f = wf->stop();
+    wf->start().get();
+    std::move(f).get();
+}
+
+TEST(data_upload_workflow_test, test_upload_fatal_error) {
+    // Test case: the workflow goes up to upload step
+    // and then shutdown is triggered by throwing an exception.
+    auto [wf, rm_api, op_api, cfg] = setup_test_suite();
+
+    // Set up maybe_suspend. The only call returns success.
+    {
+        rm_api->expect_maybe_suspend_upload(
+          {
+            .ntp = ntp,
+            .manifest_dirty = true,
+          },
+          expected_next_upload_action_hint());
+    }
+
+    // Set up find_upload_candidates call to return one upload candidate.
+    {
+        auto input = expected_upload_candidate_input();
+
+        auto candidate = ss::make_lw_shared<segment_upload_candidate_t>(
+          expected_upload_candidate_result());
+
+        find_upload_candidates_result output;
+        output.ntp = ntp;
+        output.results.push_back(std::move(candidate));
+        output.read_write_fence = read_write_fence;
+
+        op_api->expect_find_upload_candidates(input, output);
+    }
+
+    // Set up schedule_uploads call.
+    {
+        auto candidate = ss::make_lw_shared<segment_upload_candidate_t>(
+          expected_upload_candidate_result());
+        find_upload_candidates_result input;
+        input.results.push_back(std::move(candidate));
+        input.read_write_fence = read_write_fence;
+        op_api->expect_schedule_uploads(
+          input,
+          expected_inline_manifest,
+          std::make_exception_ptr(std::runtime_error("fatal error")));
     }
 
     auto f = wf->stop();
@@ -464,7 +502,7 @@ TEST(data_upload_workflow_test, test_upload_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
 
         // Triggered by failed 'schedule_uploads' call
         rm_api->expect_maybe_suspend_upload(
@@ -497,7 +535,8 @@ TEST(data_upload_workflow_test, test_upload_recoverable_errc) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_error);
+        op_api->expect_schedule_uploads(
+          input, expected_inline_manifest, expected_error);
     }
 
     auto f = wf->stop();
@@ -517,7 +556,7 @@ TEST(data_upload_workflow_test, test_admit_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -542,7 +581,8 @@ TEST(data_upload_workflow_test, test_admit_shutdown_exception) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_upload_result());
+        op_api->expect_schedule_uploads(
+          input, expected_inline_manifest, expected_upload_result());
     }
 
     // Set up admit_uploads
@@ -570,7 +610,7 @@ TEST(data_upload_workflow_test, test_admit_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -595,7 +635,8 @@ TEST(data_upload_workflow_test, test_admit_shutdown_errc) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_upload_result());
+        op_api->expect_schedule_uploads(
+          input, expected_inline_manifest, expected_upload_result());
     }
 
     // Set up admit_uploads
@@ -622,7 +663,7 @@ TEST(data_upload_workflow_test, test_admit_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
     }
 
     // Set up find_upload_candidates call to return one upload candidate.
@@ -647,7 +688,8 @@ TEST(data_upload_workflow_test, test_admit_fatal_error) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_upload_result());
+        op_api->expect_schedule_uploads(
+          input, expected_inline_manifest, expected_upload_result());
     }
 
     // Set up admit_uploads
@@ -677,7 +719,7 @@ TEST(data_upload_workflow_test, test_admit_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::segment_upload});
+          expected_next_upload_action_hint());
 
         // This one is called after 'admit_uploads' fails
         rm_api->expect_maybe_suspend_upload(
@@ -710,7 +752,8 @@ TEST(data_upload_workflow_test, test_admit_recoverable_errc) {
         find_upload_candidates_result input;
         input.results.push_back(std::move(candidate));
         input.read_write_fence = read_write_fence;
-        op_api->expect_schedule_uploads(input, expected_upload_result());
+        op_api->expect_schedule_uploads(
+          input, expected_inline_manifest, expected_upload_result());
     }
 
     // Set up admit_uploads
@@ -738,7 +781,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_cycle) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          expected_next_manifest_upload_action_hint());
 
         // called after 'upload_manifest' succeeds
         rm_api->expect_maybe_suspend_upload(
@@ -777,7 +820,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_exception) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          expected_next_manifest_upload_action_hint());
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -805,7 +848,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_shutdown_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          expected_next_manifest_upload_action_hint());
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -832,7 +875,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_fatal_error) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          expected_next_manifest_upload_action_hint());
     }
 
     // Setup upload_manifest call to return shutdown error.
@@ -861,7 +904,7 @@ TEST(data_upload_workflow_test, test_reupload_manifest_recoverable_errc) {
             .ntp = ntp,
             .manifest_dirty = true,
           },
-          next_action_hint{.type = next_action_type::manifest_upload});
+          expected_next_manifest_upload_action_hint());
 
         // called after 'upload_manifest' returns error
         rm_api->expect_maybe_suspend_upload(
