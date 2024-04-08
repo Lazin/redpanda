@@ -208,6 +208,7 @@ v_cc_library(
     ../archival/archiver_scheduler_api.cc
     ../archival/archiver_data_upload_workflow.cc
     ../archival/archiver_housekeeping_workflow.cc
+    ../archival/archiver_operations_impl.cc
     cloud_metadata/cluster_manifest.cc
     cloud_metadata/cluster_recovery_backend.cc
     cloud_metadata/key_utils.cc
