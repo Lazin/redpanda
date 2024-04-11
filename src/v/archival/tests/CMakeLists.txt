@@ -76,6 +76,7 @@ else()
         v::cluster
         v::cloud_roles
         v::http_test_utils
+        v::storage_test_utils
         v::gtest_main
       LABELS archival
       ARGS "-- -c 1"
