@@ -229,4 +229,13 @@ private:
     retry_chain_logger _ctxlog;
 };
 
+/// Make input stream that contains serialized data
+/// consumed from the supplied 'reader' instance.
+ss::input_stream<char> make_reader_input_stream(
+  model::ntp ntp,
+  model::record_batch_reader r,
+  size_t read_buffer_size,
+  inclusive_offset_range range,
+  model::timeout_clock::duration timeout);
+
 } // namespace archival
