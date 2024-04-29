@@ -882,4 +882,541 @@ TEST_CORO(
     ASSERT_EQ_CORO(candidate->metadata, expected_meta);
 }
 
+TEST_CORO(
+  archiver_operations_impl_test,
+  find_upload_candidates_success_get_partition_failed) {
+    // Check situation when partition_manager can't find
+    // the partition by ntp
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    pm->expect_get_partition(nullptr);
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(res.has_error());
+    ASSERT_TRUE_CORO(res.error() == error_outcome::unexpected_failure);
+}
+
+TEST_CORO(archiver_operations_impl_test, not_enough_data_to_start_upload) {
+    // Check situation when 'segment_upload' fails to create an upload candidate
+    // because there is no data to upload yet. This is not an exceptional
+    // situation and expected to happen as part of normal operation.
+    scoped_config cfg;
+    cfg.get("storage_read_buffer_size").set_value(expected_read_buffer_size);
+    cfg.get("cloud_storage_segment_size_target")
+      .set_value(std::make_optional<size_t>(expected_target_size));
+    cfg.get("cloud_storage_segment_size_min")
+      .set_value(std::make_optional<size_t>(expected_min_size));
+
+    // Find single upload candidate
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    partition->expect_get_applied_offset(expected_applied_offset);
+    partition->expect_get_uploaded_offset(expected_uploaded_offset);
+    pm->expect_get_partition(partition);
+
+    model::offset expected_base(101);
+    // First call find upload candidate
+    builder->expect_prepare_segment_upload(
+      archival::size_limited_offset_range(
+        expected_base, expected_target_size, expected_min_size),
+      expected_read_buffer_size,
+      error_outcome::not_enough_data);
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(!res.has_error());
+    ASSERT_TRUE_CORO(res.value().results.empty());
+}
+
+TEST_CORO(archiver_operations_impl_test, segment_builder_throws) {
+    // Check situation when 'segment_upload' fails to create an upload candidate
+    // by throwing an exception.
+
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    partition->expect_get_applied_offset(expected_applied_offset);
+    partition->expect_get_uploaded_offset(expected_uploaded_offset);
+    pm->expect_get_partition(partition);
+
+    builder->expect_prepare_segment_upload(
+      std::make_exception_ptr(std::runtime_error("failure")));
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(res.has_error());
+}
+
+TEST_CORO(archiver_operations_impl_test, segment_builder_errors) {
+    // Check situation when 'segment_upload' fails to create an upload candidate
+    // and returns unexpected error.
+    scoped_config cfg;
+    cfg.get("storage_read_buffer_size").set_value(expected_read_buffer_size);
+    cfg.get("cloud_storage_segment_size_target")
+      .set_value(std::make_optional<size_t>(expected_target_size));
+    cfg.get("cloud_storage_segment_size_min")
+      .set_value(std::make_optional<size_t>(expected_min_size));
+
+    // Find single upload candidate
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    partition->expect_get_applied_offset(expected_applied_offset);
+    partition->expect_get_uploaded_offset(expected_uploaded_offset);
+    pm->expect_get_partition(partition);
+
+    model::offset expected_base(101);
+    // First call find upload candidate
+    builder->expect_prepare_segment_upload(
+      archival::size_limited_offset_range(
+        expected_base, expected_target_size, expected_min_size),
+      expected_read_buffer_size,
+      error_outcome::unexpected_failure);
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(res.has_error());
+}
+
+TEST_CORO(archiver_operations_impl_test, aborted_tx_throw) {
+    // If the list of aborted transactions can't be acquired we should abort
+    scoped_config cfg;
+    cfg.get("storage_read_buffer_size").set_value(expected_read_buffer_size);
+    cfg.get("cloud_storage_segment_size_target")
+      .set_value(std::make_optional<size_t>(expected_target_size));
+    cfg.get("cloud_storage_segment_size_min")
+      .set_value(std::make_optional<size_t>(expected_min_size));
+
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    partition->expect_get_applied_offset(expected_applied_offset);
+    partition->expect_get_uploaded_offset(expected_uploaded_offset);
+    pm->expect_get_partition(partition);
+
+    model::offset expected_base(101);
+    model::offset expected_last(200);
+    segment_meta expected_meta;
+
+    auto [upload_stream, upload_size, content, batches] = expected_data_payload(
+      expected_base, expected_last);
+
+    auto upload = make_upload(
+      {
+        .base = expected_base,
+        .last = expected_last,
+        .base_delta = model::offset_delta(1),
+        .last_delta = model::offset_delta(2),
+        .base_ts = model::timestamp(111),
+        .last_ts = model::timestamp(222),
+      },
+      upload_size,
+      std::move(upload_stream));
+    expected_meta = upload->meta;
+
+    // these fields are set to proper values later
+    expected_meta.base_timestamp = {};
+    expected_meta.max_timestamp = {};
+
+    builder->expect_prepare_segment_upload(
+      archival::size_limited_offset_range(
+        expected_base, expected_target_size, expected_min_size),
+      expected_read_buffer_size,
+      std::move(upload));
+
+    partition->expect_offset_delta(expected_base, model::offset_delta(1));
+
+    partition->expect_offset_delta(
+      model::next_offset(expected_last), model::offset_delta(2));
+    partition->expect_get_offset_term(expected_base, expected_segment_term);
+    partition->expect_get_initial_revision(expected_revision_id);
+
+    partition->expect_aborted_transactions(
+      expected_base,
+      expected_last,
+      std::make_exception_ptr(std::runtime_error("failure")));
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(res.has_error());
+    ASSERT_TRUE_CORO(res.error() == error_outcome::unexpected_failure);
+}
+
+TEST_CORO(archiver_operations_impl_test, no_term_for_offset) {
+    // We can't find term for the offset
+    scoped_config cfg;
+    cfg.get("storage_read_buffer_size").set_value(expected_read_buffer_size);
+    cfg.get("cloud_storage_segment_size_target")
+      .set_value(std::make_optional<size_t>(expected_target_size));
+    cfg.get("cloud_storage_segment_size_min")
+      .set_value(std::make_optional<size_t>(expected_min_size));
+
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    partition->expect_get_applied_offset(expected_applied_offset);
+    partition->expect_get_uploaded_offset(expected_uploaded_offset);
+    pm->expect_get_partition(partition);
+
+    model::offset expected_base(101);
+    model::offset expected_last(200);
+    segment_meta expected_meta;
+
+    auto [upload_stream, upload_size, content, batches] = expected_data_payload(
+      expected_base, expected_last);
+
+    auto upload = make_upload(
+      {
+        .base = expected_base,
+        .last = expected_last,
+        .base_delta = model::offset_delta(1),
+        .last_delta = model::offset_delta(2),
+        .base_ts = model::timestamp(111),
+        .last_ts = model::timestamp(222),
+      },
+      upload_size,
+      std::move(upload_stream));
+    expected_meta = upload->meta;
+
+    expected_meta.base_timestamp = {};
+    expected_meta.max_timestamp = {};
+
+    builder->expect_prepare_segment_upload(
+      archival::size_limited_offset_range(
+        expected_base, expected_target_size, expected_min_size),
+      expected_read_buffer_size,
+      std::move(upload));
+
+    partition->expect_offset_delta(expected_base, model::offset_delta(1));
+    partition->expect_offset_delta(
+      model::next_offset(expected_last), model::offset_delta(2));
+
+    partition->expect_get_offset_term(expected_base, std::nullopt);
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+    auto arg = archiver_operations_api::find_upload_candidates_arg{
+      .ntp = expected_ntp,
+      .archiver_term = expected_archiver_term,
+      .target_size = expected_target_size,
+      .min_size = expected_min_size,
+      .upload_size_quota = expected_upload_size_quota,
+      .upload_requests_quota = expected_upload_requests_quota,
+      .compacted_reupload = false,
+      .inline_manifest = false,
+    };
+    auto res = co_await ops->find_upload_candidates(rtc, arg);
+    ASSERT_TRUE_CORO(res.has_error());
+    ASSERT_TRUE_CORO(res.error() == error_outcome::offset_not_found);
+}
+
+std::ostream& operator>>(std::ostream& o, iobuf& buf) {
+    o << "iobuf[size=" << buf.size_bytes() << "]";
+    return o;
+}
+
+ss::future<> test_archiver_schedule_upload_full_cycle(
+  int num_segments, bool inline_manifest, bool tx_manifest) {
+    scoped_config cfg;
+    cfg.get("storage_read_buffer_size").set_value(expected_read_buffer_size);
+    cfg.get("cloud_storage_segment_size_target")
+      .set_value(std::make_optional<size_t>(expected_target_size));
+    cfg.get("cloud_storage_segment_size_min")
+      .set_value(std::make_optional<size_t>(expected_min_size));
+    cfg.get("cloud_storage_bucket")
+      .set_value(std::make_optional(expected_bucket));
+
+    size_t expected_total_bytes = 0;
+    size_t expected_put_requests = 0;
+    auto remote = ss::make_shared<remote_mock>();
+    auto cache = ss::make_shared<cache_mock>();
+    auto pm = ss::make_shared<partition_manager_mock>();
+    auto builder = ss::make_shared<upload_builder_mock>();
+    auto partition = ss::make_shared<partition_mock>();
+
+    // Make uploads
+    std::deque<archival::archiver_operations_api::segment_upload_candidate_ptr>
+      segments;
+    model::offset last_offset;
+    for (int i = 0; i < num_segments; i++) {
+        model::offset expected_base = model::next_offset(last_offset);
+        model::offset expected_last = expected_base + model::offset(100);
+        last_offset = expected_last;
+
+        auto payload = expected_data_payload(expected_base, expected_last);
+
+        auto sd = segment_desc{
+          .base = payload.batches.front().base,
+          .last = payload.batches.back().last,
+          .base_delta = model::offset_delta(0),
+          .last_delta = model::offset_delta(0),
+          .base_ts = payload.batches.front().ts_base,
+          .last_ts = payload.batches.back().ts_last,
+        };
+
+        auto index_payload = expected_index_payload(
+          model::offset_delta(0), payload.batches);
+
+        auto sup = make_upload(sd, payload.size, std::move(payload.stream));
+
+        auto key = expected_manifest.generate_segment_path(sup->meta);
+
+        auto segm = ss::make_lw_shared<
+          archiver_operations_api::segment_upload_candidate_t>(
+          archiver_operations_api::segment_upload_candidate_t{
+            .ntp = expected_ntp,
+            .payload = std::move(sup->payload),
+            .size_bytes = sup->size_bytes,
+            .metadata = sup->meta,
+            .tx = {}});
+
+        if (tx_manifest) {
+            fragmented_vector<model::tx_range> expected_tx_range;
+            expected_tx_range.push_back(model::tx_range{
+              .pid = model::producer_identity(1234, 44),
+              .first = expected_base,
+              .last = expected_last,
+            });
+
+            segm->tx = expected_tx_range.copy();
+
+            // Set tx-manifest expectation
+            cloud_storage::tx_range_manifest tx_manifest(
+              key, expected_tx_range.copy());
+            std::stringstream str;
+            tx_manifest.serialize(str);
+            auto tx_str = str.str();
+            bytes tx_payload;
+            tx_payload.resize(tx_str.size());
+            std::memcpy(tx_payload.data(), tx_str.data(), tx_str.size());
+            expected_total_bytes += tx_manifest.estimate_serialized_size();
+            expected_put_requests++;
+            remote->expect_upload_manifest(
+              expected_bucket,
+              key().native() + ".tx",
+              std::move(tx_payload),
+              upload_result::success);
+        }
+
+        segments.emplace_back(std::move(segm));
+
+        // Expect index upload
+        expected_total_bytes += index_payload.content.size();
+        expected_put_requests++;
+        remote->expect_upload_stream(
+          expected_bucket,
+          key().native() + ".index",
+          index_payload.content.size(),
+          index_payload.content,
+          cloud_storage::upload_type::segment_index,
+          upload_result::success);
+
+        // Expect segment upload
+        expected_total_bytes += payload.content.size();
+        expected_put_requests++;
+        remote->expect_upload_stream(
+          expected_bucket,
+          key().native(),
+          payload.size,
+          payload.content,
+          cloud_storage::upload_type::object,
+          upload_result::success);
+    }
+
+    if (inline_manifest) {
+        auto sds = co_await expected_manifest.serialize();
+        iobuf bin_manifest;
+        auto out_str = make_iobuf_ref_output_stream(bin_manifest);
+        co_await ss::copy(sds.stream, out_str);
+        auto expected_manifest_upload = iobuf_to_bytes(bin_manifest);
+        auto m_key = expected_manifest.get_manifest_path();
+
+        // The upload code path uses this value as an estimate instead of the
+        // real thing.
+        auto size_estimate = expected_manifest.estimate_serialized_size();
+        expected_total_bytes += size_estimate;
+        expected_put_requests++;
+        remote->expect_upload_manifest(
+          expected_bucket,
+          m_key().native(),
+          expected_manifest_upload,
+          upload_result::success);
+    }
+
+    partition->expect_manifest(
+      expected_manifest,
+      // One to kickoff the upload, one per segment + one call to upload
+      // the manifest
+      num_segments + 1 + static_cast<int>(inline_manifest));
+
+    pm->expect_get_partition(partition);
+
+    archiver_operations_api::find_upload_candidates_result inp{
+      .ntp = expected_ntp,
+      .results = std::move(segments),
+      .read_write_fence = expected_read_write_fence,
+    };
+
+    auto ops = detail::make_archiver_operations_api(
+      remote, cache, pm, builder, c_expected_bucket);
+    ss::abort_source as;
+    retry_chain_node rtc(as, 1s, 1ms);
+
+    auto res = co_await ops->schedule_uploads(rtc, inp, inline_manifest);
+
+    ASSERT_TRUE_CORO(res.has_value());
+    ASSERT_EQ_CORO(res.value().num_bytes_sent, expected_total_bytes);
+    ASSERT_EQ_CORO(res.value().num_put_requests, expected_put_requests);
+    ASSERT_EQ_CORO(
+      res.value().manifest_clean_offset, expected_manifest.get_insync_offset());
+    ASSERT_EQ_CORO(res.value().read_write_fence, expected_read_write_fence);
+    ASSERT_EQ_CORO(res.value().results.size(), num_segments);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_1_segment_no_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(1, false, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_2_segment_no_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(2, false, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_4_segment_no_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(4, false, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_1_segment_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(1, false, true);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_2_segment_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(2, false, true);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_4_segment_tx_no_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(4, false, true);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_1_segment_no_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(1, true, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_2_segment_no_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(2, true, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_4_segment_no_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(4, true, false);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_1_segment_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(1, true, true);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_2_segment_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(2, true, true);
+}
+
+TEST_CORO(
+  archiver_operations_impl_test, schedule_uploads_4_segment_tx_manifest) {
+    co_await test_archiver_schedule_upload_full_cycle(4, true, true);
+}
+
 } // namespace archival
