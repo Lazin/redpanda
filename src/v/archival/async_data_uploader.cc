@@ -177,7 +177,7 @@ segment_upload::segment_upload(
   , _ctxlog(archival_log, _rtc, _ntp.path()) {}
 
 void segment_upload::throw_if_not_initialized(std::string_view caller) const {
-    if (_stream.has_value() == false) {
+    if (_params.has_value() == false) {
         throw std::runtime_error(fmt_with_ctx(
           fmt::format,
           "Segment upload is not initialized {} to {}",
@@ -191,12 +191,11 @@ segment_upload::make_segment_upload(
   ss::lw_shared_ptr<cluster::partition> part,
   inclusive_offset_range range,
   size_t read_buffer_size,
-  ss::scheduling_group sg,
-  model::timeout_clock::time_point deadline) {
+  ss::scheduling_group sg) {
     std::unique_ptr<segment_upload> upl(
       new segment_upload(part, read_buffer_size, sg));
 
-    auto res = co_await upl->initialize(range, deadline);
+    auto res = co_await upl->initialize(range);
     if (res.has_failure()) {
         co_return res.as_failure();
     }
@@ -208,20 +207,19 @@ segment_upload::make_segment_upload(
   ss::lw_shared_ptr<cluster::partition> part,
   size_limited_offset_range range,
   size_t read_buffer_size,
-  ss::scheduling_group sg,
-  model::timeout_clock::time_point deadline) {
+  ss::scheduling_group sg) {
     std::unique_ptr<segment_upload> upl(
       new segment_upload(part, read_buffer_size, sg));
 
-    auto res = co_await upl->initialize(range, deadline);
+    auto res = co_await upl->initialize(range);
     if (res.has_failure()) {
         co_return res.as_failure();
     }
     co_return std::move(upl);
 }
 
-ss::future<result<void>> segment_upload::initialize(
-  inclusive_offset_range range, model::timeout_clock::time_point deadline) {
+ss::future<result<void>>
+segment_upload::initialize(inclusive_offset_range range) {
     auto holder = _gate.hold();
     auto params = co_await compute_upload_parameters(range);
     if (params.has_failure()) {
@@ -235,54 +233,40 @@ ss::future<result<void>> segment_upload::initialize(
       "Unexpected offset range {}, expected {}",
       _params->offsets,
       range);
+    co_return outcome::success();
+}
+
+ss::future<ss::input_stream<char>>
+segment_upload::make_input_stream(model::timeout_clock::time_point deadline) {
     // Create a log reader config to scan the uploaded offset
     // range. We should skip the batch cache.
+    auto range = _params->offsets;
     storage::log_reader_config reader_cfg(
       range.base, range.last, priority_manager::local().archival_priority());
     reader_cfg.skip_batch_cache = true;
     reader_cfg.skip_readers_cache = true;
     vlog(_ctxlog.debug, "Creating log reader, config: {}", reader_cfg);
     auto reader = co_await _part->make_reader(reader_cfg);
-    _stream = make_reader_input_stream(
+    co_return make_reader_input_stream(
       _ntp,
       std::move(reader),
       _rd_buffer_size,
       range,
       model::time_until(deadline));
-    co_return outcome::success();
 }
 
-ss::future<result<void>> segment_upload::initialize(
-  size_limited_offset_range range, model::timeout_clock::time_point deadline) {
+ss::future<result<void>>
+segment_upload::initialize(size_limited_offset_range range) {
     auto holder = _gate.hold();
     auto params = co_await compute_upload_parameters(range);
     if (params.has_failure()) {
         co_return params.as_failure();
     }
     _params = params.value();
-    // Create a log reader config to scan the uploaded offset
-    // range. We should skip the batch cache.
-    storage::log_reader_config reader_cfg(
-      params.value().offsets.base,
-      params.value().offsets.last,
-      priority_manager::local().archival_priority());
-    reader_cfg.skip_batch_cache = true;
-    reader_cfg.skip_readers_cache = true;
-    vlog(_ctxlog.debug, "Creating log reader, config: {}", reader_cfg);
-    auto reader = co_await _part->make_reader(reader_cfg);
-    _stream = make_reader_input_stream(
-      _ntp,
-      std::move(reader),
-      _rd_buffer_size,
-      params.value().offsets,
-      model::time_until(deadline));
     co_return outcome::success();
 }
 
 ss::future<> segment_upload::close() {
-    if (_stream.has_value()) {
-        co_await _stream->close();
-    }
     co_await _gate.close();
 
     // Return units

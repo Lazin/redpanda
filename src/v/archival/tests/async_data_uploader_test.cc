@@ -261,8 +261,7 @@ public:
                          get_test_partition(),
                          range,
                          0x1000,
-                         ss::default_scheduling_group(),
-                         model::time_from_now(100ms))
+                         ss::default_scheduling_group())
                          .get();
 
         if (upl_res.has_failure()) {
@@ -280,8 +279,11 @@ public:
 
         auto upl_size = upl_res.value()->get_size_bytes();
         auto meta = upl_res.value()->get_meta();
-        auto inp_s = std::move(*upl_res.value()).detach_stream().get();
+        auto inp_s = upl_res.value()
+                       ->make_input_stream(model::time_from_now(100ms))
+                       .get();
         auto closer = ss::defer([&] {
+            upl_res.value()->close().get();
             out_s.close().get();
             inp_s.close().get();
         });
@@ -342,8 +344,7 @@ public:
                          get_test_partition(),
                          range,
                          0x1000,
-                         ss::default_scheduling_group(),
-                         model::time_from_now(100ms))
+                         ss::default_scheduling_group())
                          .get();
 
         if (upl_res.has_failure()) {
@@ -360,8 +361,11 @@ public:
         BOOST_REQUIRE(range == actual_offset_range);
 
         auto upl_size = upl_res.value()->get_size_bytes();
-        auto inp_s = std::move(*upl_res.value()).detach_stream().get();
+        auto inp_s = upl_res.value()
+                       ->make_input_stream(model::time_from_now(100ms))
+                       .get();
         auto closer = ss::defer([&] {
+            upl_res.value()->close().get();
             out_s.close().get();
             inp_s.close().get();
         });

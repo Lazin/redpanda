@@ -110,20 +110,6 @@ public:
     /// Close upload and free resources
     ss::future<> close();
 
-    /// Get input stream or throw
-    ///
-    /// The method detaches the input stream and returns it. It's also closes
-    /// the 'segment_upload' object (which should be a no-op at this point since
-    /// all async operations are completed). If 'detach_stream' was called the
-    /// caller no longer has to call 'close' on the 'segment_upload' object. If
-    /// the method was never called the caller has to call 'close' explicitly.
-    ss::future<ss::input_stream<char>> detach_stream() && {
-        throw_if_not_initialized("get_stream");
-        auto tmp = std::exchange(_stream, std::nullopt);
-        co_await close();
-        co_return std::move(tmp.value());
-    }
-
     /// Get precise content length for the upload
     size_t get_size_bytes() const {
         throw_if_not_initialized("get_size_bytes");
@@ -150,16 +136,13 @@ public:
     /// \param range is an offset range to upload
     /// \param read_buffer_size is a buffer size used to upload data
     /// \param sg is a scheduling group used to upload the data
-    /// \param deadline is a deadline for the upload object to be created (not
-    ///                 for the actual upload to happen)
     /// \return initialized segment_upload object
     static ss::future<result<std::unique_ptr<segment_upload>>>
     make_segment_upload(
       ss::lw_shared_ptr<cluster::partition> part,
       inclusive_offset_range range,
       size_t read_buffer_size,
-      ss::scheduling_group sg,
-      model::timeout_clock::time_point deadline);
+      ss::scheduling_group sg);
 
     /// \brief Make new segment upload
     ///
@@ -184,16 +167,19 @@ public:
     /// \param range is an offset range to upload
     /// \param read_buffer_size is a buffer size used to upload data
     /// \param sg is a scheduling group used to upload the data
-    /// \param deadline is a deadline for the upload object to be created (not
-    ///                 for the actual upload to happen)
     /// \return initialized segment_upload object
     static ss::future<result<std::unique_ptr<segment_upload>>>
     make_segment_upload(
       ss::lw_shared_ptr<cluster::partition> part,
       size_limited_offset_range range,
       size_t read_buffer_size,
-      ss::scheduling_group sg,
-      model::timeout_clock::time_point deadline);
+      ss::scheduling_group sg);
+
+    /// Create an input stream from the initialized segment_upload
+    /// object. It is possible to create multiple stream with the same
+    /// content. The caller is responsible for closing the stream.
+    ss::future<ss::input_stream<char>>
+    make_input_stream(model::timeout_clock::time_point deadline);
 
 private:
     explicit segment_upload(
@@ -202,14 +188,10 @@ private:
       ss::scheduling_group sg);
 
     /// Initialize segment upload using offset range
-    ss::future<result<void>> initialize(
-      inclusive_offset_range offsets,
-      model::timeout_clock::time_point deadline);
+    ss::future<result<void>> initialize(inclusive_offset_range offsets);
 
     /// Initialize segment upload using offset range
-    ss::future<result<void>> initialize(
-      size_limited_offset_range range,
-      model::timeout_clock::time_point deadline);
+    ss::future<result<void>> initialize(size_limited_offset_range range);
 
     void throw_if_not_initialized(std::string_view caller) const;
 
@@ -221,7 +203,6 @@ private:
     ss::lw_shared_ptr<cluster::partition> _part;
     size_t _rd_buffer_size;
     ss::scheduling_group _sg;
-    std::optional<ss::input_stream<char>> _stream;
     std::optional<upload_reconciliation_result> _params;
     ss::gate _gate;
     ss::abort_source _as;
