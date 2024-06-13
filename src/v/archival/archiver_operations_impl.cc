@@ -21,7 +21,10 @@
 #include "cloud_storage/types.h"
 #include "cloud_storage_clients/types.h"
 #include "cluster/partition_manager.h"
+#include "config/configuration.h"
+#include "errc.h"
 #include "model/fundamental.h"
+#include "model/record.h"
 #include "model/timeout_clock.h"
 #include "storage/batch_consumer_utils.h"
 #include "utils/retry_chain_node.h"
@@ -203,115 +206,241 @@ public:
       retry_chain_node& workflow_rtc,
       find_upload_candidates_result bundle,
       bool inline_manifest_upl) noexcept override {
-        schedule_upload_results result;
-        auto partition = _pm->get_partition(bundle.ntp);
-        if (partition == nullptr) {
-            // maybe race condition (partition was stopped or moved)
+        try {
+            schedule_upload_results result;
+            auto partition = _pm->get_partition(bundle.ntp);
+            if (partition == nullptr) {
+                // maybe race condition (partition was stopped or moved)
+                vlog(
+                  _rtclog.debug,
+                  "schedule_uploads - can't find partition {}",
+                  bundle.ntp);
+                co_return error_outcome::unexpected_failure;
+            }
+            std::deque<cloud_storage::segment_meta> metadata;
+            chunked_vector<ss::future<aggregated_upload_result>> uploads;
+            for (auto& upl : bundle.results) {
+                metadata.push_back(upl->metadata);
+                uploads.emplace_back(
+                  upload_candidate(workflow_rtc, partition, upl));
+            }
+            model::offset projected_clean_offset
+              = partition->manifest().get_insync_offset();
+            if (inline_manifest_upl) {
+                const auto& manifest = partition->manifest();
+                const auto estimated_manifest_upl_size
+                  = manifest.estimate_serialized_size();
+                uploads.emplace_back(
+                  _api->upload_manifest(_bucket, manifest, workflow_rtc)
+                    .then([estimated_manifest_upl_size](
+                            cloud_storage::upload_result r) {
+                        return aggregated_upload_result{
+                          .code = r,
+                          .put_requests = 1,
+                          // Use size estimate instead of the actual value
+                          .bytes_sent = estimated_manifest_upl_size};
+                    }));
+            }
+
+            // Wait for all uploads to complete
+            auto result_vec = co_await ss::when_all(
+              uploads.begin(), uploads.end());
+            size_t num_put_requests = 0;
+            size_t num_bytes_sent = 0;
+
+            // Process manifest upload results.
+            model::offset manifest_clean_offset;
+            if (inline_manifest_upl) {
+                if (result_vec.back().failed()) {
+                    // Manifest upload failed, we shouldn't add clean command
+                    vlog(
+                      _rtclog.error,
+                      "Manifest upload failed {}",
+                      result_vec.back().get_exception());
+                } else {
+                    auto m_res = result_vec.back().get();
+                    if (m_res.code != cloud_storage::upload_result::success) {
+                        // Same here
+                        vlog(
+                          _rtclog.error,
+                          "Manifest upload failed {}",
+                          m_res.code);
+                    } else {
+                        // Manifest successfully uploaded
+                        manifest_clean_offset = projected_clean_offset;
+                    }
+                    num_put_requests += m_res.put_requests;
+                    num_bytes_sent += m_res.bytes_sent;
+                }
+                result_vec.pop_back();
+            }
+
+            // Process segment upload results.
+            std::deque<std::optional<cloud_storage::segment_record_stats>>
+              upload_stats;
+            std::deque<cloud_storage::upload_result> upload_results;
+            for (auto& res : result_vec) {
+                if (res.failed()) {
+                    vlog(
+                      _rtclog.error,
+                      "Segment upload failed {}",
+                      res.get_exception());
+                    upload_stats.emplace_back(std::nullopt);
+                    upload_results.push_back(
+                      cloud_storage::upload_result::failed);
+                    continue;
+                }
+
+                auto op_result = std::move(res).get();
+                num_put_requests += op_result.put_requests;
+                num_bytes_sent += op_result.bytes_sent;
+
+                if (op_result.code != cloud_storage::upload_result::success) {
+                    vlog(
+                      _rtclog.error,
+                      "Segment upload failed {}",
+                      op_result.code);
+                }
+
+                upload_stats.push_back(op_result.stats);
+                upload_results.push_back(op_result.code);
+            }
+
+            schedule_upload_results results{
+              .ntp = bundle.ntp,
+              .stats = std::move(upload_stats),
+              .results = std::move(upload_results),
+              .metadata = std::move(metadata),
+              .manifest_clean_offset = manifest_clean_offset,
+              .read_write_fence = bundle.read_write_fence,
+              .num_put_requests = num_put_requests,
+              .num_bytes_sent = num_bytes_sent,
+            };
+
+            co_return std::move(results);
+        } catch (...) {
             vlog(
-              _rtclog.debug,
-              "schedule_uploads - can't find partition {}",
-              bundle.ntp);
+              _rtclog.error,
+              "Unexpected 'schedule_uploads' exception {}",
+              std::current_exception());
             co_return error_outcome::unexpected_failure;
         }
-        chunked_vector<ss::future<aggregated_upload_result>> uploads;
-        for (auto& upl : bundle.results) {
-            uploads.emplace_back(
-              upload_candidate(workflow_rtc, partition, upl));
-        }
-        model::offset projected_clean_offset
-          = partition->manifest().get_insync_offset();
-        if (inline_manifest_upl) {
-            const auto& manifest = partition->manifest();
-            const auto estimated_manifest_upl_size
-              = manifest.estimate_serialized_size();
-            uploads.emplace_back(
-              _api->upload_manifest(_bucket, manifest, workflow_rtc)
-                .then([estimated_manifest_upl_size](
-                        cloud_storage::upload_result r) {
-                    return aggregated_upload_result{
-                      .code = r,
-                      .put_requests = 1,
-                      // Use size estimate instead of the actual value
-                      .bytes_sent = estimated_manifest_upl_size};
-                }));
-        }
-
-        // Wait for all uploads to complete
-        auto result_vec = co_await ss::when_all(uploads.begin(), uploads.end());
-        size_t num_put_requests = 0;
-        size_t num_bytes_sent = 0;
-
-        // Process manifest upload results.
-        model::offset manifest_clean_offset;
-        if (inline_manifest_upl) {
-            if (result_vec.back().failed()) {
-                // Manifest upload failed, we shouldn't add clean command
-                vlog(
-                  _rtclog.error,
-                  "Manifest upload failed {}",
-                  result_vec.back().get_exception());
-            } else {
-                auto m_res = result_vec.back().get();
-                if (m_res.code != cloud_storage::upload_result::success) {
-                    // Same here
-                    vlog(
-                      _rtclog.error, "Manifest upload failed {}", m_res.code);
-                } else {
-                    // Manifest successfully uploaded
-                    manifest_clean_offset = projected_clean_offset;
-                }
-                num_put_requests += m_res.put_requests;
-                num_bytes_sent += m_res.bytes_sent;
-            }
-            result_vec.pop_back();
-        }
-
-        // Process segment upload results.
-        std::deque<std::optional<cloud_storage::segment_record_stats>>
-          upload_stats;
-        std::deque<cloud_storage::upload_result> upload_results;
-        for (auto& res : result_vec) {
-            if (res.failed()) {
-                vlog(
-                  _rtclog.error,
-                  "Segment upload failed {}",
-                  res.get_exception());
-                upload_stats.emplace_back(std::nullopt);
-                upload_results.push_back(cloud_storage::upload_result::failed);
-                continue;
-            }
-
-            auto op_result = std::move(res).get();
-            num_put_requests += op_result.put_requests;
-            num_bytes_sent += op_result.bytes_sent;
-
-            if (op_result.code != cloud_storage::upload_result::success) {
-                vlog(_rtclog.error, "Segment upload failed {}", op_result.code);
-            }
-
-            upload_stats.push_back(op_result.stats);
-            upload_results.push_back(op_result.code);
-        }
-
-        schedule_upload_results results{
-          .ntp = bundle.ntp,
-          .stats = upload_stats,
-          .results = upload_results,
-          .manifest_clean_offset = manifest_clean_offset,
-          .read_write_fence = bundle.read_write_fence,
-          .num_put_requests = num_put_requests,
-          .num_bytes_sent = num_bytes_sent,
-        };
-
-        co_return std::move(results);
+        __builtin_unreachable();
     }
 
     /// Add metadata to the manifest by replicating archival metadata
     /// configuration batch
     ss::future<result<admit_uploads_result>> admit_uploads(
-      retry_chain_node&, schedule_upload_results) noexcept override {
-        // TODO: set base_timestamp and max_timestamp
-        co_return error_outcome::unexpected_failure; // Not implemented
+      retry_chain_node& workflow_rtc,
+      schedule_upload_results upl_res) noexcept override {
+        // Generate archival metadata for every uploaded segment and
+        // apply it in offset order.
+        // Stop on first error.
+        // Validate consistency.
+        try {
+            size_t num_segments = upl_res.results.size();
+            if (
+              num_segments != upl_res.stats.size()
+              || num_segments != upl_res.metadata.size()) {
+                vlog(
+                  _rtclog.error,
+                  "Bad 'admit_uploads' input. Number of segments: {}, number "
+                  "of "
+                  "stats: {}, number of metadata records: {}",
+                  num_segments,
+                  upl_res.stats.size(),
+                  upl_res.metadata.size());
+                co_return error_outcome::unexpected_failure;
+            }
+            bool validation_required
+              = !config::shard_local_cfg()
+                   .cloud_storage_disable_upload_consistency_checks();
+            auto part = _pm->get_partition(upl_res.ntp);
+            std::vector<cloud_storage::segment_meta> metadata;
+            for (size_t ix = 0; ix < num_segments; ix++) {
+                auto sg = upl_res.results.at(ix);
+                auto st = upl_res.stats.at(ix);
+                auto meta = upl_res.metadata.at(ix);
+
+                if (sg != upload_result::success) {
+                    break;
+                }
+                // validate meta against the record stats
+                if (st.has_value() && validation_required) {
+                    if (!this->segment_meta_matches_stats(
+                          meta, st.value(), _rtclog)) {
+                        break;
+                    }
+                } else {
+                    vlog(
+                      _rtclog.debug,
+                      "Segment self-validation skipped, meta: {}, record stats "
+                      "available: {}, validation_required: {}",
+                      meta,
+                      st.has_value(),
+                      validation_required);
+                }
+                metadata.push_back(meta);
+            }
+            // optionally validate the data
+            bool is_validated = false;
+            if (validation_required) {
+                auto num_accepted = part->manifest().safe_segment_meta_to_add(
+                  metadata);
+                if (num_accepted == 0) {
+                    vlog(
+                      _rtclog.error,
+                      "Metadata can't be replicated because of the validation "
+                      "error");
+                    co_return cloud_storage::error_outcome::failure;
+                } else if (num_accepted < metadata.size()) {
+                    vlog(
+                      _rtclog.warn,
+                      "Only {} segments can't be admitted, segments: {}",
+                      num_accepted,
+                      metadata);
+                    metadata.resize(num_accepted);
+                }
+                // TODO: probe->gap_detected(...)
+                is_validated = true;
+            }
+            auto num_succeeded = metadata.size();
+            auto num_failed = upl_res.results.size() - num_succeeded;
+            // replicate metadata
+            // add clean command if needed
+            auto offset_to_opt = [](model::offset o) {
+                std::optional<model::offset> r;
+                if (o != model::offset{}) {
+                    r = o;
+                }
+                return r;
+            };
+
+            auto replication_result = co_await part->add_segments(
+              std::move(metadata),
+              offset_to_opt(upl_res.manifest_clean_offset),
+              offset_to_opt(upl_res.read_write_fence),
+              part->get_highest_producer_id(),
+              workflow_rtc.get_deadline(),
+              _as,
+              is_validated);
+
+            if (replication_result.has_error()) {
+                vlog(
+                  _rtclog.error,
+                  "Failed to replicate archival metadata: {}",
+                  replication_result.error());
+            }
+            co_return admit_uploads_result{
+              .ntp = upl_res.ntp,
+              .num_succeeded = num_succeeded,
+              .num_failed = num_failed,
+              .manifest_dirty_offset = replication_result.value(),
+            };
+        } catch (...) {
+            co_return error_outcome::unexpected_failure;
+        }
+        __builtin_unreachable();
     }
 
     /// Reupload manifest and replicate configuration batch

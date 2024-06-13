@@ -78,6 +78,8 @@ struct partition_mock : public detail::cluster_partition_api {
     MOCK_METHOD(
       std::optional<model::term_id>, get_offset_term, (model::offset), (const));
 
+    MOCK_METHOD(model::producer_id, get_highest_producer_id, (), (const));
+
     MOCK_METHOD(model::initial_revision_id, get_initial_revision, (), (const));
 
     MOCK_METHOD(
@@ -85,6 +87,18 @@ struct partition_mock : public detail::cluster_partition_api {
       aborted_transactions,
       (model::offset, model::offset),
       (const));
+
+    MOCK_METHOD(
+      ss::future<std::error_code>,
+      add_segments,
+      (std::vector<cloud_storage::segment_meta>,
+       std::optional<model::offset> clean_offset,
+       std::optional<model::offset> read_write_fence,
+       model::producer_id highest_pid,
+       ss::lowres_clock::time_point deadline,
+       ss::abort_source& external_as,
+       bool is_validated),
+      (noexcept));
 
     void expect_aborted_transactions(
       model::offset base,

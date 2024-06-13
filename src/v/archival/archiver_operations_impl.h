@@ -42,6 +42,7 @@ struct cluster_partition_api {
     virtual const cloud_storage::partition_manifest& manifest() const = 0;
     virtual model::offset get_uploaded_offset() const = 0;
     virtual model::offset get_applied_offset() const = 0;
+    virtual model::producer_id get_highest_producer_id() const = 0;
 
     /// Same as log->offset_delta
     /// \throws std::runtime_error if offset is out of range
@@ -56,7 +57,37 @@ struct cluster_partition_api {
     virtual ss::future<fragmented_vector<model::tx_range>>
     aborted_transactions(model::offset base, model::offset last) const = 0;
 
-    // TODO: add inteface for replicate
+    // Replicate archival metadata add_segment command
+    //
+    // The method accepts 'clean_offset' which is the insync offset of the
+    // last uploaded manifest. This is a projected clean offset. It is possible
+    // for the archiver to upload the manifest  in parallel with segments.
+    // This means that when the `add_segments` command is called the uploaded
+    // version of the manifest becomes out of sync. The manifest upload is going
+    // one step behind the replication. Instead of uploading manifest after
+    // replication we're doing this before the replication to pipeline
+    // operations.
+    //
+    // The data upload workflow keeps track of this by storing two offsets.
+    // - clean offset is the offset of the last uploaded manifest
+    // - dirty offset is the current offset of the STM manifest
+    //
+    // If clean != dirty then the manifest in the cloud doesn't match the STM.
+    // The 'clean' offset is passed into this method and triggers 'mark_clean'
+    // command to be added to the replicated batch. When the commands are
+    // applied to the STM the 'dirty' offset is propagated forward. This offset
+    // is returned from this method and passed back to the workflow so the
+    // workflow could track this offset and inform the scheduler about the out
+    // of sync manifest.
+    virtual ss::future<result<model::offset>> add_segments(
+      std::vector<cloud_storage::segment_meta>,
+      std::optional<model::offset> clean_offset,
+      std::optional<model::offset> read_write_fence,
+      model::producer_id highest_pid,
+      ss::lowres_clock::time_point deadline,
+      ss::abort_source& external_as,
+      bool is_validated) noexcept
+      = 0;
 };
 
 struct cluster_partition_manager_api {

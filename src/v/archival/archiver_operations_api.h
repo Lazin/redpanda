@@ -116,6 +116,7 @@ public:
         model::ktp ntp;
         std::deque<std::optional<cloud_storage::segment_record_stats>> stats;
         std::deque<cloud_storage::upload_result> results;
+        std::deque<cloud_storage::segment_meta> metadata;
 
         // Insync offset of the uploaded manifest
         model::offset manifest_clean_offset;
