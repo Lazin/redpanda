@@ -280,6 +280,19 @@ def get_cloud_provider() -> str:
     return os.getenv("CLOUD_PROVIDER", "docker")
 
 
+class ArchiverType(IntEnum):
+    # Old-style ntp_archiver, reads data from disk directly
+    Legacy = 1
+    # New style ntp_archiver, managed by archiver_manager, reads data using
+    # log-reader
+    ArchiverManager = 2
+
+
+def get_archiver_type() -> list[ArchiverType]:
+    """Returns list of ntp-archiver types for test parametrization"""
+    return [ArchiverType.Legacy, ArchiverType.ArchiverManager]
+
+
 def get_cloud_storage_type(applies_only_on: list[CloudStorageType]
                            | None = None,
                            docker_use_arbitrary=False):
@@ -525,7 +538,8 @@ class SISettings:
                  cloud_storage_signature_version: str = "s3v4",
                  before_call_headers: Optional[dict[str, Any]] = None,
                  skip_end_of_test_scrubbing: bool = False,
-                 addressing_style: S3AddressingStyle = S3AddressingStyle.PATH):
+                 addressing_style: S3AddressingStyle = S3AddressingStyle.PATH,
+                 cloud_storage_disable_archiver_manager=True):
         """
         :param fast_uploads: if true, set low upload intervals to help tests run
                              quickly when they wait for uploads to complete.
@@ -547,6 +561,16 @@ class SISettings:
         # For most cloud storage backends, we clean up small buckets always.
         # In some cases, we will modify this strategy in the block below.
         self.cloud_storage_cleanup_strategy = CloudStorageCleanupStrategy.ALWAYS_SMALL_BUCKETS_ONLY
+        self.cloud_storage_disable_archiver_manager = cloud_storage_disable_archiver_manager
+        if hasattr(
+                test_context, 'injected_args'
+        ) and test_context.injected_args is not None and 'archiver_type' in test_context.injected_args:
+            arch_type = cast(ArchiverType,
+                             test_context.injected_args['archiver_type'])
+            if arch_type == ArchiverType.ArchiverManager:
+                self.cloud_storage_disable_archiver_manager = False
+            else:
+                self.cloud_storage_disable_archiver_manager = True
 
         if self.cloud_storage_type == CloudStorageType.S3:
             self.cloud_storage_credentials_source = cloud_storage_credentials_source
@@ -837,6 +861,8 @@ class SISettings:
         # Enable scrubbing in testing unless it was explicitly disabled.
         if 'cloud_storage_enable_scrubbing' not in conf:
             conf['cloud_storage_enable_scrubbing'] = True
+        conf[
+            'cloud_storage_disable_archiver_manager'] = self.cloud_storage_disable_archiver_manager
 
         return conf
 
