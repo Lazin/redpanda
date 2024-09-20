@@ -501,11 +501,22 @@ public:
               is_validated);
 
             if (replication_result.has_error()) {
-                vlog(
-                  _rtclog.error,
+                auto level = ss::log_level::error;
+                if (replication_result.error() == cluster::errc::not_leader) {
+                    // Expected error, no need to alarm
+                    level = ss::log_level::debug;
+                }
+                vlogl(
+                  _rtclog,
+                  level,
                   "Failed to replicate archival metadata: {}",
                   replication_result.error());
+                co_return replication_result.error();
             }
+            vlog(
+              _rtclog.debug,
+              "Replicated archival_metadata_stm batch, applied offset is {}",
+              replication_result.value());
             co_return admit_uploads_result{
               .ntp = upl_res.ntp,
               .num_succeeded = num_succeeded,
@@ -1113,11 +1124,17 @@ public:
         batch_builder.update_highest_producer_id(highest_pid);
         auto error_code = co_await batch_builder.replicate();
         if (error_code) {
-            vlog(
-              archival_log.error,
-              "Failed to replicate archival metadata: {}",
-              error_code);
-            co_return error_code;
+            if (_part->is_leader()) {
+                vlog(
+                  archival_log.error,
+                  "Failed to replicate archival metadata: {}",
+                  error_code);
+                co_return error_code;
+            } else {
+                // We know that partition leadership was lost
+                vlog(archival_log.debug, "Partition leadership was lost");
+                co_return error_code;
+            }
         }
         co_return _part->archival_meta_stm()->manifest().get_applied_offset();
     }
