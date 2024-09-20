@@ -1216,48 +1216,151 @@ class upload_builder : public detail::segment_upload_builder_api {
         auto pp = part.get();
         auto wrapper = dynamic_cast<cluster_partition*>(pp);
         auto cp = wrapper->underlying();
-        //
-        auto upl = co_await segment_upload::make_segment_upload(
-          cp, range, read_buffer_size, sg, deadline);
-        if (upl.has_error()) {
-            vlog(
-              archival_log.error,
-              "Can't find upload candidate: {}",
-              upl.error());
-            co_return upl.error();
+        auto lso = cp->last_stable_offset();
+        vlog(
+          archival_log.debug,
+          "Upload candidate lookup: base={}, min-size={}, max-size={}, "
+          "read-buffer-size={}, lso={}",
+          range.base,
+          range.min_size,
+          range.max_size,
+          read_buffer_size,
+          lso);
+
+        if (range.base >= model::prev_offset(lso)) {
+            co_return error_outcome::not_enough_data;
         }
 
-        auto meta = upl.value()->get_meta();
-        auto payload_stream = co_await std::move(*upl.value()).detach_stream();
+        // Try to upload base-lso offset range. If it's too large
+        // then fallback to size-based upload.
+        auto create_upl_res = co_await segment_upload::make_segment_upload(
+          cp,
+          inclusive_offset_range(range.base, model::prev_offset(lso)),
+          read_buffer_size,
+          sg,
+          deadline);
 
-        // Meta is not required for correctness but it's logged later
-        cloud_storage::segment_meta segm_meta{
-          .is_compacted = meta.is_compacted,
-          .size_bytes = meta.size_bytes,
-          .base_offset = meta.offsets.base,
-          .committed_offset = meta.offsets.last,
-          // Timestamps will be populated during the upload
-          .base_timestamp = {},
-          .max_timestamp = {},
-          .delta_offset = part->offset_delta(meta.offsets.base),
-          .ntp_revision = part->get_initial_revision(),
-          .archiver_term = cp->term(),
-          .segment_term
-          = part->get_offset_term(meta.offsets.base).value_or(model::term_id{}),
-          .delta_offset_end = part->offset_delta(meta.offsets.last),
-          .sname_format = cloud_storage::segment_name_format::v3,
-          /// Size of the tx-range (in v3 format)
-          .metadata_size_hint = 0,
-        };
+        if (create_upl_res.has_error()) {
+            vlog(
+              archival_log.warn,
+              "Can't find upload candidate: {}, start: {}, LSO: {}",
+              create_upl_res.error(),
+              range.base,
+              lso);
+            // We should be able to make upload since there is no limit on
+            // the size of the upload yet and we checked that there is at
+            // least some new data available.
+            co_return create_upl_res.error();
+        }
 
-        co_return std::make_unique<detail::prepared_segment_upload>(
-          detail::prepared_segment_upload{
-            .offsets = meta.offsets,
-            .size_bytes = meta.size_bytes,
-            .is_compacted = meta.is_compacted,
-            .meta = segm_meta,
-            .payload = std::move(payload_stream),
-          });
+        std::unique_ptr<segment_upload> upload;
+        std::optional<cloud_storage::segment_meta> validated_meta;
+
+        try {
+            // Check upload size
+            auto size_bytes = create_upl_res.value()->get_size_bytes();
+            if (size_bytes >= range.min_size && size_bytes < range.max_size) {
+                vlog(
+                  archival_log.debug,
+                  "Upload size {} is withing [{}, {}] range",
+                  size_bytes,
+                  range.min_size,
+                  range.max_size);
+                upload = std::move(create_upl_res.value());
+            } else if (size_bytes >= range.min_size) {
+                // Too much data in the offset range that ends with LSO.
+                // Fallback to size-based search.
+                co_await create_upl_res.value()->close();
+                auto create_upl_res
+                  = co_await segment_upload::make_segment_upload(
+                    cp, range, read_buffer_size, sg, deadline);
+                if (create_upl_res.has_error()) {
+                    auto log_level = create_upl_res.error()
+                                         == error_outcome::not_enough_data
+                                       ? ss::log_level::debug
+                                       : ss::log_level::warn;
+                    vlogl(
+                      archival_log,
+                      log_level,
+                      "Can't find upload candidate: {}, start: {}, min-size: "
+                      "{}",
+                      create_upl_res.error(),
+                      range.base,
+                      range.min_size,
+                      range.max_size);
+                    co_return create_upl_res.error();
+                }
+                upload = std::move(create_upl_res.value());
+            }
+            if (!upload) {
+                vlog(archival_log.error, "Upload is not created");
+                co_return error_outcome::unexpected_failure;
+            }
+            auto meta = upload->get_meta();
+            auto delta_offset = part->offset_delta(meta.offsets.base);
+            auto delta_offset_end = part->offset_delta(meta.offsets.last);
+            auto ntp_revision = part->get_initial_revision();
+            auto archiver_term = cp->term();
+            auto segment_term = part->get_offset_term(meta.offsets.base)
+                                  .value_or(model::term_id{});
+            auto rp_delta = meta.offsets.last - meta.offsets.base;
+            auto delta_delta = delta_offset_end - delta_offset;
+            if (rp_delta() == delta_delta()) {
+                vlog(
+                  archival_log.debug,
+                  "Upload candidate doesn't have user data, offsets: {}, delta "
+                  "begin: {}, delta end: {}",
+                  meta.offsets,
+                  delta_offset,
+                  delta_offset_end);
+                co_await upload->close();
+                co_return error_outcome::not_enough_data;
+            }
+            validated_meta = cloud_storage::segment_meta{
+              .is_compacted = meta.is_compacted,
+              .size_bytes = meta.size_bytes,
+              .base_offset = meta.offsets.base,
+              .committed_offset = meta.offsets.last,
+              // Timestamps will be populated during the upload
+              .base_timestamp = {},
+              .max_timestamp = {},
+              .delta_offset = delta_offset,
+              .ntp_revision = ntp_revision,
+              .archiver_term = archiver_term,
+              .segment_term = segment_term,
+              .delta_offset_end = delta_offset_end,
+              .sname_format = cloud_storage::segment_name_format::v3,
+              /// Size of the tx-range (in v3 format)
+              .metadata_size_hint = 0,
+            };
+
+            auto payload_stream = co_await std::move(*upload).detach_stream();
+
+            vlog(
+              archival_log.debug,
+              "Upload candidate found: {}",
+              validated_meta.value());
+
+            co_return std::make_unique<detail::prepared_segment_upload>(
+              detail::prepared_segment_upload{
+                .offsets = meta.offsets,
+                .size_bytes = meta.size_bytes,
+                .is_compacted = meta.is_compacted,
+                .meta = validated_meta.value(),
+                .payload = std::move(payload_stream),
+              });
+
+        } catch (...) {
+            vlog(
+              archival_log.error,
+              "Failed to create upload: {}",
+              std::current_exception());
+        }
+
+        if (upload) {
+            co_await upload->close();
+        }
+        co_return error_outcome::not_enough_data;
     }
 };
 
