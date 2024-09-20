@@ -40,6 +40,7 @@
 
 #include <seastar/core/io_priority_class.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/coroutine/all.hh>
@@ -47,7 +48,11 @@
 #include <seastar/util/log.hh>
 #include <seastar/util/noncopyable_function.hh>
 
+#include <chrono>
 #include <exception>
+#include <memory>
+#include <stdexcept>
+#include <utility>
 
 namespace archival {
 namespace detail {
@@ -136,7 +141,7 @@ public:
             if (partition == nullptr) {
                 // maybe race condition (partition was stopped or moved)
                 vlog(
-                  _rtclog.debug,
+                  _rtclog.info,
                   "find_upload_candidates - can't find partition {}",
                   arg.ntp);
                 co_return error_outcome::unexpected_failure;
@@ -186,10 +191,12 @@ public:
                     break;
                 }
                 if (upload.has_error()) {
-                    vlog(
-                      _rtclog.error,
-                      "make_non_compacted_upload failed {}",
-                      upload.error());
+                    if (upload.error() != error_outcome::not_enough_data) {
+                        vlog(
+                          _rtclog.error,
+                          "make_non_compacted_upload failed {}",
+                          upload.error());
+                    }
                     co_return upload.error();
                 }
                 vlog(
@@ -237,6 +244,7 @@ public:
       retry_chain_node& workflow_rtc,
       reconciled_upload_candidates_list bundle,
       bool inline_manifest_upl) noexcept override {
+        vlog(_rtclog.debug, "schedule_uploads {}", bundle);
         try {
             auto gate = _gate.hold();
             upload_results_list result;
@@ -244,7 +252,7 @@ public:
             if (partition == nullptr) {
                 // maybe race condition (partition was stopped or moved)
                 vlog(
-                  _rtclog.debug,
+                  _rtclog.info,
                   "schedule_uploads - can't find partition {}",
                   bundle.ntp);
                 co_return error_outcome::unexpected_failure;
@@ -395,6 +403,7 @@ public:
         // apply it in offset order.
         // Stop on first error.
         // Validate consistency.
+        vlog(_rtclog.debug, "admit_uploads {}", upl_res);
         try {
             auto gate = _gate.hold();
             size_t num_segments = upl_res.results.size();
@@ -505,6 +514,7 @@ public:
     /// Reupload manifest and replicate configuration batch
     ss::future<result<manifest_upload_result>> upload_manifest(
       retry_chain_node& workflow_rtc, model::ntp ntp) noexcept override {
+        vlog(_rtclog.debug, "upload_manifest {}", ntp);
         try {
             auto gate = _gate.hold();
             auto partition = _pm->get_partition(ntp);
