@@ -682,7 +682,6 @@ private:
     //// of the mismatch. The last step is to upload the segment index.
     ss::future<aggregated_upload_result> upload_segment_index(
       std::reference_wrapper<retry_chain_node> workflow_rtc,
-      std::reference_wrapper<cloud_storage::segment_record_stats> stats,
       reconciled_upload_candidate_ptr upload,
       std::string_view index_path,
       ss::input_stream<char> stream) noexcept {
@@ -692,6 +691,8 @@ private:
             auto base_kafka_offset = upload->metadata.base_kafka_offset();
             constexpr auto index_sampling_step
               = 64_KiB; // TODO: use proper constant
+
+            cloud_storage::segment_record_stats stats{};
 
             cloud_storage::offset_index ix{
               upload->metadata.base_offset,
@@ -753,6 +754,7 @@ private:
 
             co_return aggregated_upload_result{
               .code = cloud_storage::upload_result::success,
+              .stats = stats,
               .put_requests = 1,
               .bytes_sent = ix_size,
             };
@@ -813,15 +815,13 @@ private:
         auto [segment_name, index_name, tx_name] = segment_index_object_names(
           partition, upl);
 
-        cloud_storage::segment_record_stats stats{};
-
         auto [index_stream, upload_stream] = clone_stream(
           std::move(upl->payload), _readahead());
 
         auto make_su_fut = upload_segment(
           workflow_rtc, segment_name, upl, std::move(upload_stream));
         auto make_ix_fut = upload_segment_index(
-          workflow_rtc, stats, upl, index_name, std::move(index_stream));
+          workflow_rtc, upl, index_name, std::move(index_stream));
 
         std::vector<ss::future<aggregated_upload_result>> uploads;
         uploads.reserve(3);
