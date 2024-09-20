@@ -8,8 +8,10 @@
 #include "config/configuration.h"
 #include "ssx/future-util.h"
 
+#include <seastar/core/abort_source.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/manual_clock.hh>
+#include <seastar/core/semaphore.hh>
 #include <seastar/core/sleep.hh>
 
 #include <chrono>
@@ -126,8 +128,9 @@ template<class Clock>
 ss::future<> archiver_scheduler<Clock>::dispose_ntp_state(model::ntp ntp) {
     auto it = _partitions.find(ntp);
     vassert(it != _partitions.end(), "Partition {} is not scheduled", ntp);
-    co_await it->second->gate.close();
+    auto state = std::move(it->second);
     _partitions.erase(it);
+    co_await state->gate.close();
     co_return;
 }
 
