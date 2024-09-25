@@ -18,6 +18,8 @@
 #include "model/record.h"
 #include "model/record_batch_reader.h"
 
+#include <seastar/core/weak_ptr.hh>
+
 namespace cloud_topics::details {
 
 using batcher_req_index = named_type<int64_t, struct batcher_req_index_tag>;
@@ -25,7 +27,7 @@ using batcher_req_index = named_type<int64_t, struct batcher_req_index_tag>;
 // This object is created for every produce request. It may contain
 // multiple batches.
 template<class Clock>
-struct write_request {
+struct write_request : ss::weakly_referencable<write_request<Clock>> {
     using timestamp_t = Clock::time_point;
     /// Target NTP
     model::ntp ntp;
