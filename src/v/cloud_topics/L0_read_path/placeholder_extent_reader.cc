@@ -8,15 +8,15 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
-#include "cloud_topics/reader/placeholder_extent_reader.h"
+#include "cloud_topics/L0_read_path/placeholder_extent_reader.h"
 
 #include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/io_result.h"
 #include "cloud_io/remote.h"
+#include "cloud_topics/L0_read_path/placeholder_extent.h"
 #include "cloud_topics/dl_placeholder.h"
 #include "cloud_topics/errc.h"
 #include "cloud_topics/logger.h"
-#include "cloud_topics/reader/placeholder_extent.h"
 #include "model/fundamental.h"
 #include "model/record_batch_reader.h"
 #include "model/record_batch_types.h"
