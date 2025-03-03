@@ -24,6 +24,10 @@
 #include <optional>
 #include <system_error>
 
+namespace experimental::cloud_topics {
+class api;
+}
+
 namespace kafka {
 
 /**
@@ -187,13 +191,18 @@ private:
     std::unique_ptr<impl> _impl;
 };
 
-partition_proxy
-make_partition_proxy(const ss::lw_shared_ptr<cluster::partition>&);
+partition_proxy make_partition_proxy(
+  const ss::lw_shared_ptr<cluster::partition>&,
+  experimental::cloud_topics::api* = nullptr);
 
-std::optional<partition_proxy>
-make_partition_proxy(const model::ktp&, cluster::partition_manager&);
+std::optional<partition_proxy> make_partition_proxy(
+  const model::ktp&,
+  cluster::partition_manager&,
+  experimental::cloud_topics::api* = nullptr);
 
-std::optional<partition_proxy>
-make_partition_proxy(const model::ntp&, cluster::partition_manager&);
+std::optional<partition_proxy> make_partition_proxy(
+  const model::ntp&,
+  cluster::partition_manager&,
+  experimental::cloud_topics::api* = nullptr);
 
 } // namespace kafka
