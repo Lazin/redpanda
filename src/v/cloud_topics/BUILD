@@ -109,6 +109,19 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "api",
+    hdrs = [
+        "api.h",
+    ],
+    include_prefix = "cloud_topics",
+    visibility = ["//src/v/kafka/data:__pkg__"],
+    deps = [
+        "//src/v/model",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "app",
     srcs = [
         "app.cc",
@@ -119,6 +132,7 @@ redpanda_cc_library(
     implementation_deps = [
         "//src/v/cloud_io:remote",
         "//src/v/cloud_storage",
+        "//src/v/cloud_topics:api",
         "//src/v/cloud_topics/L0_read_path:L0_fetch_handler",
         "//src/v/cloud_topics/batcher",
         "//src/v/cloud_topics/core:read_pipeline",

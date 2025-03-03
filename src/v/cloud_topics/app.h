@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "cloud_topics/api.h"
 #include "model/fundamental.h"
 
 #include <seastar/core/future.hh>
@@ -32,7 +33,7 @@ class cache;
 
 namespace experimental::cloud_topics {
 
-class app {
+class app : public api {
     class impl;
 
 public:
