@@ -175,7 +175,8 @@ public:
             std::ref(app.tx_gateway_frontend),
             std::nullopt,
             std::ref(*app.thread_worker),
-            std::ref(app.schema_registry()))
+            std::ref(app.schema_registry()),
+            std::ref(app.cloud_topics_api))
           .get();
 
         configs.stop().get();

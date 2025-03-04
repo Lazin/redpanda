@@ -19,6 +19,7 @@
 #include "cloud_storage/remote.h"
 #include "cloud_storage_clients/client_pool.h"
 #include "cloud_storage_clients/configuration.h"
+#include "cloud_topics/app_impl.h"
 #include "cloud_topics/dl_stm/dl_stm_factory.h"
 #include "cluster/archival/archival_metadata_stm.h"
 #include "cluster/archival/archiver_manager.h"
@@ -1320,6 +1321,7 @@ void application::wire_up_runtime_services(
           &partition_manager,
           &_transform_rpc_client,
           &metadata_cache,
+          &cloud_topics_api,
           sched_groups.transforms_sg(),
           memory_groups().data_transforms_max_memory())
           .get();
@@ -1630,12 +1632,6 @@ void application::wire_up_redpanda_services(
       }))
       .get();
     vlog(_log.info, "Partition manager started");
-    construct_service(
-      offsets_lookup,
-      node_id,
-      std::ref(partition_manager),
-      std::ref(shard_table))
-      .get();
 
     construct_service(node_status_table, node_id).get();
     // controller
@@ -1970,13 +1966,20 @@ void application::wire_up_redpanda_services(
           archival_storage_enabled(),
           "cloud topics currently requires archival storage to be enabled");
         construct_service(
-          _reconciler,
-          &partition_manager,
-          &cloud_io,
-          &shadow_index_cache,
-          bucket)
+          cloud_topics_api, ss::sharded_parameter([this, bucket] {
+              return experimental::cloud_topics::make_app(
+                &partition_manager, &cloud_io, &shadow_index_cache, bucket);
+          }))
           .get();
     }
+
+    construct_service(
+      offsets_lookup,
+      node_id,
+      std::ref(partition_manager),
+      std::ref(shard_table),
+      std::ref(cloud_topics_api))
+      .get();
 
     // group membership
     syschecks::systemd_message("Creating kafka group manager").get();
@@ -2289,7 +2292,8 @@ void application::wire_up_redpanda_services(
         std::ref(tx_gateway_frontend),
         qdc_config,
         std::ref(*thread_worker),
-        std::ref(_schema_registry))
+        std::ref(_schema_registry),
+        std::ref(cloud_topics_api))
       .get();
     construct_service(
       _compaction_controller,
@@ -3147,7 +3151,8 @@ void application::start_runtime_services(
     space_manager->start().get();
 
     if (config::shard_local_cfg().development_enable_cloud_topics()) {
-        _reconciler.invoke_on_all([](auto& app) { return app.start(); }).get();
+        cloud_topics_api.invoke_on_all([](auto& app) { return app.start(); })
+          .get();
     }
 }
 

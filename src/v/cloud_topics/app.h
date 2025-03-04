@@ -19,41 +19,32 @@
 
 #include <memory>
 
-namespace cluster {
-class partition_manager;
-}
-
-namespace cloud_io {
-class remote;
-} // namespace cloud_io
-
-namespace cloud_storage {
-class cache;
-}
-
 namespace experimental::cloud_topics {
 
-class app : public api {
-    class impl;
-
+class app {
 public:
-    app(
-      seastar::sharded<cluster::partition_manager>*,
-      seastar::sharded<cloud_io::remote>*,
-      seastar::sharded<cloud_storage::cache>*,
-      cloud_storage_clients::bucket_name bucket);
+    explicit app(ss::shared_ptr<api>);
 
     app(const app&) = delete;
     app& operator=(const app&) = delete;
     app(app&&) noexcept = delete;
     app& operator=(app&&) noexcept = delete;
-    ~app();
 
     seastar::future<> start();
     seastar::future<> stop();
 
+    ss::future<result<model::record_batch_reader>> write_and_debounce(
+      model::ntp ntp,
+      model::record_batch_reader r,
+      std::chrono::milliseconds timeout);
+
+    ss::future<result<reader_with_tx>> make_reader(
+      model::ntp ntp,
+      storage::log_reader_config cfg,
+      std::chrono::milliseconds timeout);
+
 private:
-    std::unique_ptr<impl> _impl;
+    ss::shared_ptr<api> _impl;
 };
 
 } // namespace experimental::cloud_topics

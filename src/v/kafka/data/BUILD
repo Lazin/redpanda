@@ -33,7 +33,7 @@ redpanda_cc_library(
     deps = [
         "//src/v/base",
         "//src/v/cloud_storage",
-        "//src/v/cloud_topics:api",
+        "//src/v/cloud_topics:app",
         "//src/v/kafka/protocol",
         "//src/v/kafka/server:errors",
         "//src/v/model",

@@ -205,7 +205,7 @@ ss::future<checked<event, errc>> write_pipeline<Clock>::stage::wait_until(
             if (event.pending_write_bytes < max_bytes) {
                 // Ignore all write requests until timed
                 // out or enough data.
-                break;
+                continue;
             }
             [[fallthrough]];
         case core::event_type::err_timedout:

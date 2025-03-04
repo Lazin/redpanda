@@ -24,7 +24,7 @@ partition_proxy make_with_impl(Args&&... args) {
 
 partition_proxy make_partition_proxy(
   const ss::lw_shared_ptr<cluster::partition>& partition,
-  experimental::cloud_topics::api* ct_app) {
+  experimental::cloud_topics::app* ct_app) {
     if (partition->get_ntp_config().cloud_topic_enabled()) {
         return make_with_impl<cloud_topic_partition>(partition, ct_app);
     }
@@ -34,7 +34,7 @@ partition_proxy make_partition_proxy(
 std::optional<partition_proxy> make_partition_proxy(
   const model::ktp& ktp,
   cluster::partition_manager& cluster_pm,
-  experimental::cloud_topics::api* ct_app) {
+  experimental::cloud_topics::app* ct_app) {
     auto partition = cluster_pm.get(ktp);
     if (partition) {
         return make_partition_proxy(partition, ct_app);
@@ -45,7 +45,7 @@ std::optional<partition_proxy> make_partition_proxy(
 std::optional<partition_proxy> make_partition_proxy(
   const model::ntp& ntp,
   cluster::partition_manager& cluster_pm,
-  experimental::cloud_topics::api* ct_app) {
+  experimental::cloud_topics::app* ct_app) {
     auto partition = cluster_pm.get(ntp);
     if (partition) {
         return make_partition_proxy(partition, ct_app);

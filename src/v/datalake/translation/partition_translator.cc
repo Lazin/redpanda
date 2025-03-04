@@ -186,8 +186,10 @@ partition_translator::partition_translator(
   , _record_translator(std::move(record_translator))
   , _table_creator(
       std::make_unique<coordinator_table_creator>(_frontend->local()))
-  , _partition_proxy(std::make_unique<kafka::partition_proxy>(
-      kafka::make_partition_proxy(_partition)))
+  , _partition_proxy(
+      std::make_unique<kafka::partition_proxy>(kafka::make_partition_proxy(
+        _partition,
+        nullptr /*TODO: fixme before cloud_topics are used with iceberg*/)))
   , _jitter{translation_interval, translation_jitter}
   , _max_bytes_per_reader(reader_max_bytes)
   , _parallel_translations(parallel_translations)

@@ -60,6 +60,13 @@ namespace features {
 class feature_table;
 }
 
+namespace experimental::cloud_topics {
+class app;
+}
+namespace cloud_topics {
+using app = experimental::cloud_topics::app;
+}
+
 namespace kafka {
 
 class server;
@@ -104,7 +111,8 @@ public:
       seastar::sharded<cluster::tx_gateway_frontend>&,
       std::optional<qdc_monitor_config>,
       ssx::singleton_thread_worker&,
-      const std::unique_ptr<pandaproxy::schema_registry::api>&);
+      const std::unique_ptr<pandaproxy::schema_registry::api>&,
+      seastar::sharded<cloud_topics::app>&);
 
     seastar::future<> start();
     seastar::future<> shutdown_input();

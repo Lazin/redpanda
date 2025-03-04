@@ -43,7 +43,8 @@ seastar::future<> server_app::init(
   seastar::sharded<cluster::tx_gateway_frontend>& tx,
   std::optional<qdc_monitor_config> qdc,
   ssx::singleton_thread_worker& worker,
-  const std::unique_ptr<pandaproxy::schema_registry::api>& pp) {
+  const std::unique_ptr<pandaproxy::schema_registry::api>& pp,
+  ss::sharded<cloud_topics::app>& cloud_topics_api) {
     return _server.start(
       conf,
       smp,
@@ -71,7 +72,8 @@ seastar::future<> server_app::init(
       std::ref(tx),
       qdc,
       std::ref(worker),
-      std::ref(pp));
+      std::ref(pp),
+      std::ref(cloud_topics_api));
 }
 
 server_app::~server_app() = default;
