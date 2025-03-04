@@ -21,8 +21,6 @@
 
 #include <gtest/gtest.h>
 
-namespace cloud_topics = experimental::cloud_topics;
-
 static ss::logger test_log("test_log");
 
 struct basic_fixture
@@ -83,7 +81,7 @@ TEST_F(basic_fixture, create_topic) {
 
     ASSERT_GE(total_records, num_records);
 
-    auto pm = cloud_topics::make_cluster_partition_manager(
+    auto pm = experimental::cloud_topics::make_cluster_partition_manager(
       app.partition_manager.local());
     auto part = pm->get_partition(ntp);
     storage::log_reader_config cfg(

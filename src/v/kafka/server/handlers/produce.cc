@@ -332,6 +332,7 @@ partition_produce_stages produce_topic_partition(
         // negative timeout translates to no timeout
         timeout = max_timeout;
     }
+    auto ct_api = std::ref(octx.rctx.cloud_topics_api());
     auto f
       = octx.rctx.partition_manager()
           .invoke_on(
@@ -339,6 +340,7 @@ partition_produce_stages produce_topic_partition(
             octx.ssg,
             [batch = std::move(batch),
              validator = std::move(validator),
+             ct_api,
              ntp = std::move(ntp),
              dispatch = std::move(dispatch),
              num_records,
@@ -387,12 +389,14 @@ partition_produce_stages produce_topic_partition(
                    num_records,
                    batch_size,
                    timeout,
+                   ct_api,
                    batch = std::move(batch)](kafka::error_code err) mutable {
                       if (err != kafka::error_code::none) {
                           return finalize_request_with_error_code(
                             err, std::move(dispatch), ntp, source_shard);
                       }
-                      auto proxy = kafka::make_partition_proxy(partition);
+                      auto proxy = kafka::make_partition_proxy(
+                        partition, &ct_api.get().local());
                       auto stages = partition_append(
                         ntp.tp.partition,
                         std::move(proxy),
