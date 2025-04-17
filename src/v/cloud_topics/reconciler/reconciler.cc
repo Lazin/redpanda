@@ -275,9 +275,8 @@ ss::future<> reconciler::commit_object(const object_range_info& range) {
 
 ss::future<model::record_batch_reader>
 reconciler::make_reader(const attached_partition& partition, size_t max_bytes) {
-    app ct_app(_api);
     auto proxy = kafka::make_partition_proxy(
-      partition->partition, &ct_app);
+      partition->partition, _api);
 
     auto effective_start = co_await proxy.sync_effective_start();
     if (effective_start.has_error()) {

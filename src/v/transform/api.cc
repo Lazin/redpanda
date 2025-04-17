@@ -372,7 +372,7 @@ public:
       wasm_engine_factory factory,
       cluster::topic_table* topic_table,
       cluster::partition_manager* partition_manager,
-      experimental::cloud_topics::app* ct_app,
+      ss::sharded<experimental::cloud_topics::app>* ct_app,
       rpc::client* client,
       commit_batcher<>* batcher)
       : _wasm_engine_factory(std::move(factory))
@@ -393,7 +393,8 @@ public:
         if (!engine) {
             throw std::runtime_error("unable to create wasm engine");
         }
-        auto partition = kafka::make_partition_proxy(ntp, *_partition_manager, _ct_app);
+        auto partition = kafka::make_partition_proxy(
+          ntp, *_partition_manager, *_ct_app);
         if (!partition) {
             throw std::runtime_error("unable to create transform source");
         }
@@ -427,7 +428,7 @@ private:
     mutex _mu{"proc_factory"};
     wasm_engine_factory _wasm_engine_factory;
     cluster::partition_manager* _partition_manager;
-    experimental::cloud_topics::app* _ct_app;
+    ss::sharded<experimental::cloud_topics::app>* _ct_app;
     rpc::client* _client;
     absl::flat_hash_map<model::offset, std::unique_ptr<wasm::engine>> _cache;
     commit_batcher<>* _batcher;
@@ -548,7 +549,7 @@ ss::future<> service::start() {
         },
         &_topic_table->local(),
         &_partition_manager->local(),
-        &_cloud_topics_api->local(),
+        _cloud_topics_api,
         &_rpc_client->local(),
         _batcher.get()),
       _sg,

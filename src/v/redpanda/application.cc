@@ -2048,7 +2048,8 @@ void application::wire_up_redpanda_services(
       node_id,
       std::ref(_connection_cache),
       std::ref(metadata_cache),
-      std::ref(partition_manager))
+      std::ref(partition_manager),
+      std::ref(cloud_topics_api))
       .get();
     construct_service(
       _group_manager,

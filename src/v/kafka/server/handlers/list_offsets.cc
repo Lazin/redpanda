@@ -70,7 +70,7 @@ static ss::future<list_offset_partition_response> list_offsets_partition(
   model::isolation_level isolation_lvl,
   kafka::leader_epoch current_leader_epoch,
   cluster::partition_manager& mgr) {
-    auto ct_api = &octx.rctx.cloud_topics_api().local();
+    auto& ct_api = octx.rctx.cloud_topics_api();
     auto kafka_partition = make_partition_proxy(ktp, mgr, ct_api);
     if (!kafka_partition) {
         co_return list_offsets_response::make_partition(

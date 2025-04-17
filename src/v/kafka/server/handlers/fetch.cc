@@ -324,9 +324,8 @@ static ss::future<read_result> do_read_from_ntp(
     /*
      * lookup the ntp's partition
      */
-    // TODO: call is_local_initialized on sharded
     auto kafka_partition = make_partition_proxy(
-      ntp_config.ktp(), cluster_pm, &ct_api->local());
+      ntp_config.ktp(), cluster_pm, *ct_api);
     if (unlikely(!kafka_partition)) {
         co_return read_result(error_code::unknown_topic_or_partition);
     }

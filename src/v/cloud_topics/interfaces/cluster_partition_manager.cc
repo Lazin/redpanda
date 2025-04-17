@@ -36,10 +36,6 @@ struct cluster_partition : cluster_partition_api {
         co_return co_await _partition->make_reader(config, debounce_deadline);
     }
 
-    ss::shared_ptr<dl_stm_api> get_metadata_api() override {
-        return _partition->dl_stm_api();
-    }
-
     ss::lw_shared_ptr<cluster::partition> _partition;
 };
 

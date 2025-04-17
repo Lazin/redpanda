@@ -30,14 +30,17 @@
 
 namespace experimental::cloud_topics {
 
-class impl : public api, public ss::enable_shared_from_this<impl> {
+class impl
+  : public api
+  , public ss::enable_shared_from_this<impl> {
 public:
     impl(
       seastar::sharded<cluster::partition_manager>* pm,
       seastar::sharded<cloud_io::remote>* io,
       seastar::sharded<cloud_storage::cache>* cache,
       cloud_storage_clients::bucket_name bucket)
-      : _reconciler(std::make_unique<reconciler::reconciler>(shared_from_this(), pm, io))
+      : _reconciler(
+          std::make_unique<reconciler::reconciler>(shared_from_this(), pm, io))
       , _write_pipeline(std::make_unique<core::write_pipeline<>>())
       , _throttler(std::make_unique<throttler<>>(
           10_MiB /*TODO: fixme*/,
@@ -52,8 +55,7 @@ public:
           bucket,
           &io->local(),
           &cache->local(),
-          make_cluster_partition_manager(pm->local()))) {
-          }
+          make_cluster_partition_manager(pm->local()))) {}
 
     seastar::future<> start() {
         // Reconciler

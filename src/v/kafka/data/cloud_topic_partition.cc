@@ -40,9 +40,15 @@
 namespace kafka {
 cloud_topic_partition::cloud_topic_partition(
   ss::lw_shared_ptr<cluster::partition> p,
-  experimental::cloud_topics::app* app) noexcept
-  : _partition(p)
-  , _ct_api(app) {}
+  ss::shared_ptr<experimental::cloud_topics::api> app) noexcept
+  : _partition(std::move(p))
+  , _ct_api(std::move(app)) {}
+
+cloud_topic_partition::cloud_topic_partition(
+  ss::lw_shared_ptr<cluster::partition> p,
+  ss::sharded<experimental::cloud_topics::app>& ct_app) noexcept
+: cloud_topic_partition(std::move(p), ct_app.local().get_api())
+{}
 
 const model::ntp& cloud_topic_partition::ntp() const {
     return _partition->ntp();
@@ -232,7 +238,7 @@ struct upload_and_replicate_stages {
 };
 
 static ss::future<> bg_upload_and_replicate(
-  experimental::cloud_topics::app* api,
+  ss::shared_ptr<experimental::cloud_topics::api> api,
   ss::lw_shared_ptr<cluster::partition> partition,
   ss::lw_shared_ptr<upload_and_replicate_stages> op) {
     vassert(api != nullptr, "cloud topics api is not initialized");

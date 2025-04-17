@@ -396,7 +396,7 @@ partition_produce_stages produce_topic_partition(
                             err, std::move(dispatch), ntp, source_shard);
                       }
                       auto proxy = kafka::make_partition_proxy(
-                        partition, &ct_api.get().local());
+                        partition, ct_api.get());
                       auto stages = partition_append(
                         ntp.tp.partition,
                         std::move(proxy),

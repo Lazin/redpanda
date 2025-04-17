@@ -21,6 +21,8 @@
 
 namespace experimental::cloud_topics {
 
+// Simple container to use with seastar::sharded.
+// The seastar::sharded wants to know the size of the object at compile time.
 class app {
 public:
     explicit app(ss::shared_ptr<api>);
@@ -33,15 +35,7 @@ public:
     seastar::future<> start();
     seastar::future<> stop();
 
-    ss::future<result<model::record_batch_reader>> write_and_debounce(
-      model::ntp ntp,
-      model::record_batch_reader r,
-      std::chrono::milliseconds timeout);
-
-    ss::future<result<reader_with_tx>> make_reader(
-      model::ntp ntp,
-      storage::log_reader_config cfg,
-      std::chrono::milliseconds timeout);
+    ss::shared_ptr<api> get_api();
 
 private:
     ss::shared_ptr<api> _impl;

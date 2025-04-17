@@ -74,7 +74,7 @@ offsets_lookup::lookup(offsets_lookup_request req) {
                   auto partition = kafka::make_partition_proxy(
                     model::ktp{ntp.tp.topic, ntp.tp.partition},
                     pm,
-                    &_ct.local());
+                    _ct);
                   if (!partition.has_value()) {
                       // Partition may have moved between scheduling points.
                       continue;

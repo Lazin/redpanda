@@ -28,6 +28,7 @@ v_cc_library(
   NAME cloud_topics_app
   SRCS
     app.cc
+    app_impl.cc
   DEPS
     v::cloud_topics_base
     v::cloud_topics_reconciler

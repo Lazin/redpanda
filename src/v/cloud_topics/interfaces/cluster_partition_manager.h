@@ -10,15 +10,12 @@
 
 #pragma once
 
-#include "cloud_topics/dl_stm/dl_stm_api.h"
 #include "cluster/fwd.h"
 #include "model/fundamental.h"
 #include "model/record_batch_reader.h"
 #include "storage/types.h"
 
 namespace experimental::cloud_topics {
-
-class dl_stm_api;
 
 /// This is a substitute for the 'cluster::partition' in 'cloud_topics'.
 /// The implementation should be straightforward. The interface just includes
@@ -47,11 +44,6 @@ struct cluster_partition_api {
       std::optional<model::timeout_clock::time_point> debounce_deadline
       = std::nullopt)
       = 0;
-
-    /// Get dl_stm_api instance associated with the partition.
-    /// Currently, the STM is a persisted_stm instance associated
-    /// with the cluster::partition instance.
-    virtual ss::shared_ptr<dl_stm_api> get_metadata_api() = 0;
 };
 
 /// Wrapper for the 'cluster::partition_manager'.

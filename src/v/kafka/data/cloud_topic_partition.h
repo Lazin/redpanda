@@ -34,7 +34,11 @@ class cloud_topic_partition final : public kafka::partition_proxy::impl {
 public:
     explicit cloud_topic_partition(
       ss::lw_shared_ptr<cluster::partition> p,
-      experimental::cloud_topics::app* ct = nullptr) noexcept;
+      ss::shared_ptr<experimental::cloud_topics::api> ct) noexcept;
+
+    explicit cloud_topic_partition(
+      ss::lw_shared_ptr<cluster::partition> p,
+      ss::sharded<experimental::cloud_topics::app>& ct_app) noexcept;
 
     const model::ntp& ntp() const final;
 
@@ -97,7 +101,7 @@ private:
       raft::replicate_options);
 
     ss::lw_shared_ptr<cluster::partition> _partition;
-    experimental::cloud_topics::app* _ct_api{nullptr};
+    ss::shared_ptr<experimental::cloud_topics::api> _ct_api;
 };
 
 } // namespace kafka

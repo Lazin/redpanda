@@ -12,6 +12,7 @@
 #include "gmock/gmock.h"
 #include "model/fundamental.h"
 #include "model/record_batch_reader.h"
+#include "cloud_topics/dl_stm/dl_stm_api.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
