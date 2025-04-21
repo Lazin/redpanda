@@ -68,10 +68,10 @@ redpanda_cc_library(
 redpanda_cc_library(
     name = "L0_fetch_handler",
     srcs = [
-        "L0_fetch_handler.cc",
+        "fetch_request_handler.cc",
     ],
     hdrs = [
-        "L0_fetch_handler.h",
+        "fetch_request_handler.h",
     ],
     include_prefix = "cloud_topics/L0_read_path",
     deps = [

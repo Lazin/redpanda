@@ -201,6 +201,7 @@ l0_fetch_handler::process_single_request(core::read_request<>* req) {
     std::optional<model::record_batch_reader> prepared;
     std::optional<fragmented_vector<model::tx_range>> aborted_tx;
     try {
+        /*TODO: remove*/ vlog(req->rtc_logger.debug, "Processing request");
         auto partition = _pm->get_partition(req->ntp);
         if (partition == nullptr) {
             // Partition was moved
@@ -215,14 +216,28 @@ l0_fetch_handler::process_single_request(core::read_request<>* req) {
         // Translate offsets, the cloud topics subsystem doesn't "know"
         // anything about non-data batches
         cfg.translate_offsets = storage::translate_offsets::yes;
+
+        /* TODO: refactor
+         * query the metadata layer at the higher level (inside the
+         * kafka::cloud_topic_partition) and pass the reader to the fetch
+         * handler. This will allow us to decouple metadata storage from the
+         * read path completely. The stuff handled by the pipeline will become a
+         * data plane and the partition will be a control plane.
+         */
+        /* TODO: remove*/ vlog(req->rtc_logger.debug, "Querying metadata layer");
+
         auto underlying = co_await partition->make_reader(
           cfg, req->expiration_time);
 
+        /* TODO: remove*/ vlog(req->rtc_logger.debug, "Calling prepare_log_reader");
         auto prep_result = co_await prepare_log_reader(
           std::move(underlying), cfg.max_bytes);
 
+        /* TODO: remove*/ vlog(req->rtc_logger.debug, "Requesting transactions");
         aborted_tx = co_await partition->aborted_transactions(
           prep_result.base_offset, prep_result.last_offset);
+
+        /* TODO: remove*/ vlog(req->rtc_logger.debug, "Copying the data");
         prepared = model::make_fragmented_memory_record_batch_reader(
           std::move(prep_result.batches));
     } catch (...) {

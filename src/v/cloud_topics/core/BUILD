@@ -71,10 +71,9 @@ redpanda_cc_library(
         ":serializer",
         "//src/v/base",
         "//src/v/cloud_topics:types",
-        "//src/v/container:fragmented_vector",
         "//src/v/model",
-        "//src/v/storage",
         "//src/v/utils:retry_chain_node",
+        "//src/v/container:intrusive",
         "@seastar",
     ],
 )

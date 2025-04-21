@@ -2025,11 +2025,15 @@ void application::wire_up_redpanda_services(
         vassert(
           archival_storage_enabled(),
           "cloud topics currently requires archival storage to be enabled");
+
         construct_service(
           cloud_topics_api, ss::sharded_parameter([this, bucket] {
               return experimental::cloud_topics::make_app(
                 &partition_manager, &cloud_io, &shadow_index_cache, bucket);
           }))
+          .get();
+
+        cloud_topics_api.invoke_on_all([](auto& app) { return app.start(); })
           .get();
     }
 
@@ -3228,11 +3232,6 @@ void application::start_runtime_services(
     }
 
     space_manager->start().get();
-
-    if (config::shard_local_cfg().development_enable_cloud_topics()) {
-        cloud_topics_api.invoke_on_all([](auto& app) { return app.start(); })
-          .get();
-    }
 }
 
 /**

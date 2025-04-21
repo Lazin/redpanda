@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "cloud_topics/L0_read_path/L0_fetch_handler.h"
+#include "cloud_topics/L0_read_path/fetch_handler.h"
 #include "cloud_topics/L0_read_path/tests/placeholder_extent_fixture.h"
 #include "cloud_topics/core/read_pipeline.h"
 #include "cloud_topics/errc.h"

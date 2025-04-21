@@ -51,12 +51,14 @@ batcher<Clock>::batcher(
 
 template<class Clock>
 ss::future<> batcher<Clock>::start() {
+    vlog(cd_log.debug, "Batcher start");
     ssx::spawn_with_gate(_gate, [this] { return bg_controller_loop(); });
     return ss::now();
 }
 
 template<class Clock>
 ss::future<> batcher<Clock>::stop() {
+    vlog(cd_log.debug, "Batcher stop");
     _as.request_abort();
     co_await _gate.close();
 }
@@ -157,6 +159,7 @@ ss::future<result<bool>> batcher<Clock>::run_once() noexcept {
           10_MiB); // TODO: use configuration parameter
 
         if (list.requests.empty()) {
+            vlog(_logger.debug, "No write requests to process");
             co_return true;
         }
 
@@ -199,8 +202,10 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
     bool more_work = false;
     while (!_as.abort_requested()) {
         if (!more_work) {
+        /*TODO: remove*/vlog(_logger.debug, "Batcher wait_until");
             auto wait_res = co_await _stage.wait_until(
               10_MiB, Clock::now() + _upload_interval(), &_as);
+        /*TODO: remove*/vlog(_logger.debug, "Batcher wait_until exit");
             if (wait_res.has_error()) {
                 // Shutting down
                 vlog(
@@ -210,6 +215,11 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
                 co_return;
             }
         }
+        if (_as.abort_requested()) {
+            vlog(_logger.info, "Batcher upload loop is shutting down");
+            co_return;
+        }
+        /*TODO: remove*/vlog(_logger.debug, "Batcher run_once");
         auto res = co_await run_once();
         if (res.has_error()) {
             if (res.error() == errc::shutting_down) {
@@ -221,7 +231,11 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
                   _logger.info, "Batcher upload loop error: {}", res.error());
                 more_work = true;
             }
+        } else {
+            more_work = !res.value();
+            /*TODO: remove*/vlog(_logger.debug, "Batcher more_work: {}", more_work);
         }
+        /*TODO: remove*/vlog(_logger.debug, "loop iter end");
     }
 }
 

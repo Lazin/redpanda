@@ -117,7 +117,6 @@ public:
         co_return co_await subscribe(flt);
     }
     ss::future<event> subscribe(event_filter<Clock>& flt) noexcept {
-        _filters.push_back(flt);
         // If the pipeline already has some requests we need to set the future
         // eagerly
         bool found = false;
@@ -128,8 +127,10 @@ public:
             }
         }
         if (found) {
-            static_cast<Derived*>(this)->signal(flt.get_stage());
+            // Trigger event immediately without waiting for the future
+            co_return static_cast<Derived*>(this)->trigger_event(flt.get_stage());
         }
+        _filters.push_back(flt);
         auto ev = co_await ss::coroutine::as_future(flt.get_future());
         if (ev.failed()) {
             auto ep = ev.get_exception();
@@ -244,6 +245,7 @@ protected:
             }
             // The cleanup is performed by the subscriber
         }
+        vlog(_logger.debug, "signal, stage: {} exit", stage);
     }
 
 private:

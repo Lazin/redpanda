@@ -42,9 +42,9 @@ public:
       : _reconciler(
           std::make_unique<reconciler::reconciler>(shared_from_this(), pm, io))
       , _write_pipeline(std::make_unique<core::write_pipeline<>>())
-      , _throttler(std::make_unique<throttler<>>(
-          10_MiB /*TODO: fixme*/,
-          _write_pipeline->register_write_pipeline_stage()))
+      // , _throttler(std::make_unique<throttler<>>(
+      //     10_MiB /*TODO: fixme*/,
+      //     _write_pipeline->register_write_pipeline_stage()))
       , _batcher(std::make_unique<batcher<>>(
           _write_pipeline->register_write_pipeline_stage(),
           bucket,
@@ -61,7 +61,7 @@ public:
         // Reconciler
         co_await _reconciler->start();
         // Write path
-        co_await _throttler->start();
+        //co_await _throttler->start();
         co_await _batcher->start();
         // Read path
         co_await _l0_resolver->start();
@@ -73,7 +73,7 @@ public:
         // Write path
         co_await _write_pipeline->stop();
         co_await _batcher->stop();
-        co_await _throttler->stop();
+        //co_await _throttler->stop();
         // Reconciler
         co_await _reconciler->stop();
     }
@@ -104,7 +104,7 @@ private:
     std::unique_ptr<reconciler::reconciler> _reconciler;
     // Write path
     std::unique_ptr<core::write_pipeline<>> _write_pipeline;
-    std::unique_ptr<throttler<>> _throttler;
+    //std::unique_ptr<throttler<>> _throttler;
     std::unique_ptr<batcher<>> _batcher;
     // Read path
     std::unique_ptr<core::read_pipeline<>> _read_pipeline;

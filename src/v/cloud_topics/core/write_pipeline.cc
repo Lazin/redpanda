@@ -22,6 +22,10 @@
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/optimized_optional.hh>
+// TODO: remove
+#include <seastar/core/exception_hacks.hh>
+// TODO: remove
+#include <seastar/util/backtrace.hh>
 
 #include <algorithm>
 #include <chrono>
@@ -72,6 +76,7 @@ write_pipeline<Clock>::write_and_debounce(
     this->get_pending().push_back(request);
 
     // Notify all active event_filter instances
+    vlog(cd_log.debug, "Write and debounce signal");
     this->signal(stage);
 
     auto res = co_await std::move(fut);
@@ -101,6 +106,7 @@ void write_pipeline<Clock>::reenqueue(write_request<Clock>& r) {
         // and notify the corresponding event filter.
         r.stage = this->next_stage(r.stage);
         this->get_pending().push_back(r);
+        vlog(cd_log.debug, "Write request reenqueue signal");
         this->signal(r.stage);
     }
 }
@@ -159,8 +165,20 @@ write_pipeline<Clock>::register_write_pipeline_stage() noexcept {
 
 template<class Clock>
 void write_pipeline<Clock>::signal(pipeline_stage stage) {
+    vlog(cd_log.debug, "signal, stage: {}", stage);
     this->do_signal(
       stage, event_type::new_write_request, _current_size, _bytes_total);
+    vlog(cd_log.debug, "signal, stage: {} exit", stage);
+}
+
+template<class Clock>
+event write_pipeline<Clock>::trigger_event(pipeline_stage stage) {
+    return event{
+      .stage = stage,
+      .type = event_type::new_write_request,
+      .pending_write_bytes = _current_size,
+      .total_write_bytes = _bytes_total,
+    };
 }
 
 template<class Clock>
@@ -209,7 +227,7 @@ ss::future<checked<event, errc>> write_pipeline<Clock>::stage::wait_until(
             }
             [[fallthrough]];
         case core::event_type::err_timedout:
-            co_return errc::success;
+            break;
         case core::event_type::new_read_request:
         case core::event_type::none:
             vassert(false, "Read request added to the write pipeline");

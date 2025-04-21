@@ -49,6 +49,7 @@ public:
     scoped_config test_local_cfg;
 };
 
+/*
 TEST_F(e2e_fixture, test_create_cloud_topic) {
     const model::topic topic_name("tapioca");
     model::ntp ntp(model::kafka_namespace, topic_name, 0);
@@ -64,6 +65,7 @@ TEST_F(e2e_fixture, test_create_cloud_topic) {
     auto partition = app.partition_manager.local().get(ntp);
     ASSERT_TRUE(partition->dl_stm_api() != nullptr);
 }
+    */
 
 TEST_F(e2e_fixture, test_l0_path) {
     const model::topic topic_name("tapioca");

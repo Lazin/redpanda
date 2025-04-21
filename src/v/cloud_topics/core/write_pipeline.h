@@ -156,6 +156,8 @@ public:
 
     void signal(pipeline_stage stage);
 
+    event trigger_event(pipeline_stage stage);
+
 private:
     /// Get write requests atomically.
     /// The total size of returned write requests and the stage to which they
