@@ -13,20 +13,13 @@
 #include "base/outcome.h"
 #include "model/fundamental.h"
 #include "model/record_batch_reader.h"
-#include "storage/types.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
 
-#include <memory>
-
 namespace experimental::cloud_topics {
 
-struct reader_with_tx {
-    model::record_batch_reader reader;
-    fragmented_vector<model::tx_range> tx;
-};
-
+/// Dataplane API
 class api {
 public:
     api() = default;
@@ -40,16 +33,21 @@ public:
     virtual ss::future<> start() = 0;
     virtual ss::future<> stop() = 0;
 
-    virtual ss::future<result<model::record_batch_reader>> write_and_debounce(
+    /// Write data batches and get back placeholder batches
+    virtual ss::future<result<ss::circular_buffer<model::record_batch>>>
+    write_and_debounce(
       model::ntp ntp,
       model::record_batch_reader r,
       std::chrono::milliseconds timeout)
       = 0;
 
-    virtual ss::future<result<reader_with_tx>> make_reader(
+    virtual ss::future<result<ss::circular_buffer<model::record_batch>>>
+    materialize(
       model::ntp ntp,
-      storage::log_reader_config cfg,
-      std::chrono::milliseconds timeout) = 0;
+      size_t output_size_estimate,
+      ss::circular_buffer<model::record_batch> metadata,
+      std::chrono::milliseconds timeout)
+      = 0;
 };
 
 } // namespace experimental::cloud_topics

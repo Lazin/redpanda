@@ -110,15 +110,19 @@ redpanda_cc_library(
 
 redpanda_cc_library(
     name = "app",
+    srcs = [
+        "app.cc",
+    ],
     hdrs = [
         "api.h",
         "app.h",
     ],
-    srcs = [
-        "app.cc",
-    ],
     include_prefix = "cloud_topics",
-    visibility = ["//src/v/redpanda:__pkg__", "//src/v/kafka/data:__pkg__", "//src/v/cloud_topics/reconciler:__pkg__"],
+    visibility = [
+        "//src/v/cloud_topics/reconciler:__pkg__",
+        "//src/v/kafka/data:__pkg__",
+        "//src/v/redpanda:__pkg__",
+    ],
     deps = [
         "//src/v/base",
         "//src/v/model",
@@ -136,6 +140,7 @@ redpanda_cc_library(
         "app_impl.h",
     ],
     implementation_deps = [
+        "//src/v/base",
         "//src/v/cloud_io:remote",
         "//src/v/cloud_storage",
         "//src/v/cloud_topics:app",
@@ -143,12 +148,10 @@ redpanda_cc_library(
         "//src/v/cloud_topics/batcher",
         "//src/v/cloud_topics/core:read_pipeline",
         "//src/v/cloud_topics/core:write_pipeline",
-        "//src/v/cloud_topics/interfaces:cluster_partition_manager",
         "//src/v/cloud_topics/reconciler",
         "//src/v/cloud_topics/throttler",
-        "//src/v/storage",
         "//src/v/model",
-        "//src/v/base",
+        "//src/v/storage",
     ],
     include_prefix = "cloud_topics",
     visibility = ["//src/v/redpanda:__pkg__"],

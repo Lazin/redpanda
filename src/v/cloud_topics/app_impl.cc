@@ -12,11 +12,10 @@
 
 #include "base/outcome.h"
 #include "cloud_storage/cache_service.h"
-#include "cloud_topics/L0_read_path/L0_fetch_handler.h"
+#include "cloud_topics/L0_read_path/fetch_request_handler.h"
 #include "cloud_topics/batcher/batcher.h"
 #include "cloud_topics/core/read_pipeline.h"
 #include "cloud_topics/core/write_pipeline.h"
-#include "cloud_topics/interfaces/cluster_partition_manager.h"
 #include "cloud_topics/reconciler/reconciler.h"
 #include "cloud_topics/throttler/throttler.h"
 #include "model/fundamental.h"
@@ -50,65 +49,67 @@ public:
           bucket,
           io->local()))
       , _read_pipeline(std::make_unique<core::read_pipeline<>>())
-      , _l0_resolver(std::make_unique<l0_fetch_handler>(
+      , _l0_resolver(std::make_unique<fetch_handler>(
           _read_pipeline->register_read_pipeline_stage(),
           bucket,
           &io->local(),
-          &cache->local(),
-          make_cluster_partition_manager(pm->local()))) {}
+          &cache->local())) {}
 
-    seastar::future<> start() {
+    seastar::future<> start() override {
         // Reconciler
         co_await _reconciler->start();
         // Write path
-        //co_await _throttler->start();
+        // co_await _throttler->start();
         co_await _batcher->start();
         // Read path
         co_await _l0_resolver->start();
     }
-    seastar::future<> stop() {
+    seastar::future<> stop() override {
         // Read path
         co_await _read_pipeline->stop();
         co_await _l0_resolver->stop();
         // Write path
         co_await _write_pipeline->stop();
         co_await _batcher->stop();
-        //co_await _throttler->stop();
-        // Reconciler
+        // co_await _throttler->stop();
+        //  Reconciler
         co_await _reconciler->stop();
     }
 
-    ss::future<result<model::record_batch_reader>> write_and_debounce(
+    ss::future<result<ss::circular_buffer<model::record_batch>>>
+    write_and_debounce(
       model::ntp ntp,
       model::record_batch_reader r,
-      std::chrono::milliseconds timeout) {
+      std::chrono::milliseconds timeout) override {
         return _write_pipeline->write_and_debounce(
           std::move(ntp), std::move(r), timeout);
     }
 
-    ss::future<result<reader_with_tx>> make_reader(
+    ss::future<result<ss::circular_buffer<model::record_batch>>> materialize(
       model::ntp ntp,
-      storage::log_reader_config cfg,
-      std::chrono::milliseconds timeout) {
-        auto res = co_await _read_pipeline->make_reader(ntp, cfg, timeout);
+      size_t output_size_estimate,
+      ss::circular_buffer<model::record_batch> metadata,
+      std::chrono::milliseconds timeout) override {
+        auto res = co_await _read_pipeline->make_reader(
+          ntp,
+          {.output_size_estimate = output_size_estimate,
+           .meta = std::move(metadata)},
+          timeout);
         if (!res) {
             co_return res.error();
         }
-        co_return reader_with_tx{
-          .reader = std::move(res.value().reader),
-          .tx = std::move(res.value().tx),
-        };
+        co_return std::move(res.value().results);
     }
 
 private:
     std::unique_ptr<reconciler::reconciler> _reconciler;
     // Write path
     std::unique_ptr<core::write_pipeline<>> _write_pipeline;
-    //std::unique_ptr<throttler<>> _throttler;
+    // std::unique_ptr<throttler<>> _throttler;
     std::unique_ptr<batcher<>> _batcher;
     // Read path
     std::unique_ptr<core::read_pipeline<>> _read_pipeline;
-    std::unique_ptr<l0_fetch_handler> _l0_resolver;
+    std::unique_ptr<fetch_handler> _l0_resolver;
 };
 
 ss::shared_ptr<api> make_app(

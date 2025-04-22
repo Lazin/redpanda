@@ -10,16 +10,12 @@
  */
 #pragma once
 
-#include "cloud_topics/api.h"
 #include "base/outcome.h"
+#include "cloud_topics/api.h"
 #include "model/fundamental.h"
-#include "model/record_batch_reader.h"
-#include "storage/types.h"
 
 #include <seastar/core/future.hh>
 #include <seastar/core/lowres_clock.hh>
-
-#include <memory>
 
 namespace cluster {
 class partition_manager;
@@ -36,9 +32,9 @@ class cache;
 namespace experimental::cloud_topics {
 
 ss::shared_ptr<api> make_app(
-      seastar::sharded<cluster::partition_manager>*,
-      seastar::sharded<cloud_io::remote>*,
-      seastar::sharded<cloud_storage::cache>*,
-      cloud_storage_clients::bucket_name bucket);
+  seastar::sharded<cluster::partition_manager>*,
+  seastar::sharded<cloud_io::remote>*,
+  seastar::sharded<cloud_storage::cache>*,
+  cloud_storage_clients::bucket_name bucket);
 
 } // namespace experimental::cloud_topics

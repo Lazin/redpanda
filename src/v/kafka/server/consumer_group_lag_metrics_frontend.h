@@ -42,9 +42,8 @@ public:
       : _self{self}
       , _rpc_connections{rpc_connections}
       , _metadata{metadata}
-      , _partition_manager(partition_manager) 
-      , _ct_app(ct_app)
-      {}
+      , _partition_manager(partition_manager)
+      , _ct_app(ct_app) {}
 
     ss::future<> start();
     ss::future<> stop();

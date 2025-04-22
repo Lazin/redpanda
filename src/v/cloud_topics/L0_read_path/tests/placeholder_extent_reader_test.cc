@@ -15,6 +15,7 @@
 #include "model/record.h"
 #include "model/record_batch_reader.h"
 #include "test_utils/test.h"
+#include "utils/retry_chain_node.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/circular_buffer.hh>
@@ -38,40 +39,21 @@ using namespace std::chrono_literals;
 
 namespace cloud_topics = experimental::cloud_topics;
 
-struct fragmented_vector_consumer {
-    ss::future<ss::stop_iteration> operator()(model::record_batch rb) {
-        target->push_back(std::move(rb));
-        co_return ss::stop_iteration::no;
-    }
-
-    void end_of_stream() {}
-
-    fragmented_vector<model::record_batch>* target;
-};
-
 TEST_F_CORO(placeholder_extent_fixture, full_scan_test) {
     const int num_batches = 10;
     co_await add_random_batches(num_batches);
     produce_placeholders(true, 1);
-    auto underlying = make_log_reader();
-    storage::log_reader_config config(
-      model::offset(0),
-      get_expected_committed_offset(),
-      ss::default_priority_class());
+    auto underlying = make_underlying();
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
-    auto reader = cloud_topics::make_placeholder_extent_reader(
-      config,
+    retry_chain_logger logger(test_log, rtc, "placeholder_extent_reader_test");
+    auto actual = co_await cloud_topics::materialize_placeholders(
       cloud_storage_clients::bucket_name("test-bucket-name"),
       std::move(underlying),
       remote,
       cache,
-      rtc);
-    fragmented_vector<model::record_batch> actual;
-    fragmented_vector_consumer consumer{
-      .target = &actual,
-    };
-    co_await reader.consume(consumer, model::timeout_clock::now() + 10s);
+      rtc,
+      logger);
     ASSERT_EQ_CORO(actual.size(), expected.size());
     ASSERT_TRUE_CORO(actual == expected);
 }
@@ -85,14 +67,14 @@ ss::future<> test_aggregated_log_partial_scan(
     // Copy batches that we expect to read
     model::offset base;
     model::offset last;
-    fragmented_vector<model::record_batch> expected_view;
+    ss::circular_buffer<model::record_batch> expected_view;
     for (int i = begin; i <= end; i++) {
-        const auto& hdr = fx->expected.at(i);
+        const auto& hdr = fx->expected[i];
         if (base == model::offset{}) {
             base = hdr.base_offset();
         }
         last = hdr.last_offset();
-        expected_view.push_back(fx->expected.at(i).copy());
+        expected_view.push_back(fx->expected[i].copy());
     }
     vlog(
       test_log.info,
@@ -108,26 +90,20 @@ ss::future<> test_aggregated_log_partial_scan(
           b.last_offset());
     }
 
-    auto underlying = fx->make_log_reader();
-    storage::log_reader_config config(base, last, ss::default_priority_class());
+    auto underlying = fx->make_underlying();
 
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
+    retry_chain_logger logger(test_log, rtc, "placeholder_extent_reader_test");
 
-    auto reader = cloud_topics::make_placeholder_extent_reader(
-      config,
+    auto actual = co_await cloud_topics::materialize_placeholders(
       cloud_storage_clients::bucket_name("test-bucket-name"),
       std::move(underlying),
       fx->remote,
       fx->cache,
-      rtc);
+      rtc,
+      logger);
 
-    fragmented_vector<model::record_batch> actual;
-    fragmented_vector_consumer consumer{
-      .target = &actual,
-    };
-
-    co_await reader.consume(consumer, model::timeout_clock::now() + 10s);
     ASSERT_EQ_CORO(actual.size(), expected_view.size());
     ASSERT_TRUE_CORO(actual == expected_view);
 }

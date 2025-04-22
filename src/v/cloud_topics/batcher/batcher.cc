@@ -202,10 +202,8 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
     bool more_work = false;
     while (!_as.abort_requested()) {
         if (!more_work) {
-        /*TODO: remove*/vlog(_logger.debug, "Batcher wait_until");
             auto wait_res = co_await _stage.wait_until(
               10_MiB, Clock::now() + _upload_interval(), &_as);
-        /*TODO: remove*/vlog(_logger.debug, "Batcher wait_until exit");
             if (wait_res.has_error()) {
                 // Shutting down
                 vlog(
@@ -219,7 +217,6 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
             vlog(_logger.info, "Batcher upload loop is shutting down");
             co_return;
         }
-        /*TODO: remove*/vlog(_logger.debug, "Batcher run_once");
         auto res = co_await run_once();
         if (res.has_error()) {
             if (res.error() == errc::shutting_down) {
@@ -233,9 +230,7 @@ ss::future<> batcher<Clock>::bg_controller_loop() {
             }
         } else {
             more_work = !res.value();
-            /*TODO: remove*/vlog(_logger.debug, "Batcher more_work: {}", more_work);
         }
-        /*TODO: remove*/vlog(_logger.debug, "loop iter end");
     }
 }
 

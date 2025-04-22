@@ -12,8 +12,8 @@
 
 #include "base/vlog.h"
 #include "cloud_storage/configuration.h"
-#include "cloud_topics/dl_overlay.h"
 #include "cloud_topics/app.h"
+#include "cloud_topics/dl_overlay.h"
 #include "cloud_topics/dl_stm/dl_stm_api.h"
 #include "cloud_topics/types.h"
 #include "cluster/partition.h"
@@ -45,10 +45,9 @@ reconciler::reconciler(
   ss::sharded<cluster::partition_manager>* pm,
   ss::sharded<cloud_io::remote>* cloud_io,
   std::optional<cloud_storage_clients::bucket_name> bucket)
-  : _api(std::move(ct_api)) 
+  : _api(std::move(ct_api))
   , _partition_manager(pm)
-  , _cloud_io(cloud_io)
-  {
+  , _cloud_io(cloud_io) {
     if (bucket.has_value()) {
         _bucket = std::move(bucket.value());
     } else {
@@ -275,8 +274,7 @@ ss::future<> reconciler::commit_object(const object_range_info& range) {
 
 ss::future<model::record_batch_reader>
 reconciler::make_reader(const attached_partition& partition, size_t max_bytes) {
-    auto proxy = kafka::make_partition_proxy(
-      partition->partition, _api);
+    auto proxy = kafka::make_partition_proxy(partition->partition, _api);
 
     auto effective_start = co_await proxy.sync_effective_start();
     if (effective_start.has_error()) {

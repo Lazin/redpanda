@@ -30,6 +30,38 @@ class api;
 
 namespace kafka {
 
+/// CloudTopics entry point
+///
+/// This class serves as the entry point into the cloud-topics (CT) subsystem,
+/// which comprises two main components: the data plane and the control plane.
+///
+/// Data Plane:
+/// - Accessible via the 'cloud_topics::app' instance passed through the
+///   constructor.
+/// - Contains 'core::read_pipeline' and 'core::write_pipeline'.
+///
+/// Control Plane:
+/// - Composed of 'cluster::partition' and 'dl_stm' instance, accessible
+///   through the partition.
+///
+/// Write Request Path:
+/// - Batch is pushed to the data plane (app::write_and_debounce method).
+/// - Data plane returns a placeholder for the record batch, containing
+///   metadata to locate data in cloud storage.
+/// - 'cloud_topic_partition' pushes the placeholder to the control plane by
+///   replicating 'dl_placeholder' batch.
+///
+/// Read Request Path:
+/// - 'dl_placeholder' batches are queried from the control plane, fetched
+///   from 'cluster::partition'.
+/// - Includes information about aborted transactions.
+/// - 'dl_placeholder' batches are 'materialized' using the data plane.
+///
+/// Currently, the data plane is explicitly a sharded service. The control
+/// plane includes 'cluster::partition' and 'dl_stm', with no explicit API
+/// boundary. However, component use is limited to allow future
+/// introduction of such an API.
+///
 class cloud_topic_partition final : public kafka::partition_proxy::impl {
 public:
     explicit cloud_topic_partition(

@@ -87,7 +87,6 @@ redpanda_cc_library(
         "//src/v/cloud_topics/core:event_filter",
         "//src/v/cloud_topics/core:read_pipeline",
         "//src/v/cloud_topics/core:read_request",
-        "//src/v/cloud_topics/interfaces:cluster_partition_manager",
         "//src/v/model",
         "//src/v/ssx:future_util",
         "//src/v/storage",

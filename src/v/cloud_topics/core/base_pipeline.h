@@ -128,7 +128,8 @@ public:
         }
         if (found) {
             // Trigger event immediately without waiting for the future
-            co_return static_cast<Derived*>(this)->trigger_event(flt.get_stage());
+            co_return static_cast<Derived*>(this)->trigger_event(
+              flt.get_stage());
         }
         _filters.push_back(flt);
         auto ev = co_await ss::coroutine::as_future(flt.get_future());
@@ -235,7 +236,7 @@ protected:
         for (auto& f : _filters) {
             if (f.get_type() == ev_type && f.get_stage() == stage) {
                 vlog(
-                  cd_log.debug,
+                  _logger.debug,
                   "{}.signal, pending_write_bytes: {}, "
                   "total_write_bytes: {}",
                   static_cast<Derived*>(this)->pipeline_name(),
@@ -245,7 +246,6 @@ protected:
             }
             // The cleanup is performed by the subscriber
         }
-        vlog(_logger.debug, "signal, stage: {} exit", stage);
     }
 
 private:

@@ -47,8 +47,7 @@ cloud_topic_partition::cloud_topic_partition(
 cloud_topic_partition::cloud_topic_partition(
   ss::lw_shared_ptr<cluster::partition> p,
   ss::sharded<experimental::cloud_topics::app>& ct_app) noexcept
-: cloud_topic_partition(std::move(p), ct_app.local().get_api())
-{}
+  : cloud_topic_partition(std::move(p), ct_app.local().get_api()) {}
 
 const model::ntp& cloud_topic_partition::ntp() const {
     return _partition->ntp();
@@ -146,34 +145,40 @@ kafka::leader_epoch cloud_topic_partition::leader_epoch() const {
     return leader_epoch_from_term(_partition->raft()->confirmed_term());
 }
 
-// TODO: use previous translation speed up lookup
 ss::future<storage::translating_reader> cloud_topic_partition::make_reader(
   storage::log_reader_config cfg,
-  std::optional<model::timeout_clock::time_point>) {
-    // TODO: use cloud topics read path here
+  std::optional<model::timeout_clock::time_point> timeout) {
+    vassert(_ct_api != nullptr, "cloud topics api not initialized");
+
     auto ot_state = _partition->get_offset_translator_state();
 
     cfg.start_offset = ot_state->to_log_offset(cfg.start_offset);
     cfg.max_offset = ot_state->to_log_offset(cfg.max_offset);
     cfg.translate_offsets = storage::translate_offsets::yes;
-    cfg.type_filter = {model::record_batch_type::raft_data};
+    cfg.type_filter = {model::record_batch_type::dl_placeholder};
 
-    vassert(_ct_api != nullptr, "cloud topics api not initialized");
+    // TODO: add code path that fetches metadata from the dl_stm for L1 read
+    // path
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE Invoking make_reader");
+    auto underlying = co_await _partition->make_reader(cfg, timeout);
+    auto placeholders = co_await model::consume_reader_to_memory(
+      std::move(underlying), model::no_timeout);
 
-    auto reader_and_tx = co_await _ct_api->make_reader(
-      ntp(), cfg, 1s /*TODO: use proper timeout*/);
+    auto data_batches = co_await _ct_api->materialize(
+      ntp(),
+      cfg.max_bytes,
+      std::move(placeholders),
+      // TODO: use configurable default timeout or derive from the log reader
+      // config
+      10s);
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE make_reader exit");
-
-    if (!reader_and_tx) {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE make_reader ERR");
-        throw std::system_error(reader_and_tx.error());
+    if (!data_batches) {
+        throw std::system_error(data_batches.error());
     }
-    // TODO: do the aborted_transactions
+
     co_return storage::translating_reader(
-      std::move(reader_and_tx.value().reader), ot_state);
+      model::make_memory_record_batch_reader(std::move(data_batches.value())),
+      ot_state);
 }
 
 ss::future<std::vector<cluster::tx::tx_range>>
@@ -181,6 +186,7 @@ cloud_topic_partition::aborted_transactions(
   model::offset base,
   model::offset last,
   ss::lw_shared_ptr<const storage::offset_translator_state> ot_state) {
+    // TODO: add code path that fetches metadata from the dl_stm for L1 read
     auto base_rp = ot_state->to_log_offset(base);
     auto last_rp = ot_state->to_log_offset(last);
     cloud_storage::offset_range offsets = {
@@ -201,17 +207,6 @@ cloud_topic_partition::timequery(storage::timequery_config cfg) {
 }
 
 // Consume the entire reader
-struct materializing_consumer {
-    ss::future<ss::stop_iteration> operator()(model::record_batch rb) {
-        batches->push_back(std::move(rb));
-        co_return ss::stop_iteration::no;
-    }
-
-    void end_of_stream() {}
-
-    chunked_vector<model::record_batch>* batches;
-};
-
 struct upload_and_replicate_stages {
     model::ntp ntp;
     ss::lw_shared_ptr<cluster::partition> partition;
@@ -242,18 +237,16 @@ static ss::future<> bg_upload_and_replicate(
   ss::lw_shared_ptr<cluster::partition> partition,
   ss::lw_shared_ptr<upload_and_replicate_stages> op) {
     vassert(api != nullptr, "cloud topics api is not initialized");
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate called");
     auto fallback = ss::defer([op] {
         // This guarantees that the promises are set.
         // The error code used here does not represent the
         // actual error.
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate fallback");
         op->request_enqueued.set_value();
         op->replicate_finished.set_value(raft::errc::timeout);
     });
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate W&D");
+    auto timeout = op->timeout == 0ms ? 1s : op->timeout;
     auto pl = co_await api->write_and_debounce(
-      op->ntp, std::move(op->reader), op->timeout);
+      op->ntp, std::move(op->reader), timeout);
 
     if (pl.has_error()) {
         vlog(
@@ -263,23 +256,17 @@ static ss::future<> bg_upload_and_replicate(
 
     // Unpack record_batch_reader (TODO: get rid of
     // record_batch_reader)
-    chunked_vector<model::record_batch> placeholder_batches;
-
-    co_await pl.value().consume(
-      materializing_consumer{.batches = &placeholder_batches},
-      model::no_timeout);
+    auto placeholder_batches = std::move(pl.value());
 
     vassert(
       placeholder_batches.size() == 1,
       "Expected single batch, got {}",
       placeholder_batches.size());
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate replicate placeholders");
     // Replicate
     auto replicate_stages = partition->replicate_in_stages(
       op->batch_id, std::move(placeholder_batches.front()), op->opts);
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate discard fallback");
     fallback.cancel();
 
     // Forward future result to the 'op'. The expectation is that at this point
@@ -287,53 +274,48 @@ static ss::future<> bg_upload_and_replicate(
     // futures are awaited.
     replicate_stages.request_enqueued.forward_to(
       std::move(op->request_enqueued));
+
     auto replicate_fut = std::move(replicate_stages.replicate_finished)
                            .then(
                              [](result<cluster::kafka_result> res)
                                -> result<raft::replicate_result> {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate bg replicate done");
                                  if (res.has_error()) {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE bg_upload_and_replicate bg replicate error");
                                      return res.error();
                                  }
                                  return raft::replicate_result{
                                    model::offset(res.value().last_offset())};
                              });
+
     replicate_fut.forward_to(std::move(op->replicate_finished));
 }
 
 ss::future<result<model::offset>> cloud_topic_partition::replicate(
   chunked_vector<model::record_batch> batches, raft::replicate_options opts) {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE replicate called");
     using ret_t = result<model::offset>;
     auto batch_reader = model::make_fragmented_memory_record_batch_reader(
       std::move(batches));
     // TODO: use a config
     auto default_timeout = 1s;
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE about to call write_and_debounce");
-    // TODO: avoid returning record_batch_reader, return chunked_vector of
-    // batches instead
     auto placeholders = co_await _ct_api->write_and_debounce(
       ntp(), std::move(batch_reader), opts.timeout.value_or(default_timeout));
 
     if (placeholders.has_error()) {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE write_and_debounce error");
         co_return ret_t(placeholders.error());
     }
 
+    // TODO: change the return type of write_and_debounce to
+    // avoid type conversion.
     chunked_vector<model::record_batch> placeholder_batches;
-    co_await placeholders.value().consume(
-      materializing_consumer{.batches = &placeholder_batches},
-      model::no_timeout);
+    for (auto&& batch : placeholders.value()) {
+        placeholder_batches.push_back(std::move(batch));
+    }
 
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE replicating placeholders");
     auto result = co_await _partition->replicate(
       std::move(placeholder_batches), opts);
     if (!result) {
         co_return ret_t(result.error());
     }
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE replicate success");
     co_return ret_t(model::offset(result.value().last_offset()));
 }
 
@@ -347,7 +329,7 @@ raft::replicate_stages cloud_topic_partition::replicate(
   model::batch_identity batch_id,
   model::record_batch batch,
   raft::replicate_options opts) {
-    /*TODO: remove*/vlog(kdlog.info, "NEEDLE replicate in stages");
+    /*TODO: remove*/ vlog(kdlog.info, "NEEDLE replicate in stages");
     auto op_state = ss::make_lw_shared<upload_and_replicate_stages>(
       _partition,
       model::make_memory_record_batch_reader(std::move(batch)),

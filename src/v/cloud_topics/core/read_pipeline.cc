@@ -33,7 +33,7 @@ namespace experimental::cloud_topics::core {
 template<class Clock>
 read_pipeline<Clock>::read_pipeline()
   // TODO: use config parameter
-  : _mem_quota(10_MiB, "read-pipeline")
+  : _mem_quota(100_MiB, "read-pipeline")
   // TODO: use config parameter
   , _breaker(10, std::chrono::seconds(1)) {}
 

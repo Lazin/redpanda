@@ -61,9 +61,7 @@ static ss::future<std::vector<epoch_end_offset>> fetch_offsets(
     ret.reserve(requests.size());
     for (auto& r : requests) {
         auto p = make_partition_proxy(
-          r.ktp,
-          ctx.partition_manager().local(),
-          ctx.cloud_topics_api());
+          r.ktp, ctx.partition_manager().local(), ctx.cloud_topics_api());
         // offsets_for_leader_epoch request should only be answered by
         // leader
         if (!p || !p->is_leader()) {

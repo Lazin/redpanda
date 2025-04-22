@@ -14,13 +14,13 @@
 #include "base/seastarx.h"
 #include "cloud_topics/core/pipeline_stage.h"
 #include "cloud_topics/errc.h"
+#include "container/intrusive_list_helpers.h"
 #include "model/record.h"
 #include "utils/retry_chain_node.h"
-#include "container/intrusive_list_helpers.h"
 
+#include <seastar/core/circular_buffer.hh>
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/weak_ptr.hh>
-#include <seastar/core/circular_buffer.hh>
 
 namespace experimental::cloud_topics::core {
 
@@ -79,8 +79,8 @@ struct read_request : ss::weakly_referencable<read_request<Clock>> {
     /// C-tor
     /// \param ntp is a target NTP
     /// \param query is either a reader that contains a bunch of
-    ///        placeholder/overlay values 
-    /// \param read_quota contains semaphore units that represent 
+    ///        placeholder/overlay values
+    /// \param read_quota contains semaphore units that represent
     ///        memory that request is allowed to use
     /// \param timeout is a time quota
     /// \param stage is a current pipeline stage (unassigned by default)

@@ -19,8 +19,6 @@ seastar::future<> app::start() { return _impl->start(); }
 
 seastar::future<> app::stop() { return _impl->stop(); }
 
-ss::shared_ptr<api> app::get_api() {
-  return _impl;
-}
+ss::shared_ptr<api> app::get_api() { return _impl; }
 
 } // namespace experimental::cloud_topics

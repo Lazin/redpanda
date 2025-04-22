@@ -198,9 +198,8 @@ server::server(
   , _thread_worker(tw)
   , _replica_selector(
       std::make_unique<rack_aware_replica_selector>(_metadata_cache.local()))
-  , _schema_registry(sr) 
-  , _cloud_topics_api(ct)
-  {
+  , _schema_registry(sr)
+  , _cloud_topics_api(ct) {
     vlog(
       klog.debug,
       "Starting kafka server with {} byte limit on fetch requests",

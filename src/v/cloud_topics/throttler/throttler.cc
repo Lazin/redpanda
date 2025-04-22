@@ -87,7 +87,7 @@ template<class Clock>
 ss::future<result<size_t>>
 throttler<Clock>::throttle_write_pipeline_once(size_t prev_total_size) {
     size_t total_bytes = prev_total_size;
-    /*TODO: remove*/vlog(cd_log.debug, "Throttler wait next requests");
+    /*TODO: remove*/ vlog(cd_log.debug, "Throttler wait next requests");
     auto ev = co_await _my_stage.wait_next(&_as);
     if (ev.has_error()) {
         co_return ev.error();
@@ -126,7 +126,7 @@ size_t throttler<Clock>::apply_throttle(
         throttle_tput(new_bytes);
     }
     // Advance all write requests which are not throttled to next stage
-    /*TODO: remove*/vlog(cd_log.debug, "Throttler advance write requests");
+    /*TODO: remove*/ vlog(cd_log.debug, "Throttler advance write requests");
     _my_stage.process(
       [](const core::write_request<Clock>&) noexcept
       -> checked<core::request_processing_result, errc> {
