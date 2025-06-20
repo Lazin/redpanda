@@ -33,12 +33,19 @@
 
 #include <chrono>
 
+namespace experimental::cloud_topics {
+class app;
+}
+
 namespace cluster {
 class partition_manager
   : public ss::peering_sharded_service<partition_manager> {
 public:
     using ntp_table_container
       = model::ntp_map_type<ss::lw_shared_ptr<partition>>;
+
+    using sharded_data_plane_ref
+      = std::reference_wrapper<ss::sharded<experimental::cloud_topics::app>>;
 
     partition_manager(
       ss::sharded<storage::api>&,
@@ -49,7 +56,8 @@ public:
       ss::lw_shared_ptr<const archival::configuration>,
       ss::sharded<features::feature_table>&,
       ss::sharded<archival::upload_housekeeping_service>&,
-      config::binding<std::chrono::milliseconds>);
+      config::binding<std::chrono::milliseconds>,
+      std::optional<sharded_data_plane_ref>);
 
     ~partition_manager();
 
@@ -302,6 +310,9 @@ private:
     std::optional<raft::group_manager_notification_id> _leader_notify_handle;
 
     state_machine_registry _stm_registry;
+
+    // Reference to the dataplane api (optional)
+    std::optional<sharded_data_plane_ref> _data_plane_api;
 
     friend std::ostream& operator<<(std::ostream&, const partition_manager&);
     friend std::ostream& operator<<(

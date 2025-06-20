@@ -1692,7 +1692,8 @@ void application::wire_up_redpanda_services(
       ss::sharded_parameter([] {
           return config::shard_local_cfg()
             .partition_manager_shutdown_watchdog_timeout.bind();
-      }))
+      }),
+      std::ref(cloud_topics_api))
       .get();
     vlog(_log.info, "Partition manager started");
     construct_service(

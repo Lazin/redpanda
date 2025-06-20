@@ -32,7 +32,8 @@
 
 namespace experimental::cloud_topics {
 class dl_stm_api;
-};
+class app;
+}; // namespace experimental::cloud_topics
 
 namespace cluster {
 class partition_manager;
@@ -49,6 +50,9 @@ struct xshard_transfer_state {
 /// all raft logic is proxied transparently
 class partition : public ss::enable_lw_shared_from_this<partition> {
 public:
+    using sharded_data_plane_ref
+      = std::reference_wrapper<ss::sharded<experimental::cloud_topics::app>>;
+
     partition(
       consensus_ptr r,
       ss::sharded<cloud_storage::remote>&,
@@ -57,7 +61,8 @@ public:
       ss::sharded<features::feature_table>&,
       ss::sharded<archival::upload_housekeeping_service>&,
       std::optional<cloud_storage_clients::bucket_name> read_replica_bucket
-      = std::nullopt);
+      = std::nullopt,
+      std::optional<sharded_data_plane_ref> dp = std::nullopt);
 
     ~partition() = default;
 
@@ -400,6 +405,10 @@ public:
     // Acquire a shared lock for producing to the partition.
     ss::future<result<ssx::rwlock_unit>> hold_writes_enabled();
 
+    // Return a pointer to the data plane api.
+    // If cloud topics are disabled the result is nullptr.
+    std::optional<sharded_data_plane_ref> get_data_plane_api() noexcept;
+
 private:
     ss::future<>
     replicate_unsafe_reset(cloud_storage::partition_manifest manifest);
@@ -426,6 +435,9 @@ private:
     ss::shared_ptr<archival_metadata_stm> _archival_meta_stm;
     ss::shared_ptr<partition_properties_stm> _partition_properties_stm;
     ss::shared_ptr<experimental::cloud_topics::dl_stm_api> _dl_stm_api;
+    /// Optional data plane api pointer (only initialized for cloud topic
+    /// partition)
+    std::optional<sharded_data_plane_ref> _data_plane_api;
     ss::abort_source _as;
     partition_probe _probe;
     ss::sharded<features::feature_table>& _feature_table;
