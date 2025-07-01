@@ -12,6 +12,7 @@
 
 #include "base/outcome.h"
 #include "cloud_storage/cache_service.h"
+#include "cloud_topics/batch_cache/batch_cache.h"
 #include "cloud_topics/batcher/batcher.h"
 #include "cloud_topics/core/read_pipeline.h"
 #include "cloud_topics/core/write_pipeline.h"
@@ -37,7 +38,8 @@ public:
       seastar::sharded<cluster::partition_manager>* pm,
       seastar::sharded<cloud_io::remote>* io,
       seastar::sharded<cloud_storage::cache>* cache,
-      cloud_storage_clients::bucket_name bucket)
+      cloud_storage_clients::bucket_name bucket,
+      seastar::sharded<storage::api>* storage_api)
       : _reconciler(std::make_unique<reconciler::reconciler>(pm, io, bucket))
       , _write_pipeline(std::make_unique<core::write_pipeline<>>())
       , _throttler(std::make_unique<throttler<>>(
@@ -52,7 +54,9 @@ public:
           _read_pipeline->register_read_pipeline_stage(),
           bucket,
           &io->local(),
-          &cache->local())) {}
+          &cache->local()))
+      , _batch_cache(
+          std::make_unique<batch_cache>(&storage_api->local().log_mgr())) {}
 
     seastar::future<> start() override {
         // Reconciler
@@ -99,6 +103,15 @@ public:
         co_return std::move(res.value().results);
     }
 
+    void cache_put(const model::ntp& ntp, const model::record_batch& b) final {
+        _batch_cache->put(ntp, b);
+    }
+
+    std::optional<model::record_batch>
+    cache_get(const model::ntp& ntp, model::offset o) final {
+        return _batch_cache->get(ntp, o);
+    }
+
 private:
     std::unique_ptr<reconciler::reconciler> _reconciler;
     // Write path
@@ -108,15 +121,18 @@ private:
     // Read path
     std::unique_ptr<core::read_pipeline<>> _read_pipeline;
     std::unique_ptr<fetch_handler> _l0_resolver;
+    // Batch cache
+    std::unique_ptr<batch_cache> _batch_cache;
 };
 
 ss::shared_ptr<data_plane_api> make_data_plane(
   ss::sharded<cluster::partition_manager>* partition_manager,
   ss::sharded<cloud_io::remote>* remote,
   ss::sharded<cloud_storage::cache>* cache,
-  cloud_storage_clients::bucket_name bucket) {
+  cloud_storage_clients::bucket_name bucket,
+  ss::sharded<storage::api>* log_manager) {
     return ss::make_shared<impl>(
-      partition_manager, remote, cache, std::move(bucket));
+      partition_manager, remote, cache, std::move(bucket), log_manager);
 }
 
 } // namespace experimental::cloud_topics

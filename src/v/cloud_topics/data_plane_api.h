@@ -50,6 +50,13 @@ public:
       chunked_vector<extent_meta> metadata,
       std::chrono::milliseconds timeout)
       = 0;
+
+    /// Cache materialized record batch
+    virtual void cache_put(const model::ntp&, const model::record_batch& b) = 0;
+
+    /// Retrieve materialized record batch from cache
+    virtual std::optional<model::record_batch>
+    cache_get(const model::ntp&, model::offset o) = 0;
 };
 
 } // namespace experimental::cloud_topics
