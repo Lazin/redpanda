@@ -29,12 +29,17 @@ namespace cloud_storage {
 class cache;
 }
 
+namespace storage {
+class api;
+}
+
 namespace experimental::cloud_topics {
 
 ss::shared_ptr<data_plane_api> make_data_plane(
   seastar::sharded<cluster::partition_manager>*,
   seastar::sharded<cloud_io::remote>*,
   seastar::sharded<cloud_storage::cache>*,
-  cloud_storage_clients::bucket_name bucket);
+  cloud_storage_clients::bucket_name bucket,
+  seastar::sharded<storage::api>* log_manager);
 
 } // namespace experimental::cloud_topics
