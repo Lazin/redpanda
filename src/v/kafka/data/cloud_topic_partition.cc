@@ -171,6 +171,42 @@ static placeholder_batches_with_size convert_to_placeholders(
     return result;
 }
 
+/// Get original record batch and prepare it for the record batch cache
+static void
+update_batch_base_offset(model::record_batch& src, model::offset offset) {
+    src.header().base_offset = offset;
+    src.header().header_crc = model::internal_header_only_crc(src.header());
+}
+
+static chunked_vector<model::record_batch>
+clone_batches(chunked_vector<model::record_batch>& src) {
+    chunked_vector<model::record_batch> res;
+    for (auto& s : src) {
+        res.push_back(s.copy());
+    }
+    return res;
+}
+
+/// Write proper offsets into the record batches
+static void update_batches(
+  chunked_vector<model::record_batch>& src, model::offset last_offset) {
+    chunked_vector<model::record_batch> ret;
+    int64_t num_records = 0;
+    for (const model::record_batch& s : src) {
+        num_records += s.record_count();
+    }
+    vassert(
+      num_records >= last_offset(),
+      "last_offset ({}) can't be greater than num_records ({})",
+      last_offset,
+      num_records);
+    model::offset o = model::offset(last_offset() - num_records);
+    for (auto& s : src) {
+        update_batch_base_offset(s, o);
+        o = model::next_offset(s.last_offset());
+    }
+}
+
 } // namespace
 
 cloud_topic_partition::cloud_topic_partition(
@@ -296,6 +332,10 @@ ss::future<storage::translating_reader> cloud_topic_partition::make_reader(
     cfg.translate_offsets = storage::translate_offsets::yes;
     cfg.type_filter = {model::record_batch_type::dl_placeholder};
 
+    if (true) {
+      _ct_api->cache_get(ntp(), cfg.start_offset);
+    }
+
     // TODO: add code path that fetches metadata from the metadata layer for L1
     // read path
 
@@ -415,6 +455,12 @@ static ss::future<> bg_upload_and_replicate(
         op->request_enqueued.set_value();
         op->replicate_finished.set_value(raft::errc::timeout);
     });
+
+    chunked_vector<model::record_batch> rb_copy;
+    if (true) {
+        // TODO: copy only if batch cache is enabled for the partition/broker
+        rb_copy = clone_batches(op->batches);
+    }
     auto timeout = op->timeout == 0ms ? L0_upload_default_timeout : op->timeout;
     auto res = co_await api->write_and_debounce(
       op->ntp, std::move(op->batches), timeout);
@@ -449,16 +495,28 @@ static ss::future<> bg_upload_and_replicate(
     replicate_stages.request_enqueued.forward_to(
       std::move(op->request_enqueued));
 
-    auto replicate_fut = std::move(replicate_stages.replicate_finished)
-                           .then(
-                             [](result<cluster::kafka_result> res)
-                               -> result<raft::replicate_result> {
-                                 if (res.has_error()) {
-                                     return res.error();
-                                 }
-                                 return raft::replicate_result{
-                                   model::offset(res.value().last_offset())};
-                             });
+    auto replicate_fut
+      = std::move(replicate_stages.replicate_finished)
+          .then(
+            [api, inp = std::move(rb_copy), ntp = partition->ntp()](
+              result<cluster::kafka_result> res) mutable
+            -> result<raft::replicate_result> {
+                if (res.has_error()) {
+                    return res.error();
+                }
+                // We know that the data is replicated so it's safe to add
+                // the batch to the record batch cache before returning.
+                auto ret_offset = model::offset(res.value().last_offset());
+                if (true) {
+                    // TODO: condition on config
+                    update_batches(inp, ret_offset);
+                    for (const auto& b : inp) {
+                        api->cache_put(ntp, b);
+                    }
+                }
+                return raft::replicate_result{
+                  model::offset(res.value().last_offset())};
+            });
 
     replicate_fut.forward_to(std::move(op->replicate_finished));
 }
@@ -471,6 +529,12 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
     headers.reserve(batches.size());
     for (const auto& batch : batches) {
         headers.push_back(batch.header());
+    }
+
+    chunked_vector<model::record_batch> rb_copy;
+    if (true) {
+        // TODO: copy only if batch cache is enabled for the partition/broker
+        rb_copy = clone_batches(batches);
     }
 
     // Dataplane.
@@ -497,7 +561,15 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
     if (!result) {
         co_return ret_t(result.error());
     }
-    co_return ret_t(model::offset(result.value().last_offset()));
+    auto ret_offset = model::offset(result.value().last_offset());
+    if (true) {
+        // TODO: condition on config
+        update_batches(rb_copy, ret_offset);
+        for (const auto& b : rb_copy) {
+            _ct_api->cache_put(ntp(), b);
+        }
+    }
+    co_return ret_t(ret_offset);
 }
 
 ss::future<result<model::offset>> cloud_topic_partition::replicate(
