@@ -12,6 +12,34 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "cloud_topic_partition_reader",
+    srcs = [
+        "cloud_topic_partition_reader.cc",
+    ],
+    hdrs = [
+        "cloud_topic_partition_reader.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        "//src/v/cluster",
+    ],
+    include_prefix = "kafka/data",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/base",
+        "//src/v/cloud_topics:app",
+        "//src/v/cloud_topics:data_plane_api",
+        "//src/v/cloud_topics:extent_meta",
+        "//src/v/cloud_topics:placeholder",
+        "//src/v/model",
+        "//src/v/storage",
+        "//src/v/storage:record_batch_builder",
+        "@boost//:outcome",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "partition_proxy",
     srcs = [
         "cloud_topic_partition.cc",
