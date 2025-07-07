@@ -18,6 +18,7 @@
 #include "cluster/partition.h"
 #include "cluster/rm_stm.h"
 #include "cluster/types.h"
+#include "kafka/data/cloud_topic_partition_reader.h"
 #include "kafka/protocol/batch_reader.h"
 #include "kafka/protocol/errors.h"
 #include "logger.h"
@@ -55,40 +56,6 @@ struct placeholder_batches_with_size {
 
 static constexpr auto L0_upload_default_timeout = 1s;
 static constexpr auto L0_replicate_default_timeout = 1s;
-
-/// Get raft_data batch returned by the 'materialize' method
-/// of the data layer and enrich it with the information from the
-/// L0 metadata batch.
-static void fill_record_batch_header(
-  const model::record_batch_header& placeholder,
-  model::record_batch& raft_data_batch) {
-    auto& data_hdr = raft_data_batch.header();
-    auto size = data_hdr.size_bytes;
-    auto crc = data_hdr.crc;
-    data_hdr = placeholder;
-    data_hdr.type = model::record_batch_type::raft_data;
-    data_hdr.size_bytes = size;
-    data_hdr.crc = crc;
-    // Recalculate the header crc
-    data_hdr.header_crc = model::internal_header_only_crc(data_hdr);
-}
-
-/// Get list of raft_data batches and the list of placeholder headers and
-/// propagate metadata from headers into the raft_data batch headers.
-/// The data contained in L0 objects doesn't have proper term and offset.
-/// This information should be propagated from the placeholder header.
-static void fill_level_zero_headers(
-  chunked_vector<model::record_batch>& data_batches,
-  const chunked_vector<model::record_batch_header>& placeholder_headers) {
-    vassert(
-      data_batches.size() == placeholder_headers.size(),
-      "Output size mismatch, {} batches vs {} headers",
-      data_batches.size(),
-      placeholder_headers.size());
-    for (size_t ix = 0; ix < data_batches.size(); ix++) {
-        fill_record_batch_header(placeholder_headers[ix], data_batches[ix]);
-    }
-}
 
 // Create a placeholder batch using the original header and the extent.
 // The caller is supposed to use the correct batch header
@@ -286,70 +253,15 @@ kafka::leader_epoch cloud_topic_partition::leader_epoch() const {
 
 ss::future<storage::translating_reader> cloud_topic_partition::make_reader(
   storage::log_reader_config cfg,
-  std::optional<model::timeout_clock::time_point> timeout) {
+  std::optional<model::timeout_clock::time_point>) {
     vassert(_ct_api != nullptr, "cloud topics api not initialized");
 
     auto ot_state = _partition->get_offset_translator_state();
 
-    cfg.start_offset = ot_state->to_log_offset(cfg.start_offset);
-    cfg.max_offset = ot_state->to_log_offset(cfg.max_offset);
-    cfg.translate_offsets = storage::translate_offsets::yes;
-    cfg.type_filter = {model::record_batch_type::dl_placeholder};
-
-    // TODO: add code path that fetches metadata from the metadata layer for L1
-    // read path
-
-    // This part comprises the metadata layer query. The partition is a metadata
-    // storage for the cloud topic.
-    auto underlying = co_await _partition->make_reader(cfg, timeout);
-    auto placeholders = co_await model::consume_reader_to_chunked_vector(
-      std::move(underlying), model::no_timeout);
-
-    auto [extents, headers] = [ph = std::move(placeholders)]() mutable {
-        chunked_vector<experimental::cloud_topics::extent_meta> res;
-        chunked_vector<model::record_batch_header> hdr;
-        for (auto&& batch : ph) {
-            hdr.push_back(batch.header());
-            experimental::cloud_topics::extent_meta e{
-              .base_offset = model::offset_cast(batch.base_offset()),
-              .last_offset = model::offset_cast(batch.last_offset()),
-            };
-            iobuf payload = std::move(batch).release_data();
-            iobuf_parser parser(std::move(payload));
-            auto record = model::parse_one_record_from_buffer(parser);
-            iobuf value = std::move(record).release_value();
-            auto placeholder
-              = serde::from_iobuf<experimental::cloud_topics::dl_placeholder>(
-                std::move(value));
-            e.id = placeholder.id;
-            e.first_byte_offset = placeholder.offset;
-            e.byte_range_size = placeholder.size_bytes;
-            res.push_back(e);
-        }
-        return std::make_pair(std::move(res), std::move(hdr));
-    }();
-
-    // This part comprises the data plane query. The 'cloud_topics::api' is
-    // responsible for moving the data from the cloud storage to the local
-    // cache.
-    auto data_batches = co_await _ct_api->materialize(
-      ntp(),
-      cfg.max_bytes,
-      std::move(extents),
-      // TODO: use configurable default timeout or derive from the log reader
-      // config
-      10s);
-
-    if (!data_batches) {
-        throw std::system_error(data_batches.error());
-    }
-
-    fill_level_zero_headers(data_batches.value(), headers);
-
-    co_return storage::translating_reader(
-      model::make_fragmented_memory_record_batch_reader(
-        std::move(data_batches.value())),
-      ot_state);
+    auto impl = std::make_unique<cloud_topic_partition_reader_impl>(
+      cfg, _partition, _ct_api);
+    co_return storage::translating_reader{
+      model::record_batch_reader(std::move(impl)), std::move(ot_state)};
 }
 
 ss::future<std::vector<cluster::tx::tx_range>>
