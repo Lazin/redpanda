@@ -14,7 +14,9 @@
 #include "cloud_topics/data_plane_api.h"
 #include "cloud_topics/dl_placeholder.h"
 #include "cluster/partition.h"
+#include "config/configuration.h"
 #include "logger.h"
+#include "model/fundamental.h"
 #include "model/timeout_clock.h"
 
 #include <chrono>
@@ -33,11 +35,25 @@ cloud_topic_partition_reader_impl::cloud_topic_partition_reader_impl(
   ss::shared_ptr<experimental::cloud_topics::data_plane_api> ct_api)
   : _config(cfg)
   , _underlying(std::move(underlying))
-  , _ct_api(std::move(ct_api)) {}
+  , _ct_api(std::move(ct_api)) {
+    if (_config.max_bytes == 0) {
+        _current = state::end_of_stream_state;
+    }
+}
 
 ss::future<model::record_batch_reader::storage_t>
 cloud_topic_partition_reader_impl::do_load_slice(
   model::timeout_clock::time_point deadline) {
+    // We're only fetching from the record batch cache if the reader is in
+    // the 'empty' state. It doesn't make any difference if the reader is in
+    // the 'materialized' state. If we're in 'ready' state we risk to go out
+    // of sync with cached metadata so it's safer to hydrate.
+    if (cache_enabled()) {
+        if (auto cached = maybe_load_slices_from_cache()) {
+            co_return std::move(cached.value());
+        }
+    }
+
     chunked_circular_buffer<model::record_batch> res;
     switch (_current) {
     case state::empty_state:
@@ -68,8 +84,63 @@ cloud_topic_partition_reader_impl::do_load_slice(
     co_return res;
 }
 
-ss::future<cloud_topic_partition_reader_impl::state>
-cloud_topic_partition_reader_impl::fetch_metadata(
+std::optional<chunked_circular_buffer<model::record_batch>>
+cloud_topic_partition_reader_impl::maybe_load_slices_from_cache() {
+    if (_config.skip_batch_cache) {
+        return std::nullopt;
+    }
+    auto last_offset = _underlying->get_offset_translator_state()
+                         ->from_log_offset(_underlying->committed_offset());
+    chunked_circular_buffer<model::record_batch> ret;
+    size_t materialized_bytes = 0;
+    auto current = _config.start_offset;
+    while (materialized_bytes < _config.max_bytes
+           && current < _config.max_offset && current <= last_offset) {
+        auto batch = _ct_api->cache_get(_underlying->ntp(), current);
+        size_t batch_size = 0;
+        if (!batch.has_value()) {
+            // We hit a gap in the cache and have to download objects
+            // from S3.
+            break;
+        }
+        batch_size = batch.value().size_bytes();
+        if (
+          !ret.empty() && batch_size + materialized_bytes > _config.max_bytes) {
+            // The batch will cause over the limit.
+            // We want to accept the oversized batch if the res is empty to
+            // avoid stalling the reader.
+            break;
+        }
+        vassert(
+          batch->base_offset() == current,
+          "Unexpected base offset {} vs {}",
+          batch->base_offset(),
+          current);
+        ret.push_back(std::move(batch.value()));
+        materialized_bytes += batch_size;
+        // Invariant: it's guaranteed that the 'ret' is not empty.
+        current = model::next_offset(ret.back().last_offset());
+    }
+    _config.start_offset = current;
+    if (
+      _config.start_offset == _config.max_offset
+      || _config.start_offset > last_offset) {
+        vlog(
+          kdlog.debug,
+          "reached end of stream, start offset: {}, max offset: {}, "
+          "last offset: {}",
+          _config.start_offset,
+          _config.max_offset,
+          last_offset);
+        _current = state::end_of_stream_state;
+    }
+    if (!ret.empty()) {
+        return ret;
+    }
+    return std::nullopt;
+}
+
+ss::future<> cloud_topic_partition_reader_impl::fetch_metadata(
   model::timeout_clock::time_point deadline) {
     vassert(
       _current == state::empty_state || _current == state::materialized_state,
@@ -239,6 +310,13 @@ ss::future<> cloud_topic_partition_reader_impl::materialize_batches(
             data_hdr.header_crc = model::internal_header_only_crc(data_hdr);
         }
 
+        // Propagate batches to the record batch cache
+        if (cache_enabled()) {
+            for (const auto& b : batches) {
+                _ct_api->cache_put(_underlying->ntp(), b.copy());
+            }
+        }
+
         _batches = std::move(batches);
         // Materialize batches from the L0 meta batches.
         vlog(
@@ -257,8 +335,20 @@ ss::future<> cloud_topic_partition_reader_impl::materialize_batches(
     _current = state::materialized_state;
 }
 
-cloud_topic_partition_reader_impl::state
-cloud_topic_partition_reader_impl::consume_materialized_batches(
+bool cloud_topic_partition_reader_impl::cache_enabled() const {
+    if (_config.skip_batch_cache) {
+        return false;
+    }
+    if (!_underlying->log()->config().cache_enabled()) {
+        return false;
+    }
+    if (config::shard_local_cfg().disable_batch_cache()) {
+        return false;
+    }
+    return true;
+}
+
+void cloud_topic_partition_reader_impl::consume_materialized_batches(
   chunked_circular_buffer<model::record_batch>* dest) {
     vlog(
       kdlog.debug,

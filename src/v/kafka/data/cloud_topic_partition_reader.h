@@ -91,11 +91,18 @@ private:
         end_of_stream_state,
     };
 
+    bool cache_enabled() const;
+
     // Fetch L0 meta batches from the underlying partition
     ss::future<> fetch_metadata(model::timeout_clock::time_point deadline);
     ss::future<> materialize_batches(model::timeout_clock::time_point deadline);
     void consume_materialized_batches(
       chunked_circular_buffer<model::record_batch>* dest);
+    // Return data from the record batch cache.
+    // This method could change state of the reader to end_of_stream_state
+    // when it reaches committed offset.
+    std::optional<chunked_circular_buffer<model::record_batch>>
+    maybe_load_slices_from_cache();
 
     state _current{state::empty_state};
 

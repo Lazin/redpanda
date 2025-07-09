@@ -25,6 +25,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics:data_plane_api",
         "//src/v/cloud_topics:placeholder",
         "//src/v/cluster",
+        "//src/v/config",
     ],
     include_prefix = "kafka/data",
     visibility = ["//visibility:__subpackages__"],

@@ -138,6 +138,42 @@ static placeholder_batches_with_size convert_to_placeholders(
     return result;
 }
 
+/// Get original record batch and prepare it for the record batch cache
+static void update_batch_base_offset(
+  model::record_batch& src, model::offset offset, model::term_id term) {
+    src.set_term(term);
+    src.header().base_offset = offset;
+    src.header().header_crc = model::internal_header_only_crc(src.header());
+}
+
+static chunked_vector<model::record_batch>
+clone_batches(chunked_vector<model::record_batch>& src) {
+    chunked_vector<model::record_batch> res;
+    for (auto& s : src) {
+        res.push_back(s.copy());
+    }
+    return res;
+}
+
+/// Write proper offsets into the record batches
+static void update_batches(
+  chunked_vector<model::record_batch>& src,
+  model::offset last_offset,
+  model::term_id term) {
+    chunked_vector<model::record_batch> ret;
+
+    int64_t num_records = 0;
+    for (const auto& s : src) {
+        num_records += s.record_count();
+    }
+
+    auto o = model::offset(last_offset() - (num_records - 1));
+    for (auto& s : src) {
+        update_batch_base_offset(s, o, term);
+        o = model::next_offset(s.last_offset());
+    }
+}
+
 } // namespace
 
 cloud_topic_partition::cloud_topic_partition(
@@ -280,6 +316,16 @@ cloud_topic_partition::aborted_transactions(
     co_return co_await get_aborted_transactions_local(*_partition, offsets);
 }
 
+bool cloud_topic_partition::cache_enabled() const {
+    if (!_partition->log()->config().cache_enabled()) {
+        return false;
+    }
+    if (config::shard_local_cfg().disable_batch_cache()) {
+        return false;
+    }
+    return true;
+}
+
 ss::future<std::optional<storage::timequery_result>>
 cloud_topic_partition::timequery(storage::timequery_config cfg) {
     // cluster::partition::timequery returns a result in Kafka offsets,
@@ -318,7 +364,8 @@ static ss::future<> bg_upload_and_replicate(
   ss::shared_ptr<experimental::cloud_topics::data_plane_api> api,
   ss::lw_shared_ptr<cluster::partition> partition,
   model::record_batch_header header,
-  ss::lw_shared_ptr<upload_and_replicate_stages> op) {
+  ss::lw_shared_ptr<upload_and_replicate_stages> op,
+  bool cache_enabled) {
     vassert(api != nullptr, "cloud topics api is not initialized");
     auto fallback = ss::defer([op] {
         // This guarantees that the promises are set.
@@ -327,6 +374,11 @@ static ss::future<> bg_upload_and_replicate(
         op->request_enqueued.set_value();
         op->replicate_finished.set_value(raft::errc::timeout);
     });
+
+    chunked_vector<model::record_batch> rb_copy;
+    if (cache_enabled) {
+        rb_copy = clone_batches(op->batches);
+    }
     auto timeout = op->timeout == 0ms ? L0_upload_default_timeout : op->timeout;
     auto res = co_await api->write_and_debounce(
       op->ntp, std::move(op->batches), timeout);
@@ -361,16 +413,34 @@ static ss::future<> bg_upload_and_replicate(
     replicate_stages.request_enqueued.forward_to(
       std::move(op->request_enqueued));
 
-    auto replicate_fut = std::move(replicate_stages.replicate_finished)
-                           .then(
-                             [](result<cluster::kafka_result> res)
-                               -> result<raft::replicate_result> {
-                                 if (res.has_error()) {
-                                     return res.error();
-                                 }
-                                 return raft::replicate_result{
-                                   model::offset(res.value().last_offset())};
-                             });
+    auto replicate_fut
+      = std::move(replicate_stages.replicate_finished)
+          .then(
+            [api,
+             cache_enabled,
+             inp = std::move(rb_copy),
+             ntp = partition->ntp(),
+             term = partition->term()](
+              result<cluster::kafka_result> res) mutable
+              -> result<raft::replicate_result> {
+                if (res.has_error()) {
+                    return res.error();
+                }
+                // We know that the data is replicated so it's safe to add
+                // the batch to the record batch cache before returning.
+                if (cache_enabled) {
+                    // NOTE: the assumption is that the cached term matches
+                    // the actual term. If this is not the case the replication
+                    // should fail.
+                    update_batches(
+                      inp, kafka::offset_cast(res.value().last_offset), term);
+                    for (const auto& b : inp) {
+                        api->cache_put(ntp, b);
+                    }
+                }
+                return raft::replicate_result{
+                  kafka::offset_cast(res.value().last_offset)};
+            });
 
     replicate_fut.forward_to(std::move(op->replicate_finished));
 }
@@ -383,6 +453,11 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
     headers.reserve(batches.size());
     for (const auto& batch : batches) {
         headers.push_back(batch.header());
+    }
+
+    chunked_vector<model::record_batch> rb_copy;
+    if (cache_enabled()) {
+        rb_copy = clone_batches(batches);
     }
 
     // Dataplane.
@@ -409,7 +484,14 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
     if (!result) {
         co_return ret_t(result.error());
     }
-    co_return ret_t(model::offset(result.value().last_offset()));
+    auto ret_offset = model::offset(result.value().last_offset());
+    if (!rb_copy.empty()) {
+        update_batches(rb_copy, ret_offset, _partition->term());
+        for (const auto& b : rb_copy) {
+            _ct_api->cache_put(ntp(), b);
+        }
+    }
+    co_return ret_t(ret_offset);
 }
 
 ss::future<result<model::offset>> cloud_topic_partition::replicate(
@@ -436,7 +518,7 @@ raft::replicate_stages cloud_topic_partition::replicate(
     out.request_enqueued = op_state->request_enqueued.get_future();
     out.replicate_finished = op_state->replicate_finished.get_future();
     ssx::background = bg_upload_and_replicate(
-      _ct_api, _partition, header, op_state);
+      _ct_api, _partition, header, op_state, cache_enabled());
     return out;
 }
 
