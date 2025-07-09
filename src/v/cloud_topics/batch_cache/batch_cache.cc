@@ -14,10 +14,30 @@
 #include "storage/log_manager.h"
 #include "storage/ntp_config.h"
 
+#include <seastar/core/preempt.hh>
+
+#include <chrono>
+
 namespace experimental::cloud_topics {
 
-batch_cache::batch_cache(storage::log_manager* log_manager)
-  : _lm(log_manager) {}
+batch_cache::batch_cache(
+  storage::log_manager* log_manager, std::chrono::milliseconds gc_interval)
+  : _gc_interval(gc_interval)
+  , _lm(log_manager) {}
+
+ss::future<> batch_cache::start() {
+    _cleanup_timer.set_callback([this] {
+        auto gh = _gate.hold();
+        ssx::spawn_with_gate(_gate, [this] { return cleanup_index_entries(); });
+    });
+    _cleanup_timer.arm(_gc_interval);
+    return ss::now();
+}
+
+ss::future<> batch_cache::stop() {
+    _cleanup_timer.cancel();
+    co_await _gate.close();
+}
 
 void batch_cache::put(const model::ntp& ntp, const model::record_batch& b) {
     if (_lm == nullptr) {
@@ -50,6 +70,27 @@ batch_cache::get(const model::ntp& ntp, model::offset o) {
         return it->second->get(o);
     }
     return std::nullopt;
+}
+
+ss::future<> batch_cache::cleanup_index_entries() {
+    // NOTE: the memory is reclaimed asynchronously.  In some cases
+    // the index may no longer reference any live entries.  If this
+    // is the case we need to delete the batch_cache_index from the
+    // '_index'  collection to avoid accumulating orphaned entries.
+    auto it = _index.begin();
+    while (it != _index.end()) {
+        if (!it->second->empty()) {
+            it = _index.erase(it);
+        } else {
+            ++it;
+        }
+        if (ss::need_preempt() && it != _index.end()) {
+            model::ntp next = it->first;
+            co_await ss::yield();
+            it = _index.lower_bound(next);
+        }
+    }
+    _cleanup_timer.arm(_gc_interval);
 }
 
 } // namespace experimental::cloud_topics

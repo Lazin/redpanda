@@ -59,6 +59,8 @@ public:
           std::make_unique<batch_cache>(&storage_api->local().log_mgr())) {}
 
     seastar::future<> start() override {
+        // Batcher
+        co_await _batch_cache->start();
         // Reconciler
         co_await _reconciler->start();
         // Write path
@@ -77,6 +79,8 @@ public:
         co_await _throttler->stop();
         //  Reconciler
         co_await _reconciler->stop();
+        // Batcher
+        co_await _batch_cache->stop();
     }
 
     ss::future<result<chunked_vector<extent_meta>>> write_and_debounce(

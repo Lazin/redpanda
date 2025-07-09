@@ -19,15 +19,38 @@
 
 using namespace experimental;
 
+namespace experimental::cloud_topics {
+struct batch_cache_accessor {
+    static void
+    evict_offset(batch_cache& c, const model::ntp& ntp, model::offset o) {
+        c._index[ntp]->testing_evict_from_cache(o);
+    }
+    static bool contains_ntp(const batch_cache& c, const model::ntp& ntp) {
+        return c._index.contains(ntp);
+    }
+};
+
+} // namespace experimental::cloud_topics
+
+constexpr auto cache_check_interval = 100ms;
+
 class batch_cache_test_fixture
   : public redpanda_thread_fixture
   , public ::testing::Test {
 public:
     batch_cache_test_fixture()
       : redpanda_thread_fixture()
-      , _cache(&app.storage.local().log_mgr()) {}
+      , _cache(&app.storage.local().log_mgr(), cache_check_interval) {}
 
     cloud_topics::batch_cache _cache;
+
+    bool contains_ntp(const model::ntp& ntp) {
+        return cloud_topics::batch_cache_accessor::contains_ntp(_cache, ntp);
+    }
+
+    void evict_offset(const model::ntp& ntp, model::offset o) {
+        cloud_topics::batch_cache_accessor::evict_offset(_cache, ntp, o);
+    }
 };
 
 TEST_F(batch_cache_test_fixture, test_batch_cache_put_get) {
@@ -76,4 +99,30 @@ TEST_F(batch_cache_test_fixture, test_batch_cache_multiple_ntps) {
     // Try to get batch with wrong offset
     auto retrieved = _cache.get(ntp2, model::offset(0));
     ASSERT_TRUE(!retrieved.has_value());
+}
+
+TEST_F(batch_cache_test_fixture, test_batch_cache_eviction) {
+    model::ntp test_ntp("ns", "topic", 0);
+    auto batch = model::test::make_random_batch(model::offset(42), 10, false);
+
+    // The cleanup will start in 100ms
+    _cache.start().get();
+
+    // Put batch in cache
+    _cache.put(test_ntp, batch);
+    auto retrieved = _cache.get(test_ntp, model::offset(42));
+    ASSERT_TRUE(retrieved.has_value());
+
+    ASSERT_TRUE(contains_ntp(test_ntp));
+
+    evict_offset(test_ntp, model::offset(42));
+
+    ASSERT_TRUE(contains_ntp(test_ntp));
+
+    // This should evict the NTP
+    ss::sleep(cache_check_interval * 2).get();
+
+    ASSERT_FALSE(contains_ntp(test_ntp));
+
+    _cache.stop().get();
 }
