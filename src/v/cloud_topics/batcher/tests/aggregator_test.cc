@@ -44,7 +44,7 @@ cloud_topics::core::serialized_chunk get_random_serialized_chunk(
 }
 
 TEST(AggregatorTest, SingleRequestAck) {
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     auto chunk = get_random_serialized_chunk(10, 10);
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, std::move(chunk), timeout);
@@ -67,7 +67,7 @@ TEST(AggregatorTest, SingleRequestDtorWithStagedRequest) {
     // explicitly.
     // In this case the request is dropped because the aggregator itself
     // is destroyed after the request is staged.
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     auto chunk = get_random_serialized_chunk(10, 10);
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, std::move(chunk), timeout);
@@ -86,7 +86,7 @@ TEST(AggregatorTest, SingleRequestDtorWithStagedRequest) {
 TEST(AggregatorTest, SingleRequestDtorWithPreparedRequest) {
     // Check that if the write request is acknowledged with error if the
     // prepared request is never acknowledged and aggregator is destroyed.
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     auto chunk = get_random_serialized_chunk(10, 10);
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, std::move(chunk), timeout);
@@ -106,7 +106,7 @@ TEST(AggregatorTest, SingleRequestDtorWithPreparedRequest) {
 TEST(AggregatorTest, SingleRequestDtorWithLostRequestStaged) {
     // Checks situation when the aggregator is destroyed with staging write
     // requests but one write request is destroyed before the aggregator.
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, get_random_serialized_chunk(10, 10), timeout);
     auto fut = request.response.get_future();
@@ -137,7 +137,7 @@ TEST(AggregatorTest, SingleRequestDtorWithLostRequestPrepared) {
     // data from some produce request but the request is gone before it could be
     // acknowledged. The difference from previous test case is that 'prepare'
     // method is called.
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     auto chunk = get_random_serialized_chunk(10, 10);
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, std::move(chunk), timeout);
@@ -158,7 +158,7 @@ TEST(AggregatorTest, SingleRequestDtorWithLostRequestPrepared) {
 }
 
 TEST(AggregatorTest, SingleRequestWithLostRequestPrepared) {
-    constexpr static auto timeout = 10s;
+    auto timeout = ss::manual_clock::now() + 10s;
     auto chunk = get_random_serialized_chunk(10, 10);
     cloud_topics::core::write_request<ss::manual_clock> request(
       model::controller_ntp, std::move(chunk), timeout);

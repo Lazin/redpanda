@@ -170,7 +170,7 @@ TEST_CORO(throttler_test, no_throttling) {
     // This fut will become ready when something will get the write
     // request from the pipeline and acknowledge it.
     auto write_fut = pipeline.write_and_debounce(
-      model::controller_ntp, std::move(batches), 1s);
+      model::controller_ntp, std::move(batches), ss::manual_clock::now() + 1s);
     co_await sleep_until(1ms, [throttler_accessor, reader_size_bytes] {
         return throttler_accessor.units_available() == reader_size_bytes;
     });
@@ -231,7 +231,7 @@ TEST_CORO(throttler_test, tput_limit_reached) {
     // is greater than tput
     vlog(test_log.info, "Writing first request");
     auto write_fut = pipeline.write_and_debounce(
-      model::controller_ntp, std::move(batches), 10s);
+      model::controller_ntp, std::move(batches), ss::manual_clock::now() + 10s);
 
     //  This should move the write request out of the pipeline
     auto throttle_res = co_await std::move(throttle_fut);
@@ -303,7 +303,9 @@ TEST_CORO(throttler_test, tput_limit_reached_req_timed_out) {
     // is greater than tput. The timeout is lower than the throttling
     // that will be applied.
     auto write_fut = pipeline.write_and_debounce(
-      model::controller_ntp, std::move(batches), 200ms);
+      model::controller_ntp,
+      std::move(batches),
+      ss::manual_clock::now() + 200ms);
 
     // This should move the write request out of the pipeline.
     // It should stay there up until it times out.

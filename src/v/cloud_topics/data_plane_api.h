@@ -16,6 +16,7 @@
 #include "container/fragmented_vector.h"
 #include "model/fundamental.h"
 #include "model/record.h"
+#include "model/timeout_clock.h"
 
 #include <seastar/core/circular_buffer.hh>
 #include <seastar/core/future.hh>
@@ -41,14 +42,14 @@ public:
     virtual ss::future<result<chunked_vector<extent_meta>>> write_and_debounce(
       model::ntp ntp,
       chunked_vector<model::record_batch> batches,
-      std::chrono::milliseconds timeout)
+      model::timeout_clock::time_point deadline)
       = 0;
 
     virtual ss::future<result<chunked_vector<model::record_batch>>> materialize(
       model::ntp ntp,
       size_t output_size_estimate,
       chunked_vector<extent_meta> metadata,
-      std::chrono::milliseconds timeout)
+      model::timeout_clock::time_point timeout)
       = 0;
 
     /// Cache materialized record batch

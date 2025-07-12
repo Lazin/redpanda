@@ -285,8 +285,7 @@ ss::future<> cloud_topic_partition_reader_impl::materialize_batches(
           _underlying->ntp(),
           materialize_bytes,
           std::move(to_materialize),
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-            model::time_until(deadline)));
+          deadline);
         if (mat_res.has_error()) {
             vlog(
               kdlog.info,
@@ -353,7 +352,8 @@ void cloud_topic_partition_reader_impl::consume_materialized_batches(
     vlog(
       kdlog.debug,
       "consuming {} materialized batches, cached {} extents",
-      _batches.size());
+      _batches.size(),
+      _meta.size());
     std::move(_batches.begin(), _batches.end(), std::back_inserter(*dest));
     _batches.clear();
     _config.start_offset = model::next_offset(dest->back().last_offset());

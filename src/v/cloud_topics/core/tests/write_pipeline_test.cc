@@ -65,7 +65,7 @@ TEST_CORO(write_pipeline_test, single_write_request) {
 
     auto stage = pipeline.register_write_pipeline_stage();
 
-    const auto timeout = 1s;
+    const auto timeout = ss::manual_clock::now() + 1s;
     auto fut = pipeline.write_and_debounce(model::controller_ntp, {}, timeout);
 
     // Make sure the write request is in the _pending list
@@ -92,17 +92,19 @@ TEST_CORO(batcher_test, expired_write_request) {
 
     auto stage = pipeline.register_write_pipeline_stage();
 
-    const auto timeout = 1s;
+    static constexpr auto timeout = 1s;
+    auto deadline = ss::manual_clock::now() + 1s;
     auto expect_fail_fut = pipeline.write_and_debounce(
-      model::controller_ntp, {}, timeout);
+      model::controller_ntp, {}, deadline);
 
     // Expire first request
     co_await sleep_until(
       10ms, [&] { return accessor.write_requests_pending(1); });
     ss::manual_clock::advance(timeout);
 
+    deadline = ss::manual_clock::now() + 1s;
     auto expect_pass_fut = pipeline.write_and_debounce(
-      model::controller_ntp, {}, timeout);
+      model::controller_ntp, {}, deadline);
 
     // Make sure that both write requests are pending
     co_await sleep_until(

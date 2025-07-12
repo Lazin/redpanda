@@ -381,7 +381,7 @@ static ss::future<> bg_upload_and_replicate(
     }
     auto timeout = op->timeout == 0ms ? L0_upload_default_timeout : op->timeout;
     auto res = co_await api->write_and_debounce(
-      op->ntp, std::move(op->batches), timeout);
+      op->ntp, std::move(op->batches), model::timeout_clock::now() + timeout);
 
     if (res.has_error()) {
         vlog(
@@ -464,7 +464,8 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
     auto res = co_await _ct_api->write_and_debounce(
       ntp(),
       std::move(batches),
-      opts.timeout.value_or(L0_replicate_default_timeout));
+      model::timeout_clock::now()
+        + opts.timeout.value_or(L0_replicate_default_timeout));
 
     if (res.has_error()) {
         co_return ret_t(res.error());

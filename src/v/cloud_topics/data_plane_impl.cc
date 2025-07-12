@@ -86,7 +86,7 @@ public:
     ss::future<result<chunked_vector<extent_meta>>> write_and_debounce(
       model::ntp ntp,
       chunked_vector<model::record_batch> r,
-      std::chrono::milliseconds timeout) override {
+      model::timeout_clock::time_point timeout) override {
         return _write_pipeline->write_and_debounce(
           std::move(ntp), std::move(r), timeout);
     }
@@ -95,7 +95,7 @@ public:
       model::ntp ntp,
       size_t output_size_estimate,
       chunked_vector<extent_meta> metadata,
-      std::chrono::milliseconds timeout) override {
+      model::timeout_clock::time_point timeout) override {
         auto res = co_await _read_pipeline->make_reader(
           ntp,
           {.output_size_estimate = output_size_estimate,

@@ -69,7 +69,9 @@ TEST_F_CORO(materialized_extent_fixture, l0_fetch_handler_test) {
 
     vlog(test_log.debug, "Make reader");
     auto reader = co_await pipeline.make_reader(
-      ntp, {.output_size_estimate = 1_MiB, .meta = std::move(underlying)}, 1s);
+      ntp,
+      {.output_size_estimate = 1_MiB, .meta = std::move(underlying)},
+      ss::lowres_clock::now() + 1s);
 
     ASSERT_TRUE_CORO(reader.has_value());
 
