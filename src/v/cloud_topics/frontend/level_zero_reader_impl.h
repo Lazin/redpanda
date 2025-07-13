@@ -14,18 +14,12 @@
 #include "model/record_batch_reader.h"
 #include "storage/log_reader.h"
 
-#include <chrono>
-
 namespace cluster {
 class partition;
 }
 
 namespace experimental::cloud_topics {
 class data_plane_api;
-class app;
-} // namespace experimental::cloud_topics
-
-namespace kafka {
 
 /*
 This class implements a record batch reader for cloud topics partitions.
@@ -67,10 +61,9 @@ The data can be consumed while the reader is in the 'materialized' state.
 When all materialized record batches are consumed the reader transitions
 back to 'empty' state.
 */
-class cloud_topic_partition_reader_impl
-  : public model::record_batch_reader::impl {
+class level_zero_log_reader_impl : public model::record_batch_reader::impl {
 public:
-    cloud_topic_partition_reader_impl(
+    level_zero_log_reader_impl(
       storage::log_reader_config& cfg,
       ss::lw_shared_ptr<cluster::partition> underlying,
       ss::shared_ptr<experimental::cloud_topics::data_plane_api> ct_api);
@@ -114,4 +107,4 @@ private:
     ss::shared_ptr<experimental::cloud_topics::data_plane_api> _ct_api;
 };
 
-} // namespace kafka
+} // namespace experimental::cloud_topics
