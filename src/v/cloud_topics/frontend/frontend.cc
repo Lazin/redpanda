@@ -8,26 +8,24 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
-#include "kafka/data/cloud_topic_partition.h"
+#include "cloud_topics/frontend/frontend.h"
 
 #include "cloud_storage/types.h"
 #include "cloud_topics/app.h"
 #include "cloud_topics/data_plane_api.h"
 #include "cloud_topics/dl_placeholder.h"
 #include "cloud_topics/extent_meta.h"
+#include "cloud_topics/frontend/errc.h"
 #include "cloud_topics/frontend/level_zero_reader_impl.h"
+#include "cloud_topics/logger.h"
 #include "cluster/partition.h"
-#include "cluster/rm_stm.h"
+#include "cluster/rm_stm_types.h"
 #include "cluster/types.h"
-#include "kafka/protocol/batch_reader.h"
-#include "kafka/protocol/errors.h"
-#include "logger.h"
 #include "model/fundamental.h"
 #include "model/record.h"
 #include "model/record_batch_reader.h"
 #include "model/record_batch_types.h"
 #include "model/timeout_clock.h"
-#include "raft/consensus_utils.h"
 #include "raft/errc.h"
 #include "raft/replicate.h"
 #include "storage/record_batch_builder.h"
@@ -38,13 +36,15 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/util/defer.hh>
+
+#include <__expected/unexpected.h>
 
 #include <chrono>
 #include <iterator>
 #include <optional>
-#include <system_error>
 
-namespace kafka {
+namespace experimental::cloud_topics {
 
 namespace {
 
@@ -110,7 +110,7 @@ static model::record_batch make_placeholder_batch(
 // array of placeholder batches.
 static placeholder_batches_with_size convert_to_placeholders(
   const chunked_vector<experimental::cloud_topics::extent_meta>& extents,
-  chunked_vector<model::record_batch_header> original_headers) {
+  const chunked_vector<model::record_batch_header>& original_headers) {
     // TODO: avoid copying this buffer
     ss::circular_buffer<model::record_batch_header> headers;
     std::copy(
@@ -147,7 +147,7 @@ static void update_batch_base_offset(
 }
 
 static chunked_vector<model::record_batch>
-clone_batches(chunked_vector<model::record_batch>& src) {
+clone_batches(const chunked_vector<model::record_batch>& src) {
     chunked_vector<model::record_batch> res;
     for (auto& s : src) {
         res.push_back(s.copy());
@@ -176,29 +176,29 @@ static void update_batches(
 
 } // namespace
 
-cloud_topic_partition::cloud_topic_partition(
+frontend::frontend(
   ss::lw_shared_ptr<cluster::partition> p,
   ss::shared_ptr<experimental::cloud_topics::data_plane_api> app) noexcept
   : _partition(std::move(p))
   , _ct_api(std::move(app)) {}
 
-cloud_topic_partition::cloud_topic_partition(
+frontend::frontend(
   ss::lw_shared_ptr<cluster::partition> p,
   ss::sharded<experimental::cloud_topics::app>& ct_app) noexcept
-  : cloud_topic_partition(std::move(p), ct_app.local().get_data_plane_api()) {}
+  : frontend(std::move(p), ct_app.local().get_data_plane_api()) {}
 
-const model::ntp& cloud_topic_partition::ntp() const {
-    return _partition->ntp();
-}
+const model::ntp& frontend::ntp() const { return _partition->ntp(); }
 
-static model::offset get_log_end_offset(cluster::partition& p) {
+static kafka::offset get_log_end_offset(cluster::partition& p) {
     auto ot_state = p.get_offset_translator_state();
     // Local log is empty
     if (p.dirty_offset() < p.raft_start_offset()) {
-        return ot_state->from_log_offset(p.raft_start_offset());
+        return model::offset_cast(
+          ot_state->from_log_offset(p.raft_start_offset()));
     }
     // Local log is not empty
-    return ot_state->from_log_offset(model::next_offset(p.dirty_offset()));
+    return model::offset_cast(
+      ot_state->from_log_offset(model::next_offset(p.dirty_offset())));
 }
 
 static ss::future<std::vector<cluster::tx::tx_range>>
@@ -224,7 +224,7 @@ get_aborted_transactions_local(
     co_return target;
 }
 
-model::offset cloud_topic_partition::local_start_offset() const {
+kafka::offset frontend::local_start_offset() const {
     // NOTE: the "local" start offset is only used by the datalake subsystem.
     // The method defines the boundary starting from which the translation
     // could be performed. In case of cloud topics there is no such boundary
@@ -233,7 +233,7 @@ model::offset cloud_topic_partition::local_start_offset() const {
     return start_offset();
 }
 
-model::offset cloud_topic_partition::start_offset() const {
+kafka::offset frontend::start_offset() const {
     // Ask partition for its start offset
     // TODO: query metadata layer to get the actual start offset.
     // the 'partition::sync_kafka_start_offset_override' is not invoked here
@@ -243,81 +243,69 @@ model::offset cloud_topic_partition::start_offset() const {
     // using the start_offset of the Raft log at the moment which is incorrect.
     auto so = _partition->raft_start_offset();
     auto kso = _partition->get_offset_translator_state()->from_log_offset(so);
-    return kso;
+    return model::offset_cast(kso);
 }
 
-ss::future<result<model::offset, error_code>>
-cloud_topic_partition::sync_effective_start(model::timeout_clock::duration) {
+ss::future<std::expected<kafka::offset, frontend_errc>>
+frontend::sync_effective_start(model::timeout_clock::duration) {
     // TODO: ask metadata layer
     co_return start_offset();
 }
 
-model::offset cloud_topic_partition::high_watermark() const {
+kafka::offset frontend::high_watermark() const {
     auto ot_state = _partition->get_offset_translator_state();
-    return ot_state->from_log_offset(_partition->high_watermark());
+    return model::offset_cast(
+      ot_state->from_log_offset(_partition->high_watermark()));
 }
 
-checked<model::offset, error_code>
-cloud_topic_partition::last_stable_offset() const {
+std::expected<kafka::offset, frontend_errc>
+frontend::last_stable_offset() const {
     auto maybe_lso = _partition->last_stable_offset();
     if (maybe_lso == model::invalid_lso) {
-        return error_code::offset_not_available;
+        return std::unexpected(frontend_errc::offset_not_available);
     }
     auto ot_state = _partition->get_offset_translator_state();
-    return ot_state->from_log_offset(maybe_lso);
+    return model::offset_cast(ot_state->from_log_offset(maybe_lso));
 }
 
-bool cloud_topic_partition::is_leader() const {
-    return _partition->is_leader();
+bool frontend::is_leader() const { return _partition->is_leader(); }
+
+model::term_id frontend::leader_epoch() const {
+    return _partition->raft()->confirmed_term();
 }
 
-ss::future<std::error_code> cloud_topic_partition::linearizable_barrier() {
-    auto r = co_await _partition->linearizable_barrier();
-    if (r) {
-        co_return raft::errc::success;
-    }
-    co_return r.error();
-}
-
-cluster::partition_probe& cloud_topic_partition::probe() {
-    return _partition->probe();
-}
-
-kafka::leader_epoch cloud_topic_partition::leader_epoch() const {
-    return leader_epoch_from_term(_partition->raft()->confirmed_term());
-}
-
-ss::future<storage::translating_reader> cloud_topic_partition::make_reader(
+ss::future<storage::translating_reader> frontend::make_reader(
   storage::log_reader_config cfg,
   std::optional<model::timeout_clock::time_point>) {
     vassert(_ct_api != nullptr, "cloud topics api not initialized");
 
     auto ot_state = _partition->get_offset_translator_state();
 
-    auto impl = std::make_unique<
-      experimental::cloud_topics::level_zero_log_reader_impl>(
+    // TODO: depending on the 'cfg' construct level zero or level one
+    // reader impl.
+    auto impl = std::make_unique<level_zero_log_reader_impl>(
       cfg, _partition, _ct_api);
+
     co_return storage::translating_reader{
       model::record_batch_reader(std::move(impl)), std::move(ot_state)};
 }
 
-ss::future<std::vector<cluster::tx::tx_range>>
-cloud_topic_partition::aborted_transactions(
-  model::offset base,
-  model::offset last,
+ss::future<std::vector<cluster::tx::tx_range>> frontend::aborted_transactions(
+  kafka::offset base,
+  kafka::offset last,
   ss::lw_shared_ptr<const storage::offset_translator_state> ot_state) {
-    auto base_rp = ot_state->to_log_offset(base);
-    auto last_rp = ot_state->to_log_offset(last);
+    auto base_rp = ot_state->to_log_offset(kafka::offset_cast(base));
+    auto last_rp = ot_state->to_log_offset(kafka::offset_cast(last));
     cloud_storage::offset_range offsets = {
-      .begin = model::offset_cast(base),
-      .end = model::offset_cast(last),
+      .begin = base,
+      .end = last,
       .begin_rp = base_rp,
       .end_rp = last_rp,
     };
     co_return co_await get_aborted_transactions_local(*_partition, offsets);
 }
 
-bool cloud_topic_partition::cache_enabled() const {
+bool frontend::cache_enabled() const {
     if (!_partition->log()->config().cache_enabled()) {
         return false;
     }
@@ -328,7 +316,7 @@ bool cloud_topic_partition::cache_enabled() const {
 }
 
 ss::future<std::optional<storage::timequery_result>>
-cloud_topic_partition::timequery(storage::timequery_config cfg) {
+frontend::timequery(storage::timequery_config cfg) {
     // cluster::partition::timequery returns a result in Kafka offsets,
     // no further offset translation is required here.
     // TODO: take metadata layer state into account
@@ -386,7 +374,7 @@ static ss::future<> bg_upload_and_replicate(
 
     if (res.has_error()) {
         vlog(
-          kdlog.debug,
+          cd_log.debug,
           "LO object upload has failed: {}",
           res.error().message());
         co_return;
@@ -420,22 +408,24 @@ static ss::future<> bg_upload_and_replicate(
             [api,
              cache_enabled,
              inp = std::move(rb_copy),
-             ntp = partition->ntp(),
-             term = partition->term()](
-              result<cluster::kafka_result> res) mutable
-              -> result<raft::replicate_result> {
+             ntp = partition->ntp()](result<cluster::kafka_result> res) mutable
+            -> result<raft::replicate_result> {
                 if (res.has_error()) {
                     return res.error();
                 }
                 // We know that the data is replicated so it's safe to add
                 // the batch to the record batch cache before returning.
                 if (cache_enabled) {
-                    // NOTE: the assumption is that the cached term matches
-                    // the actual term. If this is not the case the replication
-                    // should fail.
                     update_batches(
-                      inp, kafka::offset_cast(res.value().last_offset), term);
+                      inp,
+                      kafka::offset_cast(res.value().last_offset),
+                      res.value().last_term);
                     for (const auto& b : inp) {
+                        vlog(
+                          cd_log.trace,
+                          "Putting batch to cache: {}",
+                          b.base_offset(),
+                          b.term());
                         api->cache_put(ntp, b);
                     }
                 }
@@ -447,9 +437,8 @@ static ss::future<> bg_upload_and_replicate(
 }
 } // namespace
 
-ss::future<result<model::offset>> cloud_topic_partition::replicate(
+ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
   chunked_vector<model::record_batch> batches, raft::replicate_options opts) {
-    using ret_t = result<model::offset>;
     chunked_vector<model::record_batch_header> headers;
     headers.reserve(batches.size());
     for (const auto& batch : batches) {
@@ -469,11 +458,10 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
         + opts.timeout.value_or(L0_replicate_default_timeout));
 
     if (res.has_error()) {
-        co_return ret_t(res.error());
+        co_return std::unexpected(res.error());
     }
 
-    auto placeholders = convert_to_placeholders(
-      res.value(), std::move(headers));
+    auto placeholders = convert_to_placeholders(res.value(), headers);
 
     chunked_vector<model::record_batch> placeholder_batches;
     for (auto&& batch : placeholders.batches) {
@@ -484,25 +472,24 @@ ss::future<result<model::offset>> cloud_topic_partition::replicate(
       std::move(placeholder_batches), opts);
 
     if (!result) {
-        co_return ret_t(result.error());
+        co_return std::unexpected(result.error());
     }
     auto ret_offset = model::offset(result.value().last_offset());
     if (!rb_copy.empty()) {
-        update_batches(rb_copy, ret_offset, _partition->term());
+        update_batches(rb_copy, ret_offset, result.value().last_term);
         for (const auto& b : rb_copy) {
+            log(
+              cd_log.trace,
+              "Putting batch to cache: {}",
+              b.base_offset(),
+              b.term());
             _ct_api->cache_put(ntp(), b);
         }
     }
-    co_return ret_t(ret_offset);
+    co_return ret_offset;
 }
 
-ss::future<result<model::offset>> cloud_topic_partition::replicate(
-  model::record_batch batch, raft::replicate_options opts) {
-    return replicate(
-      chunked_vector<model::record_batch>::single(std::move(batch)), opts);
-}
-
-raft::replicate_stages cloud_topic_partition::replicate(
+raft::replicate_stages frontend::replicate(
   model::batch_identity batch_id,
   model::record_batch batch,
   raft::replicate_options opts) {
@@ -524,11 +511,9 @@ raft::replicate_stages cloud_topic_partition::replicate(
     return out;
 }
 
-ss::future<std::optional<model::offset>>
-cloud_topic_partition::get_leader_epoch_last_offset(
-  kafka::leader_epoch epoch) const {
+ss::future<std::optional<kafka::offset>>
+frontend::get_leader_epoch_last_offset(model::term_id term) const {
     auto ot_state = _partition->get_offset_translator_state();
-    model::term_id term(epoch);
     auto first_local_offset = _partition->raft_start_offset();
     auto first_local_term = _partition->get_term(first_local_offset);
     auto last_local_term = _partition->term();
@@ -547,37 +532,39 @@ cloud_topic_partition::get_leader_epoch_last_offset(
     co_return start_offset();
 }
 
-ss::future<error_code> cloud_topic_partition::prefix_truncate(
-  model::offset, ss::lowres_clock::time_point) {
+ss::future<std::expected<void, frontend_errc>>
+frontend::prefix_truncate(kafka::offset, ss::lowres_clock::time_point) {
     /// DeleteRecords API is not supported in cloud topics yet.
-    co_return error_code::invalid_topic_exception;
+    co_return std::unexpected(frontend_errc::invalid_topic_exception);
 }
 
-ss::future<error_code> cloud_topic_partition::validate_fetch_offset(
-  model::offset fetch_offset,
+ss::future<std::expected<std::monostate, frontend_errc>>
+frontend::validate_fetch_offset(
+  kafka::offset fetch_offset,
   bool reading_from_follower,
   model::timeout_clock::time_point deadline) {
     if (reading_from_follower && !_partition->is_leader()) {
         // TODO: implement follower fetching for cloud topics
-        co_return error_code::not_leader_for_partition;
+        co_return std::unexpected(frontend_errc::not_leader_for_partition);
     }
 
     auto timeout = deadline - model::timeout_clock::now();
     auto so = co_await sync_effective_start(timeout);
     if (!so) {
-        co_return so.error();
+        co_return std::unexpected(so.error());
     }
 
     if (
       fetch_offset < so.value()
       || fetch_offset > get_log_end_offset(*_partition)) {
-        co_return error_code::offset_out_of_range;
+        co_return std::unexpected(frontend_errc::offset_out_of_range);
     }
 
-    co_return error_code::none;
+    co_return std::monostate{};
 }
 
-result<partition_info> cloud_topic_partition::get_partition_info() const {
+std::expected<partition_info, frontend_errc>
+frontend::get_partition_info() const {
     auto ot_state = _partition->get_offset_translator_state();
     partition_info ret;
     ret.leader = _partition->get_leader_id();
@@ -585,23 +572,24 @@ result<partition_info> cloud_topic_partition::get_partition_info() const {
     auto followers = _partition->get_follower_metrics();
 
     if (followers.has_error()) {
-        return followers.error();
+        return std::unexpected(frontend_errc::not_leader_for_partition);
     }
     auto start_offset = _partition->raft_start_offset();
 
     auto clamped_translate = [ot_state,
                               start_offset](model::offset to_translate) {
-        return to_translate >= start_offset
-                 ? ot_state->from_log_offset(to_translate)
-                 : ot_state->from_log_offset(start_offset);
+        return model::offset_cast(
+          to_translate >= start_offset
+            ? ot_state->from_log_offset(to_translate)
+            : ot_state->from_log_offset(start_offset));
     };
 
     for (const auto& follower_metric : followers.value()) {
         ret.replicas.push_back(replica_info{
           .id = follower_metric.id,
-          .high_watermark = model::next_offset(
+          .high_watermark = kafka::next_offset(
             clamped_translate(follower_metric.match_index)),
-          .log_end_offset = model::next_offset(
+          .log_end_offset = kafka::next_offset(
             clamped_translate(follower_metric.dirty_log_index)),
           .is_alive = follower_metric.is_live,
         });
@@ -617,12 +605,20 @@ result<partition_info> cloud_topic_partition::get_partition_info() const {
     return {std::move(ret)};
 }
 
-size_t cloud_topic_partition::estimate_size_between(
-  kafka::offset, kafka::offset) const {
+size_t frontend::estimate_size_between(kafka::offset, kafka::offset) const {
     // TODO: implement this function
     // This function can't be implemented yet because the L1 read path is not
     // completely implemented.
     return 0;
 }
 
-} // namespace kafka
+ss::future<std::error_code> frontend::linearizable_barrier() {
+    // TODO: implement linearizable barrier for cloud topics
+    auto r = co_await _partition->linearizable_barrier();
+    if (r) {
+        co_return raft::errc::success;
+    }
+    co_return r.error();
+}
+
+} // namespace experimental::cloud_topics

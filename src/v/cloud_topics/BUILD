@@ -6,6 +6,7 @@ package(default_visibility = [
     "//src/v/cloud_topics/batcher/tests:__pkg__",
     "//src/v/cloud_topics/core:__pkg__",
     "//src/v/cloud_topics/core/tests:__pkg__",
+    "//src/v/cloud_topics/frontend:__pkg__",
     "//src/v/cloud_topics/level_zero:__pkg__",
     "//src/v/cloud_topics/level_zero/tests:__pkg__",
     "//src/v/cloud_topics/read_path:__pkg__",
@@ -16,7 +17,6 @@ package(default_visibility = [
     "//src/v/cloud_topics/throttler:__pkg__",
     "//src/v/cloud_topics/throttler/tests:__pkg__",
     "//src/v/kafka/data:__pkg__",
-    "//src/v/cloud_topics/frontend:__pkg__",
 ])
 
 redpanda_cc_library(
@@ -101,9 +101,9 @@ redpanda_cc_library(
     ],
     include_prefix = "cloud_topics",
     visibility = [
+        "//src/v/cloud_topics/frontend:__pkg__",
         "//src/v/kafka/data:__pkg__",
         "//src/v/redpanda:__pkg__",
-        "//src/v/cloud_topics/frontend:__pkg__",
     ],
     deps = [
         "//src/v/base",
@@ -125,10 +125,10 @@ redpanda_cc_library(
     ],
     include_prefix = "cloud_topics",
     visibility = [
+        "//src/v/cloud_topics/frontend:__pkg__",
         "//src/v/cloud_topics/reconciler:__pkg__",
         "//src/v/kafka/data:__pkg__",
         "//src/v/redpanda:__pkg__",
-        "//src/v/cloud_topics/frontend:__pkg__",
     ],
     deps = [
         "//src/v/base",
