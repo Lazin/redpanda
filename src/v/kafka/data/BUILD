@@ -37,6 +37,8 @@ redpanda_cc_library(
         "//src/v/cloud_topics:data_plane_api",
         "//src/v/cloud_topics:extent_meta",
         "//src/v/cloud_topics:placeholder",
+        "//src/v/cloud_topics/frontend",
+        "//src/v/cloud_topics/frontend:frontend_errc",
         "//src/v/cloud_topics/frontend:level_zero_reader_impl",
         "//src/v/kafka/protocol",
         "//src/v/kafka/server:errors",
