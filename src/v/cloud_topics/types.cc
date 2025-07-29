@@ -15,11 +15,8 @@ auto fmt::formatter<experimental::cloud_topics::ctp_stm_key>::format(
   experimental::cloud_topics::ctp_stm_key key, fmt::format_context& ctx) const
   -> decltype(ctx.out()) {
     switch (key) {
-    case experimental::cloud_topics::ctp_stm_key::start_snapshot:
-        return fmt::format_to(ctx.out(), "start_snapshot");
-    case experimental::cloud_topics::ctp_stm_key::
-      remove_snapshots_before_version:
-        return fmt::format_to(ctx.out(), "remove_snapshots_before_version");
+    case experimental::cloud_topics::ctp_stm_key::advance_reconciled_offset:
+        return fmt::format_to(ctx.out(), "advance_reconciled_offset");
     }
     return fmt::format_to(
       ctx.out(), "unknown ctp_stm_key({})", static_cast<int>(key));

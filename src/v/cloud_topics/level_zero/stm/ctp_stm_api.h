@@ -11,14 +11,19 @@
 #pragma once
 
 #include "base/outcome.h"
-#include "cloud_topics/dl_snapshot.h"
-#include "cloud_topics/dl_version.h"
+#include "cloud_topics/level_zero/stm/types.h"
+#include "cloud_topics/types.h"
+#include "model/fundamental.h"
 #include "model/record.h"
+#include "model/timeout_clock.h"
+#include "utils/retry_chain_node.h"
 
 #include <seastar/core/gate.hh>
-#include <seastar/util/log.hh>
 
+#include <expected>
 #include <ostream>
+
+struct ctp_stm_api_accessor;
 
 namespace experimental::cloud_topics {
 
@@ -32,9 +37,14 @@ enum class ctp_stm_api_errc {
 std::ostream& operator<<(std::ostream& o, ctp_stm_api_errc errc);
 
 class ctp_stm_api {
+    friend struct ::ctp_stm_api_accessor;
+
 public:
-    ctp_stm_api(ss::logger& logger, ss::shared_ptr<ctp_stm> stm);
-    ctp_stm_api(ctp_stm_api&&) noexcept = default;
+    ctp_stm_api(retry_chain_node& rtc, ss::shared_ptr<ctp_stm> stm);
+    ctp_stm_api(const ctp_stm_api&) noexcept = delete;
+    ctp_stm_api& operator=(const ctp_stm_api&) noexcept = delete;
+    ctp_stm_api(ctp_stm_api&&) noexcept = delete;
+    ctp_stm_api& operator=(ctp_stm_api&&) noexcept = delete;
 
     ~ctp_stm_api() {
         vassert(_gate.is_closed(), "object destroyed before calling stop()");
@@ -43,35 +53,37 @@ public:
 public:
     ss::future<> stop();
 
-public:
-    /// Request a new snapshot to be created.
-    ss::future<checked<dl_snapshot_id, ctp_stm_api_errc>> start_snapshot();
+    /// Get the last reconciled offset from the ctp_stm state.
+    kafka::offset get_last_reconciled_offset() const;
 
-    /// Read the payload of a snapshot.
-    std::optional<dl_snapshot_payload> read_snapshot(dl_snapshot_id id);
+    ss::future<std::expected<std::monostate, ctp_stm_api_errc>>
+    advance_reconciled_offset(kafka::offset last_reconciled_offset);
 
-    /// Remove all snapshots with version less than the given version.
-    /// This must be called periodically as new snapshots are being created
-    /// to avoid the state growing indefinitely.
-    ss::future<checked<void, ctp_stm_api_errc>>
-    remove_snapshots_before(dl_version last_version_to_keep);
+    /// Return the smallest epoch referenced by this ctp_stm.
+    std::optional<cluster_epoch> get_min_epoch() const;
+
+    /// Fence writes
+    ss::future<cluster_epoch_fence> fence_epoch(cluster_epoch e);
+
+    std::optional<cluster_epoch> get_max_epoch() const;
+
+    std::optional<cluster_epoch> get_projected_epoch() const;
 
 private:
     /// Replicate a record batch and wait for it to be applied to the ctp_stm.
     /// Returns the offset at which the batch was applied.
-    ss::future<checked<model::offset, ctp_stm_api_errc>>
+    ss::future<std::expected<model::offset, ctp_stm_api_errc>>
     replicated_apply(model::record_batch&& batch);
 
 private:
-    ss::logger& _logger;
+    retry_chain_node _rtc;
+    retry_chain_logger _rtclog;
 
     /// Gate held by async operations to ensure that the API is not destroyed
     /// while an operation is in progress.
     ss::gate _gate;
 
-    /// The API can only read the state of the stm. The state can be mutated
-    /// only via \ref consensus::replicate calls.
-    ss::shared_ptr<const ctp_stm> _stm;
+    ss::shared_ptr<ctp_stm> _stm;
 };
 
 } // namespace experimental::cloud_topics

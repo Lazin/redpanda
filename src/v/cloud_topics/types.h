@@ -20,9 +20,8 @@
 
 namespace experimental::cloud_topics {
 
-enum class ctp_stm_key {
-    start_snapshot = 1,
-    remove_snapshots_before_version = 2,
+enum class ctp_stm_key : uint8_t {
+    advance_reconciled_offset = 1,
 };
 
 /// Offset in the cloud storage object

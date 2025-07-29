@@ -27,6 +27,7 @@ redpanda_cc_gtest(
     ],
     deps = [
         "//src/v/cloud_topics:logger",
+        "//src/v/cloud_topics:placeholder",
         "//src/v/cloud_topics:types",
         "//src/v/cloud_topics/level_zero/stm:ctp_stm",
         "//src/v/cloud_topics/level_zero/stm:ctp_stm_api",
