@@ -277,6 +277,19 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "prefix_truncate_record",
+    hdrs = [
+        "prefix_truncate_record.h",
+    ],
+    include_prefix = "cluster",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/model",
+        "//src/v/serde",
+    ],
+)
+
+redpanda_cc_library(
     name = "cluster",
     srcs = [
         "archival/adjacent_segment_merger.cc",
@@ -567,7 +580,6 @@ redpanda_cc_library(
         "plugin_backend.h",
         "plugin_frontend.h",
         "plugin_table.h",
-        "prefix_truncate_record.h",
         "producer_state.h",
         "producer_state_manager.h",
         "raft0_utils.h",
@@ -657,6 +669,7 @@ redpanda_cc_library(
         ":nt_revision",
         ":offsets_recovery_rpc",
         ":partition_balancer_rpc",
+        ":prefix_truncate_record",
         ":run_quota",
         ":self_test_rpc",
         ":state_machine_registry",
