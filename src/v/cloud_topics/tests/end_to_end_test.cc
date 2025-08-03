@@ -60,7 +60,7 @@ TEST_F(e2e_fixture, test_create_cloud_topic) {
     wait_for_leader(ntp).get();
 
     auto partition = app.partition_manager.local().get(ntp);
-    ASSERT_TRUE(partition->ctp_stm_api() != nullptr);
+    ASSERT_TRUE(partition->ctp_stm() != nullptr);
 }
 
 TEST_F(e2e_fixture, test_l0_path) {
