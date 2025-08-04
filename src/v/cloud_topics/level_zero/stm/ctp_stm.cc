@@ -15,7 +15,6 @@
 #include "cloud_topics/level_zero/stm/ctp_stm_commands.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_state.h"
 #include "cloud_topics/types.h"
-#include "cluster/prefix_truncate_record.h"
 #include "raft/consensus.h"
 #include "serde/rw/map.h"
 #include "serde/rw/uuid.h"
@@ -26,26 +25,76 @@
 
 namespace experimental::cloud_topics {
 
+static cluster_epoch extract_epoch(model::record_batch&& batch) {
+    vassert(
+      batch.header().type == model::record_batch_type::dl_placeholder,
+      "Expected batch type to be dl_placeholder, got {}",
+      batch.header().type);
+    iobuf value;
+    batch.for_each_record([&value](model::record&& r) {
+        value = std::move(r).release_value();
+        return ss::stop_iteration::yes;
+    });
+
+    auto placeholder = serde::from_iobuf<dl_placeholder>(std::move(value));
+    return placeholder.id.epoch;
+}
+
+ss::future<ss::stop_iteration>
+ctp_stm_consumer::operator()(model::record_batch batch) {
+    _first_epoch = extract_epoch(std::move(batch));
+    co_return _first_epoch.has_value() ? ss::stop_iteration::yes
+                                       : ss::stop_iteration::no;
+}
+
+std::optional<cluster_epoch> ctp_stm_consumer::end_of_stream() {
+    return _first_epoch;
+}
+
 ctp_stm::ctp_stm(ss::logger& logger, raft::consensus* raft)
   : raft::persisted_stm<>(name, logger, raft) {}
 
 const model::ntp& ctp_stm::ntp() const noexcept { return _raft->ntp(); }
 
+ss::future<std::optional<cluster_epoch>> ctp_stm::get_min_epoch() {
+    // Consume the first epoch from the partition starting from
+    // start offset if nothing was reconciled yet or from the last
+    // reconciled offset + 1 otherwise.
+    auto so = _raft->start_offset();
+    auto co = _raft->committed_offset();
+    auto lro = _state.get_last_reconciled_log_offset().value_or(model::prev_offset(so));
+    storage::log_reader_config cfg(
+      model::next_offset(lro),
+      co,
+      0,
+      4_KiB,
+      std::make_optional(model::record_batch_type::dl_placeholder),
+      std::nullopt,
+      std::nullopt);
+
+    auto reader = co_await _raft->make_reader(cfg);
+    auto result = co_await std::move(reader).consume(ctp_stm_consumer{}, model::no_timeout);
+    if (result.has_value()) {
+        auto epoch = result.value();
+        vlog(_log.debug, "Minimum epoch in partition {} is {}", _raft->ntp(), epoch);
+        co_return epoch;
+    } else {
+        // This could naturally happen if the partition is empty because
+        // everything was reconciled.
+        vlog(_log.debug, "No epochs found in partition {}", _raft->ntp());
+        co_return std::nullopt;
+    }
+}
+
 ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
-    // TODO: react to prefix_truncate commands by truncating the ctp_stm_state
-    _state.advance_insync_offset(batch.base_offset());
     if (
       batch.header().type != model::record_batch_type::dl_placeholder
-      && batch.header().type != model::record_batch_type::ctp_stm_command
-      && batch.header().type != model::record_batch_type::prefix_truncate) {
+      && batch.header().type != model::record_batch_type::ctp_stm_command) {
         co_return;
     }
     vlog(_log.debug, "Applying record batch: {}", batch.header());
 
     if (batch.header().type == model::record_batch_type::dl_placeholder) {
-        // Decode the record batch to extract the epoch
-        auto base_offset = batch.base_offset();
-
         // Cherry-pick the placeholder from the record batch
         vassert(
           batch.record_count() > 0,
@@ -58,59 +107,20 @@ ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
 
         auto placeholder = serde::from_iobuf<dl_placeholder>(std::move(value));
         auto id = placeholder.id;
+        _state.advance_epoch(id.epoch);
 
-        if (!_state.can_apply(base_offset)) {
-            vlog(
-              _log.warn,
-              "Record batch at offset {} is applied out of order",
-              base_offset);
-            co_return;
-            // NOTE: in case of failure the gap between the insync offset
-            // and applied offset will be closed by the next record batch.
-            // This is no different from the case when the record batch
-            // is of a different type.
-        }
-
-        auto current_max_epoch = _state.get_max_epoch();
-        if (
-          !current_max_epoch.has_value()
-          || id.epoch > current_max_epoch.value()) {
-            // Add the epoch to the state. For that we need to translate the
-            // base offset of the batch.
-            auto ko = _raft->log()->from_log_offset(base_offset);
-            if (!_state.add_epoch(id.epoch, model::offset_cast(ko))) {
-                vlog(
-                  _log.info,
-                  "Failed to add epoch {} at offset {}, it is not monotonic",
-                  id,
-                  base_offset);
-                co_return;
-                // NOTE: ditto, the gap between the insync offset will be closed
-                // later.
-            } else {
-                vlog(
-                  _log.debug,
-                  "Epoch {} added successfully at offset {}",
-                  id,
-                  base_offset);
-            }
-        }
     } else if (
       batch.header().type == model::record_batch_type::ctp_stm_command) {
         // Decode the command and apply it to the state.
-        batch.for_each_record([this](model::record&& r) {
+        kafka::offset lro;
+        batch.for_each_record([&lro](model::record&& r) {
             auto key = serde::from_iobuf<uint8_t>(r.release_key());
             auto cmd_key = static_cast<ctp_stm_key>(key);
             switch (cmd_key) {
             case ctp_stm_key::advance_reconciled_offset: {
                 auto cmd = serde::from_iobuf<advance_reconciled_offset_cmd>(
                   r.release_value());
-                _state.advance_last_reconciled_offset(
-                  cmd.last_reconciled_offset);
-                vlog(
-                  _log.debug,
-                  "Reconciled offset advanced to {}",
-                  cmd.last_reconciled_offset);
+                lro = cmd.last_reconciled_offset;
                 break;
             }
             default:
@@ -121,29 +131,11 @@ ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
             }
             return ss::stop_iteration::no;
         });
-    } else if (
-      batch.header().type == model::record_batch_type::prefix_truncate) {
-        // Truncate the _state
-        batch.for_each_record([this](model::record&& r) {
-            auto key = serde::from_iobuf<uint8_t>(r.release_key());
-            auto val = serde::from_iobuf<cluster::prefix_truncate_record>(
-              r.release_value());
-            if (key == cluster::prefix_truncate_key) {
-                vlog(
-                  _log.debug,
-                  "Truncating epochs to offset {}",
-                  val.rp_start_offset);
-                _state.truncate_to(val.rp_start_offset);
-            }
-        });
+        vlog(_log.debug, "New LRO value is {}", lro);
+        // LRO is expected to be within the translation range
+        auto lro_log = _raft->log()->to_log_offset(kafka::offset_cast(lro));
+        _state.advance_last_reconciled_offset(lro, lro_log);
     }
-
-    // Close the gap between the insync offset and applied offset.
-    // After this method is called the call to 'can_apply' using
-    // the same version will always return false. This guarantees
-    // that any command can only be applied twice even if log replay
-    // is not idempotent (which is luckily not the case).
-    _state.advance_applied_offset();
 
     co_return;
 }
@@ -158,7 +150,7 @@ ss::future<raft::stm_snapshot>
 ctp_stm::take_local_snapshot(ssx::semaphore_units) {
     auto buf = serde::to_iobuf(_state);
     co_return raft::stm_snapshot::create(
-      0, _state.get_insync_offset(), std::move(buf));
+      0, this->last_applied(), std::move(buf));
 }
 
 ss::future<> ctp_stm::apply_raft_snapshot(const iobuf& buf) {
@@ -167,8 +159,12 @@ ss::future<> ctp_stm::apply_raft_snapshot(const iobuf& buf) {
 }
 
 ss::future<iobuf> ctp_stm::take_raft_snapshot(model::offset snapshot_at) {
-    auto st = _state.get_state_at(snapshot_at);
-    co_return serde::to_iobuf(std::move(st));
+    vassert(
+      last_applied() >= snapshot_at,
+      "The snapshot is taken at offset {} but current insync offset is {}",
+      snapshot_at,
+      last_applied());
+    co_return serde::to_iobuf(_state);
 }
 
 ss::future<cluster_epoch_fence> ctp_stm::fence_epoch(cluster_epoch e) {

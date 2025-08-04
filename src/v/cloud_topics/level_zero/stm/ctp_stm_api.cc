@@ -18,8 +18,10 @@
 #include "model/fundamental.h"
 #include "raft/consensus.h"
 #include "serde/rw/uuid.h"
+#include "ssx/future-util.h"
 #include "storage/record_batch_builder.h"
 #include "utils/retry_chain_node.h"
+#include <seastar/coroutine/as_future.hh>
 
 #include <stdexcept>
 
@@ -31,6 +33,10 @@ std::ostream& operator<<(std::ostream& o, ctp_stm_api_errc errc) {
         return o << "timeout";
     case ctp_stm_api_errc::not_leader:
         return o << "not_leader";
+    case ctp_stm_api_errc::shutdown:
+        return o << "shutdown";
+    case ctp_stm_api_errc::failure:
+        return o << "failure";
     }
 }
 
@@ -88,11 +94,20 @@ ctp_stm_api::advance_reconciled_offset(kafka::offset last_reconciled_offset) {
 }
 
 kafka::offset ctp_stm_api::get_last_reconciled_offset() const {
-    return _stm->state().get_last_reconciled_offset();
+    return _stm->state().get_last_reconciled_offset().value_or(kafka::offset());
 }
 
-std::optional<cluster_epoch> ctp_stm_api::get_min_epoch() const {
-    return _stm->state().find_first_epoch();
+ss::future<std::expected<std::optional<cluster_epoch>, ctp_stm_api_errc>> ctp_stm_api::get_min_epoch() const {
+    auto res = co_await ss::coroutine::as_future(_stm->get_min_epoch());
+    if (res.failed()) {
+        auto e = res.get_exception();
+        if (ssx::is_shutdown_exception(e)) {
+            co_return std::unexpected(ctp_stm_api_errc::shutdown);
+        }
+        vlog(_rtclog.error, "Failed to get minimum epoch from ctp_stm: {}", e);
+        co_return std::unexpected(ctp_stm_api_errc::failure);
+    }
+    co_return res.get();
 }
 
 ss::future<cluster_epoch_fence> ctp_stm_api::fence_epoch(cluster_epoch e) {

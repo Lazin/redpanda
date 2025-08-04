@@ -14,10 +14,21 @@
 #include "cloud_topics/level_zero/stm/types.h"
 #include "raft/persisted_stm.h"
 #include "raft/replicate.h"
+#include <expected>
 
 #include <seastar/core/rwlock.hh>
 
 namespace experimental::cloud_topics {
+
+/// Consumer used by the ctp_stm to read the minimum cluster epoch
+class ctp_stm_consumer {
+public:
+    ss::future<ss::stop_iteration> operator()(model::record_batch);
+    std::optional<cluster_epoch> end_of_stream();
+
+private:
+    std::optional<cluster_epoch> _first_epoch;
+};
 
 class ctp_stm_api;
 
@@ -50,6 +61,9 @@ public:
     }
 
     ss::future<cluster_epoch_fence> fence_epoch(cluster_epoch e);
+
+    /// Query the underlying partition for the first epoch
+    ss::future<std::optional<cluster_epoch>> get_min_epoch();
 
 private:
     ss::future<> do_apply(const model::record_batch& batch) override;

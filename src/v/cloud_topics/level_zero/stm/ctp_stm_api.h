@@ -32,6 +32,8 @@ class ctp_stm;
 enum class ctp_stm_api_errc {
     timeout,
     not_leader,
+    shutdown,
+    failure,
 };
 
 std::ostream& operator<<(std::ostream& o, ctp_stm_api_errc errc);
@@ -60,7 +62,8 @@ public:
     advance_reconciled_offset(kafka::offset last_reconciled_offset);
 
     /// Return the smallest epoch referenced by this ctp_stm.
-    std::optional<cluster_epoch> get_min_epoch() const;
+    ss::future<std::expected<std::optional<cluster_epoch>, ctp_stm_api_errc>>
+    get_min_epoch() const;
 
     /// Fence writes
     ss::future<cluster_epoch_fence> fence_epoch(cluster_epoch e);

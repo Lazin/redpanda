@@ -83,6 +83,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics:dl_snapshot",
         "//src/v/cloud_topics:dl_version",
         "//src/v/model",
+        "//src/v/ssx:future_util",
         "//src/v/utils:retry_chain_node",
         "@seastar",
     ],
