@@ -16,6 +16,7 @@
 #include "cloud_topics/extent_meta.h"
 #include "cloud_topics/frontend/errc.h"
 #include "cloud_topics/frontend/level_zero_reader_impl.h"
+#include "cloud_topics/level_zero/stm/ctp_stm_api.h"
 #include "cloud_topics/logger.h"
 #include "cluster/partition.h"
 #include "cluster/rm_stm_types.h"
@@ -40,6 +41,7 @@
 #include <chrono>
 #include <iterator>
 #include <optional>
+#include <stdexcept>
 
 namespace experimental::cloud_topics {
 
@@ -324,6 +326,7 @@ namespace {
 struct upload_and_replicate_stages {
     model::ntp ntp;
     ss::lw_shared_ptr<cluster::partition> partition;
+    ss::lw_shared_ptr<experimental::cloud_toics::ctp_stm_api> ctp_stm_api;
     chunked_vector<model::record_batch> batches;
     model::batch_identity batch_id;
     raft::replicate_options opts;
@@ -377,6 +380,36 @@ static ss::future<> bg_upload_and_replicate(
         co_return;
     }
 
+    if (res.value().empty()) {
+        vlog(
+          cd_log.warn,
+          "LO object upload returned empty result, nothing to replicate");
+        co_return;
+    }
+
+    auto fence_fut = co_await ss::coroutine::as_future(
+      op->ctp_stm_api->fence_epoch(res.value().front().id.epoch));
+    if (fence_fut.failed()) {
+        // TODO: handle shutdown failures gracefully
+        auto e = fence_fut.get_exception();
+        vlog(
+          cd_log.warn,
+          "Failed to fence epoch {} for ntp {}, error: {}",
+          res.value().front().id.epoch,
+          op->ntp,
+          e);
+        co_return;
+    }
+    auto fence = std::move(fence_fut.get());
+    if (!fence.unit.has_value()) {
+        vlog(
+          cd_log.warn,
+          "Failed to fence epoch {} for ntp {}, fence unit is empty",
+          res.value().front().id.epoch,
+          op->ntp);
+        co_return;
+    }
+
     chunked_vector<model::record_batch_header> headers;
     headers.push_back(header);
     auto placeholders = convert_to_placeholders(
@@ -405,7 +438,9 @@ static ss::future<> bg_upload_and_replicate(
             [api,
              cache_enabled,
              inp = std::move(rb_copy),
-             ntp = partition->ntp()](result<cluster::kafka_result> res) mutable
+             ntp = partition->ntp(),
+             fence_unit = std::move(fence.unit)](
+              result<cluster::kafka_result> res) mutable
               -> result<raft::replicate_result> {
                 if (res.has_error()) {
                     return res.error();
@@ -459,6 +494,33 @@ ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
 
     if (res.has_error()) {
         co_return std::unexpected(res.error());
+    }
+
+    auto fence_fut = co_await ss::coroutine::as_future(
+      _ctp_stm_api->fence_epoch(res.value().front().id.epoch));
+    if (fence_fut.failed()) {
+        // TODO: handle shutdown failures gracefully
+        auto e = fence_fut.get_exception();
+        vlog(
+          cd_log.warn,
+          "Failed to fence epoch {} for ntp {}, error: {}",
+          res.value().front().id.epoch,
+          ntp(),
+          fence_fut.get_exception());
+        std::rethrow_exception(e);
+    }
+    auto fence = std::move(fence_fut.get());
+    if (!fence.unit.has_value()) {
+        vlog(
+          cd_log.warn,
+          "Failed to fence epoch {} for ntp {}, fence unit is empty",
+          res.value().front().id.epoch,
+          ntp());
+        // TODO: use error code
+        throw std::runtime_error(fmt::format(
+          "Failed to fence epoch {} for ntp {}, fence unit is empty",
+          res.value().front().id.epoch,
+          ntp()));
     }
 
     auto placeholders = convert_to_placeholders(res.value(), headers);

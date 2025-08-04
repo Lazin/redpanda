@@ -30,6 +30,7 @@ class partition;
 namespace experimental::cloud_topics {
 class data_plane_api;
 class app;
+class ctp_stm_api;
 
 struct replica_info {
     model::node_id id;
@@ -157,6 +158,7 @@ private:
 
     ss::lw_shared_ptr<cluster::partition> _partition;
     ss::shared_ptr<experimental::cloud_topics::data_plane_api> _ct_api;
+    ss::lw_shared_ptr<experimental::cloud_topics::ctp_stm_api> _ctp_stm_api;
 };
 
 } // namespace experimental::cloud_topics
