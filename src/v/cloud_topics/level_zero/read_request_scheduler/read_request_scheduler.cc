@@ -1,0 +1,142 @@
+/*
+ * Copyright 2025 Redpanda Data, Inc.
+ *
+ * Licensed as a Redpanda Enterprise file under the Redpanda Community
+ * License (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
+ */
+#include "cloud_topics/level_zero/read_request_scheduler/read_request_scheduler.h"
+
+#include "cloud_topics/logger.h"
+
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+namespace cloud_topics::l0 {
+
+read_request_scheduler::read_request_scheduler(
+  read_pipeline<ss::lowres_clock>::stage stage)
+  : _stage(std::move(stage)) {}
+
+ss::future<> read_request_scheduler::start() {
+    vlog(cd_log.debug, "Read Request Scheduler start");
+    co_return;
+}
+
+ss::future<> read_request_scheduler::stop() {
+    vlog(cd_log.debug, "Read Request Scheduler stop");
+    _as.request_abort();
+    co_await _gate.close();
+}
+
+namespace {
+ss::shard_id shard_for(const read_request<ss::lowres_clock>& req) {
+    std::hash<ss::sstring> hasher;
+    // The request is generated from the placeholder batch.
+    // The placeholder batch can't span multiple objects so it's safe
+    // to check only the first extent.
+    auto h = hasher(req.query.meta.front().id.name);
+    auto shard = h % ss::smp::count;
+    return static_cast<ss::shard_id>(shard);
+}
+
+std::unique_ptr<read_request<ss::lowres_clock>> make_proxy(
+  ss::shard_id target_shard,
+  const read_request<ss::lowres_clock>& req,
+  ss::lowres_clock::time_point timeout,
+  retry_chain_node* target_rtc) {
+    vassert(
+      ss::this_shard_id() == target_shard,
+      "make_proxy called on the wrong shard");
+    dataplane_query query;
+    query.output_size_estimate = req.query.output_size_estimate;
+    query.meta = req.query.meta.copy();
+    auto proxy = std::make_unique<read_request<ss::lowres_clock>>(
+      req.ntp, std::move(query), timeout, target_rtc);
+    return proxy;
+}
+
+} // namespace
+
+void read_request_scheduler::schedule_on(
+  read_request<ss::lowres_clock>& source_req, ss::shard_id target) {
+    if (target == ss::this_shard_id()) {
+        // Fast path, just push source_req down the pipeline
+        _stage.push_next_stage(source_req);
+        return;
+    }
+
+    auto proxy = container().invoke_on(
+      target, [target, &source_req](read_request_scheduler& s) {
+          return s.proxy_read_request(source_req, target);
+      });
+    auto ack = proxy.then(
+      [&source_req](read_request<ss::lowres_clock>::response_t resp) {
+          if (resp.has_value()) {
+              source_req.set_value(std::move(resp.value()));
+          } else {
+              source_req.set_value(resp.error());
+          }
+      });
+    ssx::background = std::move(ack);
+}
+
+ss::future<read_request<ss::lowres_clock>::response_t>
+read_request_scheduler::proxy_read_request(
+  const read_request<ss::lowres_clock>& source_req, ss::shard_id target) {
+    auto now = ss::lowres_clock::now();
+    auto timeout = source_req.expiration_time;
+    if (timeout < now) {
+        vlog(cd_log.debug, "Read Request timed out");
+        co_return errc::timeout;
+    }
+    auto proxy = make_proxy(
+      target, source_req, timeout, &_stage.get_root_rtc());
+    auto f = proxy->response.get_future();
+    _stage.push_next_stage(*proxy);
+    auto res = co_await ss::coroutine::as_future(std::move(f));
+    if (res.failed()) {
+        auto ex = res.get_exception();
+        vlog(cd_log.error, "Proxy read request exception: {}", ex);
+        co_return errc::unexpected_failure;
+    }
+    co_return std::move(res.get());
+}
+
+ss::future<> read_request_scheduler::bg_loop() {
+    vlog(cd_log.debug, "Read Request Scheduler loop start");
+    while (!_as.abort_requested()) {
+        // NOTE(1): requests are vectorized but are always referencing
+        // the same NTP and L0 object. This is because the placeholder
+        // batch can only reference a single object id. This means that
+        // we can map requests to shards directly. This also simplifies
+        // the mapping of the result back to the original request.
+        //
+        // NOTE(2): cache locality is not a concern here because
+        // unlike in cases of write path the read path is only used
+        // when there is a cache miss. Normally, we will not hit this
+        // code path if the cache is working well and there is no
+        // leadership transfers. The goal here is to brute-force the
+        // reconciliation of cache misses as fast as possible.
+        auto res = co_await _stage.pull_fetch_requests(0);
+        if (res.has_error()) {
+            if (res.error() == errc::shutting_down) {
+                break;
+            }
+            vlog(
+              cd_log.error, "Failed to pull fetch requests: {}", res.error());
+            _stage.register_pipeline_error(res.error());
+            continue;
+        }
+        auto list = std::move(res.value());
+        for (auto& req : list.requests) {
+            auto target_shard = shard_for(req);
+            schedule_on(req, target_shard);
+        }
+    }
+}
+
+} // namespace cloud_topics::l0

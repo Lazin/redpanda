@@ -86,6 +86,16 @@ public:
             co_return list;
         }
 
+        /// Push request to the next stage of the pipeline.
+        /// The request should belong to the current pipeline.
+        void push_next_stage(read_request<Clock>& req) {
+            if (!req._hook.is_linked()) {
+                _parent->get_pending().push_back(req);
+            }
+            req.stage = _parent->next_stage(req.stage);
+            _parent->signal(req.stage);
+        }
+
         bool stopped() const noexcept { return _parent->stopped(); }
 
         basic_retry_chain_node<Clock>& get_root_rtc() noexcept {
