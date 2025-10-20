@@ -514,7 +514,10 @@ reconciler::add_source_to_object(
             .as = &_as,
           });
         metadata = co_await std::move(reader).consume(
-          std::move(consumer), model::no_timeout);
+          std::move(consumer),
+          model::timeout_clock::now()
+            + config::shard_local_cfg()
+                .cloud_storage_segment_upload_timeout_ms());
     } catch (...) {
         co_return std::unexpected(reconcile_error(
           "unable to consume from L0 partition: {}", std::current_exception()));
