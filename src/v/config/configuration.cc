@@ -4495,6 +4495,12 @@ configuration::configuration()
       "negatively impact performance and stability of the cluster.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       false)
+  , cloud_topics_reconciler_upload_timeout(
+      *this,
+      "cloud_topics_reconciler_upload_timeout",
+      "Timeout for the L1 object upload operation.",
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
+      30s)
   , development_feature_property_testing_only(
       *this,
       "development_feature_property_testing_only",
