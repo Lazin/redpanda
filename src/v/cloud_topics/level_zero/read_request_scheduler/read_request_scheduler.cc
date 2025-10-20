@@ -109,11 +109,17 @@ read_request_scheduler::proxy_read_request(
 ss::future<> read_request_scheduler::bg_loop() {
     vlog(cd_log.debug, "Read Request Scheduler loop start");
     while (!_as.abort_requested()) {
-        // NOTE(1): requests are vectorized but are always referencing
-        // the same NTP and L0 object. This is because the placeholder
-        // batch can only reference a single object id. This means that
-        // we can map requests to shards directly. This also simplifies
-        // the mapping of the result back to the original request.
+        // NOTE(1): requests are vectorized but it's not guaranteed
+        // that all extents in the request target the same object.
+        // If this is the case the scheduler will use first extent
+        // to decide the target shard. This could lead to suboptimal
+        // distribution of requests across shards and some edge cases.
+        // To avoid this the caller of the 'materialize' must ensure
+        // that the requests are split properly so that all extents
+        // in the request target the same object. This is not a
+        // correctness problem. The only side effect is that we may
+        // download same objects on multiple shards in parallel in
+        // cases.
         //
         // NOTE(2): cache locality is not a concern here because
         // unlike in cases of write path the read path is only used
