@@ -261,6 +261,95 @@ ss::future<> level_zero_log_reader_impl::fetch_metadata(
                                    : state::ready_state;
 }
 
+namespace {
+ss::future<result<chunked_vector<model::record_batch>>> materialize_fanout(
+  data_plane_api* ct_api,
+  model::ntp ntp,
+  size_t output_size_estimate,
+  chunked_vector<extent_meta> metadata,
+  model::timeout_clock::time_point timeout,
+  prefix_logger& log) {
+    vlog(
+      log.debug,
+      "materialize_fanout called, metadata size: {}, output size estimate: {}, "
+      "timeout (ms): {}",
+      metadata.size(),
+      output_size_estimate,
+      ((timeout - model::timeout_clock::now()) / 1ms));
+    using ret_future_t
+      = ss::future<result<chunked_vector<model::record_batch>>>;
+    chunked_vector<ret_future_t> futures;
+    chunked_vector<extent_meta> curr_meta;
+    for (const auto& meta : metadata) {
+        if (curr_meta.empty() || curr_meta.back().id == meta.id) {
+            curr_meta.push_back(meta);
+            continue;
+        }
+        vassert(!curr_meta.empty(), "extent list shouldn't be empty");
+        auto id = curr_meta.back().id;
+        auto fut
+          = ct_api
+              ->materialize(
+                ntp, output_size_estimate, curr_meta.copy(), timeout)
+              .finally([id, &log] {
+                  vlog(log.debug, "Materialize completed for extent {}", id);
+              });
+        futures.push_back(std::move(fut));
+        curr_meta.clear();
+        curr_meta.push_back(meta);
+    }
+    if (!curr_meta.empty()) {
+        auto id = curr_meta.back().id;
+        auto fut
+          = ct_api
+              ->materialize(
+                ntp, output_size_estimate, std::move(curr_meta), timeout)
+              .finally([id, &log] {
+                  vlog(log.debug, "Materialize completed for extent {}", id);
+              });
+        futures.push_back(std::move(fut));
+    }
+    auto fut_res = co_await ss::when_all(futures.begin(), futures.end());
+
+    chunked_vector<model::record_batch> results;
+    bool has_failed = false;
+    std::exception_ptr first_exception;
+    for (auto& result : fut_res) {
+        if (result.failed()) {
+            auto err = result.get_exception();
+            has_failed = true;
+            if (!first_exception) {
+                first_exception = err;
+            }
+            vlog(log.warn, "Materialize operation failed: {}", err);
+        }
+    }
+    if (has_failed) {
+        std::rethrow_exception(first_exception);
+    }
+    for (auto& result : fut_res) {
+        auto res = result.get();
+        if (res.has_error()) {
+            // Return the first error encountered. This could be improved in
+            // the future when the L0 reader will be prepared for partial
+            // failures. For now we just fail the entire read to make things
+            // simpler.
+            vlog(
+              log.warn,
+              "Materialize operation returned error: {}",
+              res.error());
+            co_return res.error();
+        } else {
+            auto& batches = res.value();
+            for (auto&& b : batches) {
+                results.push_back(std::move(b));
+            }
+        }
+    }
+    co_return results;
+}
+} // namespace
+
 ss::future<> level_zero_log_reader_impl::materialize_batches(
   model::timeout_clock::time_point deadline) {
     if (_current == state::end_of_stream_state) {
@@ -339,9 +428,16 @@ ss::future<> level_zero_log_reader_impl::materialize_batches(
           _ctp->ntp(),
           materialize_bytes,
           materialize_count);
+
         // Ask data layer to bring data from the cloud storage.
-        auto mat_res = co_await _ct_api->materialize(
-          _ctp->ntp(), materialize_bytes, std::move(to_materialize), deadline);
+        auto mat_res = co_await materialize_fanout(
+          _ct_api,
+          _ctp->ntp(),
+          materialize_bytes,
+          std::move(to_materialize),
+          deadline,
+          _log);
+
         if (mat_res.has_error()) {
             throw std::runtime_error(
               fmt::format(
