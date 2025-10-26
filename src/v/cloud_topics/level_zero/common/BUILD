@@ -32,6 +32,13 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "micro_probe",
+    hdrs = [
+        "micro_probe.h",
+    ],
+)
+
+redpanda_cc_library(
     name = "level_zero_probe",
     srcs = [
         "level_zero_probe.cc",
