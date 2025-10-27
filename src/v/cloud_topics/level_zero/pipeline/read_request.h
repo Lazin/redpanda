@@ -14,6 +14,7 @@
 #include "base/seastarx.h"
 #include "cloud_topics/errc.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
+#include "cloud_topics/level_zero/common/micro_probe.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "container/chunked_vector.h"
 #include "container/intrusive_list_helpers.h"
@@ -63,6 +64,8 @@ struct read_request : ss::weakly_referencable<read_request<Clock>> {
     basic_retry_chain_node<Clock> rtc;
     /// Per-request logger
     basic_retry_chain_logger<Clock> rtc_logger;
+    /// A proble that tracks per-request I/O usage
+    micro_probe probe;
 
     using response_t = checked<dataplane_query_result, errc>;
 

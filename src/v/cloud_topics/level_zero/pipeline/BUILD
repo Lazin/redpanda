@@ -95,6 +95,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics:logger",
     ],
     deps = [
+        ":micro_probe",
         ":pipeline_stage",
         ":serializer",
         "//src/v/base",
