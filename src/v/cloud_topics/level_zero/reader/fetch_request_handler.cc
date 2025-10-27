@@ -125,7 +125,7 @@ ss::future<> fetch_handler::process_single_request(l0::read_request<>* req) {
             co_return;
         }
 
-        auto res = extent.get();
+        auto [res, probe] = extent.get();
         if (res.has_error()) {
             vlog(
               req->rtc_logger.warn,
@@ -148,6 +148,7 @@ ss::future<> fetch_handler::process_single_request(l0::read_request<>* req) {
         }
 
         auto_dispose.cancel();
+        req->probe += probe;
         req->set_value(l0::dataplane_query_result{.results = std::move(data)});
 
     } catch (...) {
