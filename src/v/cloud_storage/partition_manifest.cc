@@ -1174,7 +1174,7 @@ bool partition_manifest::safe_spillover_manifest(const segment_meta& meta) {
     // should be equal to start offset and the meta.committed_offset + 1 should
     // be aligned with one of the segments.
     auto so = get_start_offset();
-    if (!so.has_value()) {
+    if (!so.has_value() || _segments.empty()) {
         vlog(
           cst_log.warn,
           "{} Can't apply spillover manifest because the manifest is empty, {}",
@@ -1201,10 +1201,16 @@ bool partition_manifest::safe_spillover_manifest(const segment_meta& meta) {
         // correctly.
         vlog(
           cst_log.warn,
-          "{} Can't apply spillover manifest because the end of the manifest "
-          "is not aligned, {}",
+          "{} Can't apply spillover manifest because the end of the "
+          "manifest "
+          "is not aligned, {}, start offset: {}, num_segments: {}, first "
+          "segment meta: {}, num spillover manifests: {}",
           display_name(),
-          meta);
+          meta,
+          _start_offset,
+          _segments.size(),
+          *_segments.begin(), // safe because of the first check
+          _spillover_manifests.size());
         return false;
     }
     // Invariant: 'meta' should be aligned perfectly with the previous spillover
