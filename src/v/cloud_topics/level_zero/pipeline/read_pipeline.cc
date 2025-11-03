@@ -131,6 +131,11 @@ ss::future<result<dataplane_query_result>> read_pipeline<Clock>::make_reader(
         co_return errc::shutting_down;
     }
     auto res = co_await std::move(fut);
+
+    // Even if request fails we need to register all operations
+    // that it performed (cache access, cloud storage access).
+    _probe.register_micro_probe(request.probe);
+
     if (res.has_error()) {
         if (res.error() == errc::timeout) {
             err_fallback.cancel();
