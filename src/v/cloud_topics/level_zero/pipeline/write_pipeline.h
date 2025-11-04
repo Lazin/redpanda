@@ -154,6 +154,12 @@ public:
             _parent->_probe.register_micro_probe(p);
         }
 
+        /// Pipeline components can invoke this method to acquire units
+        /// before allocating memory.
+        auto acquire_mem_units(uint64_t units) {
+            return ss::get_units(_parent->_mem_budget, units);
+        }
+
     private:
         /// Pick the right abort source to use.
         ///
