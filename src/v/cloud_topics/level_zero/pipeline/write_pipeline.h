@@ -148,6 +148,12 @@ public:
 
         pipeline_stage id() const noexcept { return _ps; }
 
+        /// Write pipeline aggregates resources so it's easier to
+        /// track resources here than per request.
+        void register_micro_probe(const micro_probe& p) {
+            _parent->_probe.register_micro_probe(p);
+        }
+
     private:
         /// Pick the right abort source to use.
         ///
