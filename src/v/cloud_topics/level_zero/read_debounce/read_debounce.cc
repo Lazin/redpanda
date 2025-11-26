@@ -133,6 +133,10 @@ read_debounce<Clock>::process_single_request(read_request<Clock>* req) {
           &_pipeline_stage.get_root_rtc(),
           req->stage);
 
+        if (_pipeline_stage.stopped()) {
+            co_return;
+        }
+
         auto fut = proxy.response.get_future();
         _pipeline_stage.push_next_stage(proxy);
         auto fut_res = co_await ss::coroutine::as_future(std::move(fut));

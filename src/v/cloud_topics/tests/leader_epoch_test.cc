@@ -37,6 +37,8 @@ public:
         cfg.get("cloud_topics_disable_reconciliation_loop").set_value(true);
         cfg.get("raft_heartbeat_interval_ms").set_value(50ms);
         cfg.get("raft_heartbeat_timeout_ms").set_value(500ms);
+        //cfg.get("cloud_topics_parallel_fetch_enabled").set_value(false);
+        //cfg.get("cloud_topics_fetch_debounce_enabled").set_value(false);
         for (int i = 0; i < 3; ++i) {
             add_node();
         }
