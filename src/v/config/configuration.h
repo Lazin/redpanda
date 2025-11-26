@@ -827,6 +827,8 @@ public:
     property<std::chrono::milliseconds> cloud_topics_l0_gc_interval;
     property<std::chrono::milliseconds> cloud_topics_l0_gc_backoff_interval;
 
+    property<bool> cloud_topics_parallel_fetch_enabled;
+
     development_feature_property<int> development_feature_property_testing_only;
 
 private:

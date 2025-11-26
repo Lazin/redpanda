@@ -4544,6 +4544,14 @@ configuration::configuration()
       "when no progress is being made or errors are occurring.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1min)
+  , cloud_topics_parallel_fetch_enabled(
+      *this,
+      "cloud_topics_parallel_fetch_enabled",
+      "Enable parallel fetching in cloud topics. This mechanism improves the "
+      "throughput by allowing the broker to download data needed by the fetch "
+      "request using multiple shards.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      true)
   , development_feature_property_testing_only(
       *this,
       "development_feature_property_testing_only",
