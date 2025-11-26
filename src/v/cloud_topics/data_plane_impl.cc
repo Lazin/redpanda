@@ -19,9 +19,12 @@
 #include "cloud_topics/level_zero/cluster_services_impl/cluster_services.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
 #include "cloud_topics/level_zero/pipeline/write_pipeline.h"
+#include "cloud_topics/level_zero/read_debounce/read_debounce.h"
 #include "cloud_topics/level_zero/read_fanout/read_fanout.h"
+#include "cloud_topics/level_zero/read_request_scheduler/read_request_scheduler.h"
 #include "cloud_topics/level_zero/reader/fetch_request_handler.h"
 #include "cloud_topics/level_zero/write_request_scheduler/write_request_scheduler.h"
+#include "config/configuration.h"
 #include "model/fundamental.h"
 #include "ssx/sharded_service_container.h"
 #include "storage/api.h"
@@ -73,6 +76,20 @@ public:
               return _read_pipeline.local().register_read_pipeline_stage();
           }));
 
+        if (config::shard_local_cfg().cloud_topics_parallel_fetch_enabled()) {
+            co_await construct_service(
+              _read_request_scheduler, ss::sharded_parameter([this] {
+                  return _read_pipeline.local().register_read_pipeline_stage();
+              }));
+        }
+
+        if (config::shard_local_cfg().cloud_topics_fetch_debounce_enabled()) {
+            co_await construct_service(
+              _read_debounce, ss::sharded_parameter([this] {
+                  return _read_pipeline.local().register_read_pipeline_stage();
+              }));
+        }
+
         co_await construct_service(
           _fetch_handler,
           ss::sharded_parameter([this] {
@@ -93,6 +110,14 @@ public:
           [](auto& s) { return s.start(); });
         co_await _batcher.invoke_on_all([](auto& s) { return s.start(); });
         co_await _read_fanout.invoke_on_all([](auto& s) { return s.start(); });
+        if (_read_request_scheduler.local_is_initialized()) {
+            co_await _read_request_scheduler.invoke_on_all(
+              [](auto& s) { return s.start(); });
+        }
+        if (_read_debounce.local_is_initialized()) {
+            co_await _read_debounce.invoke_on_all(
+              [](auto& s) { return s.start(); });
+        }
         co_await _fetch_handler.invoke_on_all(
           [](auto& s) { return s.start(); });
         co_await _batch_cache.invoke_on_all([](auto& s) { return s.start(); });
@@ -160,6 +185,9 @@ private:
     // Read path
     ss::sharded<l0::read_pipeline<>> _read_pipeline;
     ss::sharded<l0::read_fanout> _read_fanout;
+    ss::sharded<l0::read_request_scheduler> _read_request_scheduler;
+    ss::sharded<l0::read_debounce<>> _read_debounce;
+
     ss::sharded<l0::fetch_handler> _fetch_handler;
     // Batch cache
     ss::sharded<batch_cache> _batch_cache;
