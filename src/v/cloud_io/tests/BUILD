@@ -117,3 +117,22 @@ redpanda_cc_btest(
         "@seastar//:testing",
     ],
 )
+
+redpanda_cc_btest(
+    name = "fifo_chunk_test",
+    timeout = "short",
+    srcs = [
+        "fifo_chunk_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/bytes:iostream",
+        "//src/v/cloud_io:fifo_chunk",
+        "//src/v/serde",
+        "//src/v/test_utils:seastar_boost",
+        "//src/v/test_utils:tmp_dir",
+        "@boost//:test",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)

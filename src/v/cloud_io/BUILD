@@ -203,3 +203,46 @@ redpanda_cc_library(
         "@seastar",
     ],
 )
+
+redpanda_cc_library(
+    name = "fifo_chunk",
+    srcs = [
+        "fifo_chunk.cc",
+    ],
+    hdrs = [
+        "fifo_chunk.h",
+    ],
+    implementation_deps = [
+        ":logger",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":basic_cache_service_api",
+        ":cache",
+        "//src/v/base",
+        "//src/v/config",
+        "//src/v/serde",
+        "//src/v/serde:map",
+        "//src/v/serde:sstring",
+        "//src/v/storage:disk",
+        "@abseil-cpp//absl/container:btree",
+        "@fmt",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "fifo_cache",
+    srcs = [
+        "fifo_cache.cc",
+    ],
+    hdrs = [
+        "fifo_cache.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":basic_cache_service_api",
+        ":fifo_chunk",
+        "@seastar",
+    ],
+)
