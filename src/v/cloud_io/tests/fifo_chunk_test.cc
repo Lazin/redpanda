@@ -412,3 +412,281 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     BOOST_CHECK_EQUAL_COLLECTIONS(
       result.begin(), result.end(), pattern_data.begin(), pattern_data.end());
 }
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_empty) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Get keys from empty chunk
+    auto keys = chunk.get_keys();
+    auto begin = keys.begin();
+    auto end = keys.end();
+
+    BOOST_CHECK(begin == end);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_single) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Add one key
+    auto slot = chunk.prepare("alpha", 100);
+    BOOST_REQUIRE(slot.has_value());
+
+    // Get keys
+    auto keys = chunk.get_keys();
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 1);
+    BOOST_CHECK_EQUAL(key_vec[0], "alpha");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_multiple_sorted) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("zebra", 100);
+    chunk.prepare("alpha", 100);
+    chunk.prepare("delta", 100);
+    chunk.prepare("beta", 100);
+
+    // Get keys - should be in lexicographical order
+    auto keys = chunk.get_keys();
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 4);
+    BOOST_CHECK_EQUAL(key_vec[0], "alpha");
+    BOOST_CHECK_EQUAL(key_vec[1], "beta");
+    BOOST_CHECK_EQUAL(key_vec[2], "delta");
+    BOOST_CHECK_EQUAL(key_vec[3], "zebra");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_empty) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Lower bound on empty chunk
+    auto keys = chunk.lower_bound("any_key");
+    auto begin = keys.begin();
+    auto end = keys.end();
+
+    BOOST_CHECK(begin == end);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_exact_match) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+    chunk.prepare("date", 100);
+
+    // Lower bound with exact match
+    auto keys = chunk.lower_bound("banana");
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 3);
+    BOOST_CHECK_EQUAL(key_vec[0], "banana");
+    BOOST_CHECK_EQUAL(key_vec[1], "cherry");
+    BOOST_CHECK_EQUAL(key_vec[2], "date");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_between_keys) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+    chunk.prepare("date", 100);
+
+    auto keys = chunk.lower_bound("blueberry");
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    // Should return keys >= "blueberry", which are "cherry" and "date"
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 2);
+    BOOST_CHECK_EQUAL(key_vec[0], "cherry");
+    BOOST_CHECK_EQUAL(key_vec[1], "date");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_before_all) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+    chunk.prepare("date", 100);
+
+    auto keys = chunk.lower_bound("aaa");
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    // Should return all keys
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 3);
+    BOOST_CHECK_EQUAL(key_vec[0], "banana");
+    BOOST_CHECK_EQUAL(key_vec[1], "cherry");
+    BOOST_CHECK_EQUAL(key_vec[2], "date");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_after_all) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+
+    auto keys = chunk.lower_bound("zzz");
+    auto begin = keys.begin();
+    auto end = keys.end();
+
+    // Should return empty range
+    BOOST_CHECK(begin == end);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_first_key) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+
+    auto keys = chunk.lower_bound("apple");
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    // Should return all keys starting from "apple"
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 3);
+    BOOST_CHECK_EQUAL(key_vec[0], "apple");
+    BOOST_CHECK_EQUAL(key_vec[1], "banana");
+    BOOST_CHECK_EQUAL(key_vec[2], "cherry");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_last_key) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+    chunk.prepare("cherry", 100);
+
+    auto keys = chunk.lower_bound("cherry");
+    std::vector<ss::sstring> key_vec;
+    for (const auto& key : keys) {
+        key_vec.push_back(key);
+    }
+
+    // Should return only "cherry"
+    BOOST_REQUIRE_EQUAL(key_vec.size(), 1);
+    BOOST_CHECK_EQUAL(key_vec[0], "cherry");
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_empty) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Find in empty chunk
+    auto slot = chunk.find("any_key");
+    BOOST_CHECK(!slot.has_value());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_not_found) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    chunk.prepare("apple", 100);
+    chunk.prepare("banana", 100);
+
+    // Find non-existent key
+    auto slot = chunk.find("cherry");
+    BOOST_CHECK(!slot.has_value());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare but don't mark clean - key is dirty
+    chunk.prepare("apple", 100);
+
+    // Find should return nullopt for dirty keys
+    auto slot = chunk.find("apple");
+    BOOST_CHECK(!slot.has_value());
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_clean) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare and mark clean
+    auto write_slot = chunk.prepare("apple", 100);
+    BOOST_REQUIRE(write_slot.has_value());
+    chunk.mark_clean("apple");
+
+    // Find should succeed
+    auto read_slot = chunk.find("apple");
+    BOOST_REQUIRE(read_slot.has_value());
+    BOOST_CHECK_EQUAL(read_slot->offset, write_slot->offset);
+    BOOST_CHECK_EQUAL(
+      read_slot->payload_size_bytes, write_slot->payload_size_bytes);
+    BOOST_CHECK_EQUAL(read_slot->slot_size_bytes, write_slot->slot_size_bytes);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_multiple_keys) {
+    const size_t file_size = 1_MiB;
+    auto chunk = fifo_chunk(
+      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+
+    // Add multiple keys
+    chunk.prepare("apple", 100);
+    chunk.mark_clean("apple");
+    chunk.prepare("banana", 200);
+    chunk.mark_clean("banana");
+    chunk.prepare("cherry", 300);
+    chunk.mark_clean("cherry");
+
+    // Find each key and verify slots
+    auto found1 = chunk.find("apple");
+    BOOST_REQUIRE(found1.has_value());
+    BOOST_CHECK_EQUAL(found1->payload_size_bytes, 100);
+
+    auto found2 = chunk.find("banana");
+    BOOST_REQUIRE(found2.has_value());
+    BOOST_CHECK_EQUAL(found2->payload_size_bytes, 200);
+
+    auto found3 = chunk.find("cherry");
+    BOOST_REQUIRE(found3.has_value());
+    BOOST_CHECK_EQUAL(found3->payload_size_bytes, 300);
+}

@@ -239,10 +239,17 @@ redpanda_cc_library(
     hdrs = [
         "fifo_cache.h",
     ],
+    implementation_deps = [
+        ":logger",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":basic_cache_service_api",
         ":fifo_chunk",
+        "//src/v/bytes:iostream",
+        "//src/v/ssx:semaphore",
+        "//src/v/utils:directory_walker",
+        "@fmt",
         "@seastar",
     ],
 )

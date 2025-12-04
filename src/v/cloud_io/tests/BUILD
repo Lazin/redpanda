@@ -136,3 +136,21 @@ redpanda_cc_btest(
         "@seastar//:testing",
     ],
 )
+
+redpanda_cc_btest(
+    name = "fifo_cache_test",
+    timeout = "short",
+    srcs = [
+        "fifo_cache_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:iostream",
+        "//src/v/cloud_io:fifo_cache",
+        "//src/v/test_utils:seastar_boost",
+        "//src/v/test_utils:tmp_dir",
+        "@boost//:test",
+        "@fmt",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)

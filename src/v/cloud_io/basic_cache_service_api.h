@@ -83,6 +83,12 @@ public:
     /// May only be called once per reservation.
     void wrote_data(uint64_t, size_t);
 
+    /// Get the number of bytes reserved
+    uint64_t reserved_bytes() const noexcept { return _bytes; }
+
+    /// Get the number of objects reserved
+    size_t reserved_objects() const noexcept { return _objects; }
+
 private:
     basic_cache_service_api<Clock>& _cache;
 

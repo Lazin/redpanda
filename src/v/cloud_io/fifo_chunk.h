@@ -192,6 +192,24 @@ public:
                  });
     }
 
+    /// Get a range view over the keys in the index starting from lower_bound
+    /// Returns keys >= key in lexicographical order
+    auto lower_bound(const ss::sstring& key) const {
+        auto it = _index.entries.lower_bound(key);
+        return std::ranges::subrange(it, _index.entries.end())
+               | std::views::transform(
+                 [](const auto& pair) -> const ss::sstring& {
+                     return pair.first;
+                 });
+    }
+
+    /// Get direct access to the index entries map
+    /// This is useful for efficient iteration without creating views
+    const absl::btree_map<ss::sstring, detail::fifo_index_entry>&
+    get_index_entries() const noexcept {
+        return _index.entries;
+    }
+
     /// Check if the chunk is full (all space allocated)
     bool is_full() const noexcept {
         return _index.allocated >= _index.total_bytes;
