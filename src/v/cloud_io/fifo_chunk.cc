@@ -12,10 +12,7 @@
 #include <system_error>
 
 namespace cloud_io {
-// TODO: make it configurable. Cache writes are scaling similarly as reads
-// (they're caused by reads)
-static constexpr size_t write_buffer_size = 128_KiB;
-static constexpr size_t write_behind = 4;
+static constexpr size_t min_slot_size = 128_KiB;
 
 fifo_chunk::fifo_chunk(
   ss::file f, fifo_chunk::status_t status, size_t file_size)
@@ -60,7 +57,7 @@ fifo_chunk::prepare(const ss::sstring& key, size_t payload_size) {
       key,
       payload_size);
     require_primary();
-    auto to_allocate = ss::align_up(payload_size, write_buffer_size);
+    auto to_allocate = ss::align_up(payload_size, min_slot_size);
     if (_index.allocated + to_allocate > _index.total_bytes) {
         vlog(
           log.debug,
@@ -110,16 +107,22 @@ fifo_chunk::prepare(const ss::sstring& key, size_t payload_size) {
     return slot;
 }
 
-ss::future<>
-fifo_chunk::put(fifo_chunk::write_slot slot, ss::input_stream<char> payload) {
+ss::future<> fifo_chunk::put(
+  fifo_chunk::write_slot slot,
+  ss::input_stream<char> payload,
+  size_t write_buffer_size,
+  unsigned int write_behind) {
     vlog(
       log.debug,
-      "fifo_chunk::put: slot={{offset={}, payload_size={}, slot_size={}}}",
+      "fifo_chunk::put: slot={{offset={}, payload_size={}, slot_size={}}}, "
+      "write_buffer_size={}, write_behind={}",
       slot.offset,
       slot.payload_size_bytes,
-      slot.slot_size_bytes);
+      slot.slot_size_bytes,
+      write_buffer_size,
+      write_behind);
     vassert(
-      slot.slot_size_bytes % write_buffer_size == 0,
+      slot.slot_size_bytes % min_slot_size == 0,
       "Incorrect slot size {}",
       slot.slot_size_bytes);
 

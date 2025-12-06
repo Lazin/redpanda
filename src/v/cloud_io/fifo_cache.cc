@@ -283,10 +283,17 @@ ss::future<> fifo_cache::put(
   std::filesystem::path key,
   ss::input_stream<char>& data,
   basic_space_reservation_guard<ss::lowres_clock>& reservation,
-  [[maybe_unused]] size_t write_buffer_size,
-  [[maybe_unused]] unsigned int write_behind) {
+  size_t write_buffer_size,
+  unsigned int write_behind) {
     // Convert path to sstring for fifo_chunk API
     ss::sstring key_str = key.string();
+
+    vlog(
+      log.debug,
+      "fifo_cache::put: key={}, write_buffer_size={}, write_behind={}",
+      key_str,
+      write_buffer_size,
+      write_behind);
 
     // The put interface was designed for the file cache which
     // doesn't care about the size. So the only way for us to get
@@ -391,7 +398,8 @@ ss::future<> fifo_cache::put(
           fmt::format("Failed to prepare write slot for key: {}", key_str));
     }
 
-    co_await target_chunk->put(*write_slot, std::move(data));
+    co_await target_chunk->put(
+      *write_slot, std::move(data), write_buffer_size, write_behind);
     target_chunk->mark_clean(key_str);
     // TODO: rollback allocated chunk slot in case of error
 

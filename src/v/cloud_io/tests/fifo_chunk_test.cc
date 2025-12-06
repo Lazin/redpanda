@@ -248,7 +248,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_basic) {
     auto stream = make_stream(test_data);
 
     // Put data into the slot
-    chunk.put(*slot, std::move(stream)).get();
+    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
 
     // Key should still be in_progress (dirty)
     BOOST_CHECK_EQUAL(
@@ -270,7 +270,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_and_mark_clean) {
 
     ss::sstring test_data(1024, 'B');
     auto stream = make_stream(test_data);
-    chunk.put(*slot, std::move(stream)).get();
+    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
 
     // Mark as clean
     chunk.mark_clean("key1");
@@ -295,7 +295,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_stream_at_after_put) {
     ss::sstring test_data = "Hello, FIFO chunk! This is test data.";
     test_data.resize(256, ' '); // Pad to 256 bytes
     auto stream = make_stream(test_data);
-    chunk.put(*slot, std::move(stream)).get();
+    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
 
     // Mark clean
     chunk.mark_clean("key1");
@@ -339,9 +339,9 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_concurrent_puts) {
     ss::sstring data2(1024, '2');
     ss::sstring data3(768, '3');
 
-    auto fut1 = chunk.put(*slot1, make_stream(data1));
-    auto fut2 = chunk.put(*slot2, make_stream(data2));
-    auto fut3 = chunk.put(*slot3, make_stream(data3));
+    auto fut1 = chunk.put(*slot1, make_stream(data1), 128_KiB, 4);
+    auto fut2 = chunk.put(*slot2, make_stream(data2), 128_KiB, 4);
+    auto fut3 = chunk.put(*slot3, make_stream(data3), 128_KiB, 4);
 
     // Wait for all writes to complete
     fut1.get();
@@ -398,7 +398,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     }
 
     auto stream = make_stream(pattern_data);
-    chunk.put(*slot, std::move(stream)).get();
+    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
 
     chunk.mark_clean("large_key");
 

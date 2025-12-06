@@ -153,7 +153,11 @@ public:
     prepare(const ss::sstring& key, size_t payload_size);
 
     /// Write the data using the previously allocated slot
-    ss::future<> put(write_slot slot, ss::input_stream<char> payload);
+    ss::future<> put(
+      write_slot slot,
+      ss::input_stream<char> payload,
+      size_t write_buffer_size,
+      unsigned int write_behind);
 
     /// Mark key as clean and allow others to read it
     void mark_clean(const ss::sstring& key);
