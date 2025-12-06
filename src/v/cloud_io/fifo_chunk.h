@@ -169,7 +169,8 @@ public:
     std::optional<read_slot> find(const ss::sstring& key);
 
     /// Get the read file stream
-    ss::input_stream<char> stream_at(read_slot slot);
+    ss::input_stream<char>
+    stream_at(read_slot slot, size_t read_buffer_size, unsigned int read_ahead);
 
     /// Serializes the index (only works on a primary).
     iobuf serialize_index() const;

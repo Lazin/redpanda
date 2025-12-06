@@ -16,8 +16,6 @@ namespace cloud_io {
 // (they're caused by reads)
 static constexpr size_t write_buffer_size = 128_KiB;
 static constexpr size_t write_behind = 4;
-static constexpr size_t read_buffer_size = 128_KiB;
-static constexpr size_t read_ahead = 4;
 
 fifo_chunk::fifo_chunk(
   ss::file f, fifo_chunk::status_t status, size_t file_size)
@@ -189,14 +187,17 @@ void fifo_chunk::mark_clean(const ss::sstring& key) {
     }
 }
 
-ss::input_stream<char> fifo_chunk::stream_at(read_slot slot) {
+ss::input_stream<char> fifo_chunk::stream_at(
+  read_slot slot, size_t read_buffer_size, unsigned int read_ahead) {
     vlog(
       log.debug,
       "fifo_chunk::stream_at: slot={{offset={}, payload_size={}, "
-      "slot_size={}}}",
+      "slot_size={}}}, read_buffer_size={}, read_ahead={}",
       slot.offset,
       slot.payload_size_bytes,
-      slot.slot_size_bytes);
+      slot.slot_size_bytes,
+      read_buffer_size,
+      read_ahead);
     ss::file_input_stream_options opts;
     opts.buffer_size = read_buffer_size;
     opts.read_ahead = read_ahead;

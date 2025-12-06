@@ -305,7 +305,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_stream_at_after_put) {
     BOOST_REQUIRE(read_slot.has_value());
     BOOST_CHECK_EQUAL(read_slot->payload_size_bytes, 256);
 
-    auto input_stream = chunk.stream_at(*read_slot);
+    auto input_stream = chunk.stream_at(*read_slot, 128_KiB, 4);
     auto result = read_stream(std::move(input_stream));
 
     BOOST_CHECK_EQUAL(result.size(), 256);
@@ -367,9 +367,9 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_concurrent_puts) {
     BOOST_REQUIRE(rs2.has_value());
     BOOST_REQUIRE(rs3.has_value());
 
-    auto result1 = read_stream(chunk.stream_at(*rs1));
-    auto result2 = read_stream(chunk.stream_at(*rs2));
-    auto result3 = read_stream(chunk.stream_at(*rs3));
+    auto result1 = read_stream(chunk.stream_at(*rs1, 128_KiB, 4));
+    auto result2 = read_stream(chunk.stream_at(*rs2, 128_KiB, 4));
+    auto result3 = read_stream(chunk.stream_at(*rs3, 128_KiB, 4));
 
     BOOST_CHECK_EQUAL(result1, data1);
     BOOST_CHECK_EQUAL(result2, data2);
@@ -407,7 +407,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     BOOST_REQUIRE(read_slot.has_value());
     BOOST_CHECK_EQUAL(read_slot->payload_size_bytes, large_size);
 
-    auto result = read_stream(chunk.stream_at(*read_slot));
+    auto result = read_stream(chunk.stream_at(*read_slot, 128_KiB, 4));
     BOOST_CHECK_EQUAL(result.size(), large_size);
     BOOST_CHECK_EQUAL_COLLECTIONS(
       result.begin(), result.end(), pattern_data.begin(), pattern_data.end());

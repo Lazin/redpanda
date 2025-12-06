@@ -245,9 +245,14 @@ ss::future<> fifo_cache::stop() {
 
 ss::future<std::optional<cache_item_stream>> fifo_cache::get_stream(
   std::filesystem::path key,
-  [[maybe_unused]] size_t read_buffer_size,
-  [[maybe_unused]] unsigned int read_ahead) {
-    vlog(log.debug, "fifo_cache::get_stream: key={}", key.string());
+  size_t read_buffer_size,
+  unsigned int read_ahead) {
+    vlog(
+      log.debug,
+      "fifo_cache::get_stream: key={}, read_buffer_size={}, read_ahead={}",
+      key.string(),
+      read_buffer_size,
+      read_ahead);
 
     ss::sstring key_str = key.string();
 
@@ -261,7 +266,8 @@ ss::future<std::optional<cache_item_stream>> fifo_cache::get_stream(
               key_str,
               chunk_info.chunk_id);
 
-            auto stream = chunk_info.chunk->stream_at(*read_slot);
+            auto stream = chunk_info.chunk->stream_at(
+              *read_slot, read_buffer_size, read_ahead);
             co_return cache_item_stream{
               .body = std::move(stream),
               .size = read_slot->payload_size_bytes,
