@@ -994,3 +994,202 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_multi_chunk_persistence) {
         cache.stop().get();
     }
 }
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_eviction_on_space_limit) {
+    temporary_dir tmp_dir("fifo_cache_test");
+    auto cache_dir = tmp_dir.get_path();
+    const uint64_t chunk_size = 1_MiB;
+    const uint64_t cache_size = 3 * chunk_size; // Only room for 3 chunks
+
+    fifo_cache cache(
+      cache_dir, {.cache_size = cache_size, .chunk_size = chunk_size});
+    cache.start().get();
+
+    // Fill up the cache with 3 chunks
+    for (int chunk_idx = 0; chunk_idx < 3; ++chunk_idx) {
+        // Each chunk gets one large object that fills it
+        std::string key = fmt::format("chunk_{}_key", chunk_idx);
+        size_t data_size = chunk_size - 1024; // Leave some room for metadata
+        std::string data(data_size, 'A' + chunk_idx);
+
+        auto reservation = cache.reserve_space(data_size, 1).get();
+        iobuf buf;
+        buf.append(data.data(), data.size());
+        auto stream = make_iobuf_input_stream(std::move(buf));
+        cache.put(key, stream, reservation).get();
+    }
+
+    // Verify we have exactly 3 chunks
+    size_t chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 3);
+
+    // Add one more chunk - this should trigger eviction of the oldest chunk
+    std::string new_key = "chunk_3_key";
+    size_t data_size = chunk_size - 1024;
+    std::string new_data(data_size, 'D');
+
+    auto reservation = cache.reserve_space(data_size, 1).get();
+    iobuf buf;
+    buf.append(new_data.data(), new_data.size());
+    auto stream = make_iobuf_input_stream(std::move(buf));
+    cache.put(new_key, stream, reservation).get();
+
+    // Verify we still have 3 chunks (oldest was evicted)
+    chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 3);
+
+    // Verify the oldest chunk's data is no longer accessible
+    auto status = cache.is_cached("chunk_0_key").get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::not_available);
+
+    // Verify the newer chunks are still accessible
+    status = cache.is_cached("chunk_1_key").get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    status = cache.is_cached("chunk_2_key").get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    status = cache.is_cached(new_key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    cache.stop().get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_eviction_on_start) {
+    temporary_dir tmp_dir("fifo_cache_test");
+    auto cache_dir = tmp_dir.get_path();
+    const uint64_t chunk_size = 1_MiB;
+    const uint64_t cache_size = 2 * chunk_size; // Only room for 2 chunks
+
+    // Phase 1: Create 4 chunks on disk (exceeds cache_size limit)
+    {
+        fifo_cache cache(
+          cache_dir,
+          {.cache_size = 20_GiB, .chunk_size = chunk_size}); // Large cache to allow 4 chunks
+        cache.start().get();
+
+        for (int chunk_idx = 0; chunk_idx < 4; ++chunk_idx) {
+            std::string key = fmt::format("chunk_{}_key", chunk_idx);
+            size_t data_size = chunk_size - 1024;
+            std::string data(data_size, 'A' + chunk_idx);
+
+            auto reservation = cache.reserve_space(data_size, 1).get();
+            iobuf buf;
+            buf.append(data.data(), data.size());
+            auto stream = make_iobuf_input_stream(std::move(buf));
+            cache.put(key, stream, reservation).get();
+        }
+
+        // Verify we have 4 chunks
+        size_t chunk_count = 0;
+        for (auto _ : cache.get_chunk_file_paths()) {
+            ++chunk_count;
+        }
+        BOOST_CHECK_EQUAL(chunk_count, 4);
+
+        cache.stop().get();
+    }
+
+    // Phase 2: Reload with smaller cache_size - should evict oldest chunks on start
+    {
+        fifo_cache cache(
+          cache_dir, {.cache_size = cache_size, .chunk_size = chunk_size});
+        cache.start().get();
+
+        // Verify only 2 chunks remain (oldest 2 were evicted)
+        size_t chunk_count = 0;
+        for (auto _ : cache.get_chunk_file_paths()) {
+            ++chunk_count;
+        }
+        BOOST_CHECK_EQUAL(chunk_count, 2);
+
+        // Verify oldest chunks were evicted
+        auto status = cache.is_cached("chunk_0_key").get();
+        BOOST_CHECK_EQUAL(status, cache_element_status::not_available);
+
+        status = cache.is_cached("chunk_1_key").get();
+        BOOST_CHECK_EQUAL(status, cache_element_status::not_available);
+
+        // Verify newest chunks are still accessible
+        status = cache.is_cached("chunk_2_key").get();
+        BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+        status = cache.is_cached("chunk_3_key").get();
+        BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+        cache.stop().get();
+    }
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_roll_on_object_limit) {
+    temporary_dir tmp_dir("fifo_cache_test");
+    auto cache_dir = tmp_dir.get_path();
+    const uint64_t chunk_size = 10_MiB;
+    const uint64_t cache_size = 100_MiB;
+    const uint64_t max_objects = 30; // With 10 chunks expected, max 3 objects per chunk
+
+    fifo_cache cache(
+      cache_dir,
+      {.cache_size = cache_size,
+       .chunk_size = chunk_size,
+       .max_objects = max_objects});
+    cache.start().get();
+
+    // Expected max objects per chunk: 30 / (100 / 10) = 30 / 10 = 3
+    const size_t expected_objects_per_chunk = 3;
+
+    // Add exactly max_objects_per_chunk objects to the first chunk
+    for (size_t i = 0; i < expected_objects_per_chunk; ++i) {
+        std::string key = fmt::format("key_{}", i);
+        std::string data(1000, 'A' + i); // Small data to stay under space limit
+
+        auto reservation = cache.reserve_space(data.size(), 1).get();
+        iobuf buf;
+        buf.append(data.data(), data.size());
+        auto stream = make_iobuf_input_stream(std::move(buf));
+        cache.put(key, stream, reservation).get();
+    }
+
+    // Verify we have only 1 chunk so far
+    size_t chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 1);
+
+    // Add one more object - this should trigger chunk roll due to object limit
+    // The chunk still has plenty of space, so this tests object-based rolling
+    std::string key = "key_overflow";
+    std::string data(1000, 'Z');
+
+    auto reservation = cache.reserve_space(data.size(), 1).get();
+    iobuf buf;
+    buf.append(data.data(), data.size());
+    auto stream = make_iobuf_input_stream(std::move(buf));
+    cache.put(key, stream, reservation).get();
+
+    // Verify we now have 2 chunks (rolled due to object limit)
+    chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 2);
+
+    // Verify all objects are accessible
+    for (size_t i = 0; i < expected_objects_per_chunk; ++i) {
+        std::string check_key = fmt::format("key_{}", i);
+        auto status = cache.is_cached(check_key).get();
+        BOOST_CHECK_EQUAL(status, cache_element_status::available);
+    }
+
+    auto status = cache.is_cached(key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    cache.stop().get();
+}
