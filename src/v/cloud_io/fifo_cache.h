@@ -116,6 +116,10 @@ private:
     /// Remove oldest chunk from cache and delete files
     ss::future<> remove_oldest_chunk();
 
+    /// Get the current chunk for writing or roll to a new chunk if needed
+    /// Returns a pointer to the chunk that should be used for writing
+    ss::future<fifo_chunk*> get_or_roll_chunk();
+
     std::filesystem::path _cache_dir;
     uint64_t _chunk_size;
     uint64_t _cache_size;

@@ -302,94 +302,8 @@ ss::future<> fifo_cache::put(
     // future. For now there is value in keeping the compatibility.
     auto payload_size = reservation.reserved_bytes();
 
-    fifo_chunk* target_chunk = nullptr;
-    bool need_new_chunk = false;
-    std::string roll_reason;
-
-    if (_chunks.empty()) {
-        need_new_chunk = true;
-        roll_reason = "no chunks exist";
-    } else {
-        auto& last_chunk = _chunks.back().chunk;
-        auto current_objects = last_chunk->get_index_entries().size();
-
-        // Check if adding one more object would exceed the limit
-        if (current_objects + 1 > _max_objects_per_chunk) {
-            need_new_chunk = true;
-            roll_reason = fmt::format(
-              "object limit reached (current={}, limit={})",
-              current_objects,
-              _max_objects_per_chunk);
-
-            // Log warning if chunk has space but we're rolling due to object
-            // count
-            if (!last_chunk->is_full()) {
-                vlog(
-                  log.warn,
-                  "fifo_cache: rolling chunk due to object limit, chunk has "
-                  "space but current_objects={}, max_objects_per_chunk={}",
-                  current_objects,
-                  _max_objects_per_chunk);
-            }
-        } else if (last_chunk->is_full()) {
-            need_new_chunk = true;
-            roll_reason = "chunk is full";
-        } else {
-            target_chunk = last_chunk.get();
-        }
-    }
-
-    if (need_new_chunk) {
-        vlog(
-          log.debug,
-          "fifo_cache: rolling chunk, reason: {}",
-          roll_reason);
-
-        // Need to create a new chunk
-        // First check if we need to evict old chunks to make room
-        auto eviction_success = co_await evict_chunks(_chunk_size);
-        if (!eviction_success) {
-            throw std::runtime_error(fmt::format(
-              "Failed to allocate new chunk: insufficient space, cache_size={}, "
-              "chunk_size={}",
-              _cache_size,
-              _chunk_size));
-        }
-
-        uint64_t chunk_id = 0;
-        if (!_chunks.empty()) {
-            chunk_id = _chunks.back().chunk_id + 1;
-        }
-
-        auto file_path = _cache_dir / fmt::format("cache_{}.chunk", chunk_id);
-
-        vlog(
-          log.info,
-          "fifo_cache: creating new chunk file: {}, size={}",
-          file_path.string(),
-          _chunk_size);
-
-        // Allocate the disk space
-        auto file = co_await ss::open_file_dma(
-          file_path.string(),
-          ss::open_flags::rw | ss::open_flags::create
-            | ss::open_flags::truncate);
-        co_await file.allocate(0, _chunk_size);
-
-        auto chunk = std::make_unique<fifo_chunk>(
-          std::move(file), fifo_chunk::status_t::primary, _chunk_size);
-
-        target_chunk = chunk.get();
-
-        _chunks.push_back(
-          chunk_info{
-            .chunk_id = chunk_id,
-            .chunk = std::move(chunk),
-            .file_path = file_path,
-          });
-
-        vlog(log.debug, "fifo_cache: created new chunk with id={}", chunk_id);
-    }
+    // Get the chunk to write to (may roll to a new chunk if needed)
+    auto target_chunk = co_await get_or_roll_chunk();
 
     // Now write to the target chunk
     auto write_slot = target_chunk->prepare(key_str, payload_size);
@@ -746,6 +660,99 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
       _chunks.size());
 
     co_return;
+}
+
+ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
+    fifo_chunk* target_chunk = nullptr;
+    bool need_new_chunk = false;
+    std::string roll_reason;
+
+    if (_chunks.empty()) {
+        need_new_chunk = true;
+        roll_reason = "no chunks exist";
+    } else {
+        auto& last_chunk = _chunks.back().chunk;
+        auto current_objects = last_chunk->get_index_entries().size();
+
+        // Check if adding one more object would exceed the limit
+        if (current_objects + 1 > _max_objects_per_chunk) {
+            need_new_chunk = true;
+            roll_reason = fmt::format(
+              "object limit reached (current={}, limit={})",
+              current_objects,
+              _max_objects_per_chunk);
+
+            // Log warning if chunk has space but we're rolling due to object
+            // count
+            if (!last_chunk->is_full()) {
+                vlog(
+                  log.warn,
+                  "fifo_cache: rolling chunk due to object limit, chunk has "
+                  "space but current_objects={}, max_objects_per_chunk={}",
+                  current_objects,
+                  _max_objects_per_chunk);
+            }
+        } else if (last_chunk->is_full()) {
+            need_new_chunk = true;
+            roll_reason = "chunk is full";
+        } else {
+            target_chunk = last_chunk.get();
+        }
+    }
+
+    if (need_new_chunk) {
+        vlog(
+          log.debug,
+          "fifo_cache: rolling chunk, reason: {}",
+          roll_reason);
+
+        // Need to create a new chunk
+        // First check if we need to evict old chunks to make room
+        auto eviction_success = co_await evict_chunks(_chunk_size);
+        if (!eviction_success) {
+            throw std::runtime_error(fmt::format(
+              "Failed to allocate new chunk: insufficient space, cache_size={}, "
+              "chunk_size={}",
+              _cache_size,
+              _chunk_size));
+        }
+
+        uint64_t chunk_id = 0;
+        if (!_chunks.empty()) {
+            chunk_id = _chunks.back().chunk_id + 1;
+        }
+
+        auto file_path = _cache_dir / fmt::format("cache_{}.chunk", chunk_id);
+
+        vlog(
+          log.info,
+          "fifo_cache: creating new chunk file: {}, size={}",
+          file_path.string(),
+          _chunk_size);
+
+        // Allocate the disk space
+        auto file = co_await ss::open_file_dma(
+          file_path.string(),
+          ss::open_flags::rw | ss::open_flags::create
+            | ss::open_flags::truncate);
+        co_await file.allocate(0, _chunk_size);
+
+        auto chunk = std::make_unique<fifo_chunk>(
+          std::move(file), fifo_chunk::status_t::primary, _chunk_size);
+
+        target_chunk = chunk.get();
+
+        _chunks.push_back(
+          chunk_info{
+            .chunk_id = chunk_id,
+            .chunk = std::move(chunk),
+            .file_path = file_path,
+          });
+
+        vlog(log.debug, "fifo_cache: created new chunk with id={}", chunk_id);
+    }
+
+    co_return target_chunk;
 }
 
 } // namespace cloud_io
