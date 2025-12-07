@@ -443,22 +443,13 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
       bytes,
       objects);
 
-    // Acquire semaphore units for the requested bytes and objects
-    auto space_units = co_await ss::get_units(_space_sem, bytes);
-    auto object_units = co_await ss::get_units(_objects_sem, objects);
-
+    // Just return a reservation guard without consuming semaphore units
+    // The semaphore will be updated when chunks are allocated/evicted
     vlog(
       log.debug,
-      "fifo_cache::reserve_space: acquired bytes={}, objects={}, "
-      "available_space={}, available_objects={}",
+      "fifo_cache::reserve_space: granted reservation bytes={}, objects={}",
       bytes,
-      objects,
-      _space_sem.available_units(),
-      _objects_sem.available_units());
-
-    // Release the units - the guard will manage the reservation lifecycle
-    space_units.return_all();
-    object_units.return_all();
+      objects);
 
     co_return basic_space_reservation_guard<ss::lowres_clock>(
       *this, bytes, objects);
@@ -478,39 +469,8 @@ void fifo_cache::reserve_space_release(
       used_bytes,
       used_objects);
 
-    // Update cache usage statistics
-    _current_cache_size += used_bytes;
-    _current_cache_objects += used_objects;
-
-    // Return unused reservation back to the semaphores
-    auto unused_bytes = reserved_bytes - used_bytes;
-    if (unused_bytes > 0) {
-        _space_sem.signal(unused_bytes);
-        vlog(
-          log.debug,
-          "fifo_cache::reserve_space_release: returned {} unused bytes, "
-          "available_space={}",
-          unused_bytes,
-          _space_sem.available_units());
-    }
-
-    auto unused_objects = reserved_objects - used_objects;
-    if (unused_objects > 0) {
-        _objects_sem.signal(unused_objects);
-        vlog(
-          log.debug,
-          "fifo_cache::reserve_space_release: returned {} unused objects, "
-          "available_objects={}",
-          unused_objects,
-          _objects_sem.available_units());
-    }
-
-    vlog(
-      log.debug,
-      "fifo_cache::reserve_space_release: updated cache stats - "
-      "current_size={}, current_objects={}",
-      _current_cache_size,
-      _current_cache_objects);
+    // Semaphore units are managed by chunk allocation/eviction in get_or_roll_chunk
+    // and remove_oldest_chunk, so we don't need to update anything here
 }
 
 uint64_t fifo_cache::calculate_disk_usage() const {
@@ -636,12 +596,9 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
     _current_cache_objects -= num_keys;
 
     // Return space to semaphores
-    if (usage > 0) {
-        _space_sem.signal(usage);
-    }
-    if (num_keys > 0) {
-        _objects_sem.signal(num_keys);
-    }
+    // Signal full chunk capacity since that's what was reserved when allocated
+    _space_sem.signal(_chunk_size);
+    _objects_sem.signal(_max_objects_per_chunk);
 
     // Remove from vector by shifting all elements
     // chunked_vector doesn't support erase, so we need to rebuild
@@ -663,6 +620,9 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
 }
 
 ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
+    // Acquire mutex to protect chunk modifications
+    auto units = co_await _chunks_mutex.get_units();
+
     fifo_chunk* target_chunk = nullptr;
     bool need_new_chunk = false;
     std::string roll_reason;
@@ -749,7 +709,17 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
             .file_path = file_path,
           });
 
-        vlog(log.debug, "fifo_cache: created new chunk with id={}", chunk_id);
+        // Consume semaphore units for the newly allocated chunk
+        co_await _space_sem.wait(_chunk_size);
+        co_await _objects_sem.wait(_max_objects_per_chunk);
+
+        vlog(
+          log.debug,
+          "fifo_cache: created new chunk with id={}, consumed space={}, "
+          "objects={}",
+          chunk_id,
+          _chunk_size,
+          _max_objects_per_chunk);
     }
 
     co_return target_chunk;

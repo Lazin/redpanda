@@ -12,6 +12,7 @@
 
 #include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/fifo_chunk.h"
+#include "ssx/checkpoint_mutex.h"
 #include "ssx/semaphore.h"
 
 #include <seastar/core/lowres_clock.hh>
@@ -133,6 +134,10 @@ private:
     /// Semaphore to track available object slots
     /// Initialized with max_objects
     ssx::semaphore _objects_sem{0, "fifo_cache/objects"};
+
+    /// Mutex to protect chunk modifications (rolling, eviction)
+    /// Prevents concurrent modifications to _chunks collection
+    ssx::checkpoint_mutex _chunks_mutex{"fifo_cache/chunks"};
 
     /// Current bytes used in the cache
     uint64_t _current_cache_size{0};

@@ -247,6 +247,7 @@ redpanda_cc_library(
         ":basic_cache_service_api",
         ":fifo_chunk",
         "//src/v/bytes:iostream",
+        "//src/v/ssx:checkpoint_mutex",
         "//src/v/ssx:semaphore",
         "//src/v/utils:directory_walker",
         "@fmt",
