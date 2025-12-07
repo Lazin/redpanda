@@ -50,81 +50,80 @@ void fifo_chunk::require_secondary() {
 }
 
 std::optional<fifo_chunk::write_slot>
-fifo_chunk::prepare(const ss::sstring& key, size_t payload_size) {
-    vlog(
-      log.debug,
-      "fifo_chunk::prepare: key={}, payload_size={}",
-      key,
-      payload_size);
+fifo_chunk::prepare(size_t payload_size) {
+    vlog(log.debug, "fifo_chunk::prepare: payload_size={}", payload_size);
     require_primary();
     auto to_allocate = ss::align_up(payload_size, min_slot_size);
     if (_index.allocated + to_allocate > _index.total_bytes) {
         vlog(
           log.debug,
-          "fifo_chunk::prepare failed: key={}, insufficient space (need {}, "
+          "fifo_chunk::prepare failed: insufficient space (need {}, "
           "have {})",
-          key,
           to_allocate,
           _index.total_bytes - _index.allocated);
         return std::nullopt;
     }
-    auto cached = is_cached(key);
-    switch (cached) {
-    case cache_element_status::available:
-    case cache_element_status::in_progress:
-        vlog(
-          log.debug,
-          "fifo_chunk::prepare failed: key={}, already cached (status={})",
-          key,
-          cached);
-        return std::nullopt;
-    case cache_element_status::not_available:
-        break;
-    }
-    auto new_element = detail::fifo_index_entry{
-      .offset = _index.allocated,
-      .payload_size = payload_size,
-      .slot_size = to_allocate,
-      .dirty = true,
-    };
-    auto [_, ok] = _index.entries.insert(std::make_pair(key, new_element));
-    vassert(ok, "Key {} is already added", key);
     auto offset = _index.allocated;
     _index.allocated += to_allocate;
     write_slot slot{
       .offset = offset,
-      .payload_size_bytes = payload_size,
       .slot_size_bytes = to_allocate,
     };
     vlog(
       log.debug,
-      "fifo_chunk::prepare succeeded: key={}, slot={{offset={}, "
-      "payload_size={}, slot_size={}}}",
-      key,
+      "fifo_chunk::prepare succeeded: slot={{offset={}, slot_size={}}}",
       slot.offset,
-      slot.payload_size_bytes,
       slot.slot_size_bytes);
     return slot;
 }
 
 ss::future<> fifo_chunk::put(
+  const ss::sstring& key,
   fifo_chunk::write_slot slot,
+  uint64_t payload_size,
   ss::input_stream<char> payload,
   size_t write_buffer_size,
   unsigned int write_behind) {
     vlog(
       log.debug,
-      "fifo_chunk::put: slot={{offset={}, payload_size={}, slot_size={}}}, "
-      "write_buffer_size={}, write_behind={}",
+      "fifo_chunk::put: key={}, slot={{offset={}, slot_size={}}}, "
+      "payload_size={}, write_buffer_size={}, write_behind={}",
+      key,
       slot.offset,
-      slot.payload_size_bytes,
       slot.slot_size_bytes,
+      payload_size,
       write_buffer_size,
       write_behind);
     vassert(
       slot.slot_size_bytes % min_slot_size == 0,
       "Incorrect slot size {}",
       slot.slot_size_bytes);
+
+    // Check if key already exists
+    auto cached = is_cached(key);
+    switch (cached) {
+    case cache_element_status::available:
+    case cache_element_status::in_progress:
+        vlog(
+          log.error,
+          "fifo_chunk::put failed: key={}, already cached (status={})",
+          key,
+          cached);
+        throw std::runtime_error(
+          fmt::format("Key {} is already cached", key));
+    case cache_element_status::not_available:
+        break;
+    }
+
+    // Add to index in dirty state
+    auto new_element = detail::fifo_index_entry{
+      .offset = slot.offset,
+      .payload_size = payload_size,
+      .slot_size = slot.slot_size_bytes,
+      .dirty = true,
+    };
+    auto [_, ok] = _index.entries.insert(std::make_pair(key, new_element));
+    vassert(ok, "Key {} is already added", key);
 
     auto h = _gate.hold();
     // This is a simplistic approach which I think will work well in practice
@@ -168,10 +167,9 @@ ss::future<> fifo_chunk::put(
     }
     vlog(
       log.debug,
-      "fifo_chunk::put completed: slot={{offset={}, payload_size={}, "
-      "slot_size={}}}",
+      "fifo_chunk::put completed: key={}, slot={{offset={}, slot_size={}}}",
+      key,
       slot.offset,
-      slot.payload_size_bytes,
       slot.slot_size_bytes);
 }
 

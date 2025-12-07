@@ -72,13 +72,9 @@ public:
     is_cached(const std::filesystem::path& key) override;
 
     /// Reserve space in cache
+    /// This calls prepare() and populates the reservation guard fields
     ss::future<basic_space_reservation_guard<ss::lowres_clock>>
     reserve_space(uint64_t bytes, size_t objects) override;
-
-    /// Reserve space in cache for a specific key (fifo_cache-specific)
-    /// This version calls prepare() and populates the reservation guard fields
-    ss::future<basic_space_reservation_guard<ss::lowres_clock>>
-    reserve_space(std::filesystem::path key, uint64_t bytes, size_t objects);
 
     /// Release reserved space
     void reserve_space_release(

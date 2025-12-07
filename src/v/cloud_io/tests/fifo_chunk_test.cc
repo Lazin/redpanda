@@ -29,16 +29,45 @@ static ss::file make_mock_file() {
     return ss::file{};
 }
 
+// Helper function to create and preallocate a chunk file
+static ss::file
+create_chunk_file(const std::filesystem::path& path, size_t size) {
+    auto flags = ss::open_flags::rw | ss::open_flags::create
+                 | ss::open_flags::truncate;
+    auto file = ss::open_file_dma(path.native(), flags).get();
+    file.allocate(0, size).get();
+    return file;
+}
+
+// Helper to create an input stream from a string
+static ss::input_stream<char> make_stream(const ss::sstring& data) {
+    iobuf buf;
+    buf.append(data.data(), data.size());
+    return make_iobuf_input_stream(std::move(buf));
+}
+
+// Helper to read entire stream into string
+static ss::sstring read_stream(ss::input_stream<char> stream) {
+    ss::sstring result;
+    while (!stream.eof()) {
+        auto buf = stream.read().get();
+        if (buf.size() > 0) {
+            result += ss::sstring(buf.get(), buf.size());
+        }
+    }
+    stream.close().get();
+    return result;
+}
+
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_prepare_basic) {
     const size_t file_size = 1_MiB;
     auto chunk = fifo_chunk(
       make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
     // Test basic prepare
-    auto slot = chunk.prepare("key1", 100);
+    auto slot = chunk.prepare(100);
     BOOST_REQUIRE(slot.has_value());
     BOOST_CHECK_EQUAL(slot->offset, 0);
-    BOOST_CHECK_EQUAL(slot->payload_size_bytes, 100);
     BOOST_CHECK_EQUAL(slot->slot_size_bytes, 128_KiB);
 }
 
@@ -47,57 +76,72 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_prepare_alignment) {
     auto chunk = fifo_chunk(
       make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    auto slot1 = chunk.prepare("key1", 100);
+    auto slot1 = chunk.prepare(100);
     BOOST_REQUIRE(slot1.has_value());
     BOOST_CHECK_EQUAL(slot1->offset, 0);
-    BOOST_CHECK_EQUAL(slot1->payload_size_bytes, 100);
     BOOST_CHECK_EQUAL(slot1->slot_size_bytes, 128_KiB);
 
-    auto slot2 = chunk.prepare("key2", 200);
+    auto slot2 = chunk.prepare(200);
     BOOST_REQUIRE(slot2.has_value());
     BOOST_CHECK_EQUAL(slot2->offset, 128_KiB);
-    BOOST_CHECK_EQUAL(slot2->payload_size_bytes, 200);
     BOOST_CHECK_EQUAL(slot2->slot_size_bytes, 128_KiB);
 
     // Slot that takes multiple 128_KiB pages
-    auto slot3 = chunk.prepare("key3", 256_KiB);
+    auto slot3 = chunk.prepare(256_KiB);
     BOOST_REQUIRE(slot3.has_value());
     BOOST_CHECK_EQUAL(slot3->offset, 256_KiB);
-    BOOST_CHECK_EQUAL(slot3->payload_size_bytes, 256_KiB);
     BOOST_CHECK_EQUAL(slot3->slot_size_bytes, 256_KiB);
 
     // Slot that doesn't fit
-    auto slot4 = chunk.prepare("key3", 600_KiB); // 512K remaining
+    auto slot4 = chunk.prepare(600_KiB); // 512K remaining
     BOOST_REQUIRE(!slot4.has_value());
 }
 
-SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_prepare_duplicate_key) {
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_prepare_exhaustion) {
     const size_t file_size = 1_MiB;
     auto chunk = fifo_chunk(
       make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare a slot
-    auto slot1 = chunk.prepare("key1", 100);
-    BOOST_REQUIRE(slot1.has_value());
+    // Fill the chunk by repeatedly calling prepare
+    std::vector<fifo_chunk::write_slot> slots;
+    while (true) {
+        auto slot = chunk.prepare(128_KiB);
+        if (!slot.has_value()) {
+            break;
+        }
+        slots.push_back(*slot);
+    }
 
-    // Try to prepare the same key again - should return nullopt
-    auto slot2 = chunk.prepare("key1", 100);
-    BOOST_CHECK(!slot2.has_value());
+    // Should have allocated 8 slots (1 MiB / 128 KiB = 8)
+    BOOST_CHECK_EQUAL(slots.size(), 8);
+
+    // Next prepare should fail
+    auto slot = chunk.prepare(100);
+    BOOST_CHECK(!slot.has_value());
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_is_cached) {
     // This test validates details of is_cached behavior.
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
+
+    auto file = create_chunk_file(chunk_path, file_size);
     auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+      std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Key should not be cached initially
     BOOST_CHECK_EQUAL(
       chunk.is_cached("key1"), cache_element_status::not_available);
 
-    // After prepare, it should be in progress (dirty)
-    auto slot = chunk.prepare("key1", 100);
+    // After put (but before mark_clean), it should be in progress (dirty)
+    auto slot = chunk.prepare(100);
     BOOST_REQUIRE(slot.has_value());
+
+    ss::sstring test_data(100, 'T');
+    auto stream = make_stream(test_data);
+    chunk.put("key1", *slot, 100, std::move(stream), 128_KiB, 4).get();
+
     BOOST_CHECK_EQUAL(
       chunk.is_cached("key1"), cache_element_status::in_progress);
 
@@ -121,15 +165,22 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_nonexistent) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty_slot) {
-    // Check that if the allocated slot is dirty it's not
-    // searchable.
+    // Check that if the entry is dirty it's not searchable.
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare creates a dirty slot
-    auto prepared_slot = chunk.prepare("key1", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare and put creates a dirty entry
+    auto prepared_slot = chunk.prepare(100);
     BOOST_REQUIRE(prepared_slot.has_value());
+
+    ss::sstring test_data(100, 'D');
+    auto stream = make_stream(test_data);
+    chunk.put("key1", *prepared_slot, 100, std::move(stream), 128_KiB, 4).get();
 
     // Find should return nullopt for dirty slots
     auto found_slot = chunk.find("key1");
@@ -154,14 +205,24 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_serialize_deserialize_index) {
     // This test checks serialization and deserialization. The methods
     // are supposed to be invoked by the upper layer that manages fifo_chunk
     // instances.
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk1 = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    auto slot1 = chunk1.prepare("key1", 100);
-    auto slot2 = chunk1.prepare("key2", 200);
+    auto file1 = create_chunk_file(chunk_path, file_size);
+    auto chunk1 = fifo_chunk(
+      std::move(file1), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare and put some entries
+    auto slot1 = chunk1.prepare(100);
     BOOST_REQUIRE(slot1.has_value());
+    ss::sstring data1(100, 'X');
+    chunk1.put("key1", *slot1, 100, make_stream(data1), 128_KiB, 4).get();
+
+    auto slot2 = chunk1.prepare(200);
     BOOST_REQUIRE(slot2.has_value());
+    ss::sstring data2(200, 'Y');
+    chunk1.put("key2", *slot2, 200, make_stream(data2), 128_KiB, 4).get();
 
     chunk1.set_index_complete(true);
     auto usage = chunk1.usage_bytes();
@@ -199,36 +260,6 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_serialize_empty_index) {
       chunk2.is_cached("key1"), cache_element_status::not_available);
 }
 
-// Helper function to create and preallocate a chunk file
-static ss::file
-create_chunk_file(const std::filesystem::path& path, size_t size) {
-    auto flags = ss::open_flags::rw | ss::open_flags::create
-                 | ss::open_flags::truncate;
-    auto file = ss::open_file_dma(path.native(), flags).get();
-    file.allocate(0, size).get();
-    return file;
-}
-
-// Helper to create an input stream from a string
-static ss::input_stream<char> make_stream(const ss::sstring& data) {
-    iobuf buf;
-    buf.append(data.data(), data.size());
-    return make_iobuf_input_stream(std::move(buf));
-}
-
-// Helper to read entire stream into string
-static ss::sstring read_stream(ss::input_stream<char> stream) {
-    ss::sstring result;
-    while (!stream.eof()) {
-        auto buf = stream.read().get();
-        if (buf.size() > 0) {
-            result += ss::sstring(buf.get(), buf.size());
-        }
-    }
-    stream.close().get();
-    return result;
-}
-
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_basic) {
     temporary_dir tmpdir("fifo-chunk");
     const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
@@ -239,16 +270,15 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_basic) {
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Prepare a slot
-    auto slot = chunk.prepare("key1", 1024);
+    auto slot = chunk.prepare(1024);
     BOOST_REQUIRE(slot.has_value());
-    BOOST_CHECK_EQUAL(slot->payload_size_bytes, 1024);
 
     // Create test data
     ss::sstring test_data(1024, 'A');
     auto stream = make_stream(test_data);
 
     // Put data into the slot
-    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
+    chunk.put("key1", *slot, 1024, std::move(stream), 128_KiB, 4).get();
 
     // Key should still be in_progress (dirty)
     BOOST_CHECK_EQUAL(
@@ -265,12 +295,12 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_and_mark_clean) {
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Prepare and write
-    auto slot = chunk.prepare("key1", 1024);
+    auto slot = chunk.prepare(1024);
     BOOST_REQUIRE(slot.has_value());
 
     ss::sstring test_data(1024, 'B');
     auto stream = make_stream(test_data);
-    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
+    chunk.put("key1", *slot, 1024, std::move(stream), 128_KiB, 4).get();
 
     // Mark as clean
     chunk.mark_clean("key1");
@@ -289,13 +319,13 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_stream_at_after_put) {
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Prepare and write
-    auto slot = chunk.prepare("key1", 256);
+    auto slot = chunk.prepare(256);
     BOOST_REQUIRE(slot.has_value());
 
     ss::sstring test_data = "Hello, FIFO chunk! This is test data.";
     test_data.resize(256, ' '); // Pad to 256 bytes
     auto stream = make_stream(test_data);
-    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
+    chunk.put("key1", *slot, 256, std::move(stream), 128_KiB, 4).get();
 
     // Mark clean
     chunk.mark_clean("key1");
@@ -303,7 +333,6 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_stream_at_after_put) {
     // Find and read back
     auto read_slot = chunk.find("key1");
     BOOST_REQUIRE(read_slot.has_value());
-    BOOST_CHECK_EQUAL(read_slot->payload_size_bytes, 256);
 
     auto input_stream = chunk.stream_at(*read_slot, 128_KiB, 4);
     auto result = read_stream(std::move(input_stream));
@@ -322,9 +351,9 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_concurrent_puts) {
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Prepare multiple slots
-    auto slot1 = chunk.prepare("key1", 512);
-    auto slot2 = chunk.prepare("key2", 1024);
-    auto slot3 = chunk.prepare("key3", 768);
+    auto slot1 = chunk.prepare(512);
+    auto slot2 = chunk.prepare(1024);
+    auto slot3 = chunk.prepare(768);
 
     BOOST_REQUIRE(slot1.has_value());
     BOOST_REQUIRE(slot2.has_value());
@@ -339,9 +368,9 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_concurrent_puts) {
     ss::sstring data2(1024, '2');
     ss::sstring data3(768, '3');
 
-    auto fut1 = chunk.put(*slot1, make_stream(data1), 128_KiB, 4);
-    auto fut2 = chunk.put(*slot2, make_stream(data2), 128_KiB, 4);
-    auto fut3 = chunk.put(*slot3, make_stream(data3), 128_KiB, 4);
+    auto fut1 = chunk.put("key1", *slot1, 512, make_stream(data1), 128_KiB, 4);
+    auto fut2 = chunk.put("key2", *slot2, 1024, make_stream(data2), 128_KiB, 4);
+    auto fut3 = chunk.put("key3", *slot3, 768, make_stream(data3), 128_KiB, 4);
 
     // Wait for all writes to complete
     fut1.get();
@@ -388,7 +417,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     // Check that writes that require multiple write buffers
     // are working correctly.
     const size_t large_size = 512_KiB;
-    auto slot = chunk.prepare("large_key", large_size);
+    auto slot = chunk.prepare(large_size);
     BOOST_REQUIRE(slot.has_value());
 
     // Create pattern data that we can verify
@@ -398,14 +427,13 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     }
 
     auto stream = make_stream(pattern_data);
-    chunk.put(*slot, std::move(stream), 128_KiB, 4).get();
+    chunk.put("large_key", *slot, large_size, std::move(stream), 128_KiB, 4).get();
 
     chunk.mark_clean("large_key");
 
     // Read back and verify
     auto read_slot = chunk.find("large_key");
     BOOST_REQUIRE(read_slot.has_value());
-    BOOST_CHECK_EQUAL(read_slot->payload_size_bytes, large_size);
 
     auto result = read_stream(chunk.stream_at(*read_slot, 128_KiB, 4));
     BOOST_CHECK_EQUAL(result.size(), large_size);
@@ -427,13 +455,20 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_empty) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_single) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
+
+    auto file = create_chunk_file(chunk_path, file_size);
     auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+      std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Add one key
-    auto slot = chunk.prepare("alpha", 100);
+    auto slot = chunk.prepare(100);
     BOOST_REQUIRE(slot.has_value());
+
+    ss::sstring data(100, 'A');
+    chunk.put("alpha", *slot, 100, make_stream(data), 128_KiB, 4).get();
 
     // Get keys
     auto keys = chunk.get_keys();
@@ -447,14 +482,30 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_single) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_multiple_sorted) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("zebra", 100);
-    chunk.prepare("alpha", 100);
-    chunk.prepare("delta", 100);
-    chunk.prepare("beta", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add multiple keys in non-sorted order
+    auto slot1 = chunk.prepare(100);
+    BOOST_REQUIRE(slot1.has_value());
+    chunk.put("zebra", *slot1, 100, make_stream(ss::sstring(100, 'Z')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    BOOST_REQUIRE(slot2.has_value());
+    chunk.put("alpha", *slot2, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    BOOST_REQUIRE(slot3.has_value());
+    chunk.put("delta", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
+
+    auto slot4 = chunk.prepare(100);
+    BOOST_REQUIRE(slot4.has_value());
+    chunk.put("beta", *slot4, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
 
     // Get keys - should be in lexicographical order
     auto keys = chunk.get_keys();
@@ -484,14 +535,26 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_empty) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_exact_match) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
-    chunk.prepare("date", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+
+    auto slot4 = chunk.prepare(100);
+    chunk.put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
 
     // Lower bound with exact match
     auto keys = chunk.lower_bound("banana");
@@ -507,14 +570,26 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_exact_match) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_between_keys) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
-    chunk.prepare("date", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+
+    auto slot4 = chunk.prepare(100);
+    chunk.put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
 
     auto keys = chunk.lower_bound("blueberry");
     std::vector<ss::sstring> key_vec;
@@ -529,13 +604,23 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_between_keys) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_before_all) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
-    chunk.prepare("date", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("banana", *slot1, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("cherry", *slot2, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("date", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
 
     auto keys = chunk.lower_bound("aaa");
     std::vector<ss::sstring> key_vec;
@@ -551,13 +636,23 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_before_all) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_after_all) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
 
     auto keys = chunk.lower_bound("zzz");
     auto begin = keys.begin();
@@ -568,13 +663,23 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_after_all) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_first_key) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
 
     auto keys = chunk.lower_bound("apple");
     std::vector<ss::sstring> key_vec;
@@ -590,13 +695,23 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_first_key) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_last_key) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
-    chunk.prepare("cherry", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+
+    auto slot3 = chunk.prepare(100);
+    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
 
     auto keys = chunk.lower_bound("cherry");
     std::vector<ss::sstring> key_vec;
@@ -620,12 +735,22 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_empty) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_not_found) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    chunk.prepare("apple", 100);
-    chunk.prepare("banana", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Add some keys
+    auto slot1 = chunk.prepare(100);
+    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk.mark_clean("apple");
+
+    auto slot2 = chunk.prepare(100);
+    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk.mark_clean("banana");
 
     // Find non-existent key
     auto slot = chunk.find("cherry");
@@ -633,12 +758,20 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_not_found) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare but don't mark clean - key is dirty
-    chunk.prepare("apple", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare and put but don't mark clean - key is dirty
+    auto write_slot = chunk.prepare(100);
+    BOOST_REQUIRE(write_slot.has_value());
+
+    ss::sstring test_data(100, 'A');
+    chunk.put("apple", *write_slot, 100, make_stream(test_data), 128_KiB, 4).get();
 
     // Find should return nullopt for dirty keys
     auto slot = chunk.find("apple");
@@ -646,47 +779,65 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty) {
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_clean) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
-    auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare and mark clean
-    auto write_slot = chunk.prepare("apple", 100);
+    auto file = create_chunk_file(chunk_path, file_size);
+    auto chunk = fifo_chunk(
+      std::move(file), fifo_chunk::status_t::primary, file_size);
+
+    // Prepare, put, and mark clean
+    auto write_slot = chunk.prepare(100);
     BOOST_REQUIRE(write_slot.has_value());
+
+    ss::sstring test_data(100, 'A');
+    auto stream = make_stream(test_data);
+    chunk.put("apple", *write_slot, 100, std::move(stream), 128_KiB, 4).get();
     chunk.mark_clean("apple");
 
     // Find should succeed
     auto read_slot = chunk.find("apple");
     BOOST_REQUIRE(read_slot.has_value());
     BOOST_CHECK_EQUAL(read_slot->offset, write_slot->offset);
-    BOOST_CHECK_EQUAL(
-      read_slot->payload_size_bytes, write_slot->payload_size_bytes);
     BOOST_CHECK_EQUAL(read_slot->slot_size_bytes, write_slot->slot_size_bytes);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_multiple_keys) {
+    temporary_dir tmpdir("fifo-chunk");
+    const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
+
+    auto file = create_chunk_file(chunk_path, file_size);
     auto chunk = fifo_chunk(
-      make_mock_file(), fifo_chunk::status_t::primary, file_size);
+      std::move(file), fifo_chunk::status_t::primary, file_size);
 
     // Add multiple keys
-    chunk.prepare("apple", 100);
+    auto slot1 = chunk.prepare(100);
+    BOOST_REQUIRE(slot1.has_value());
+    ss::sstring data1(100, 'A');
+    chunk.put("apple", *slot1, 100, make_stream(data1), 128_KiB, 4).get();
     chunk.mark_clean("apple");
-    chunk.prepare("banana", 200);
+
+    auto slot2 = chunk.prepare(200);
+    BOOST_REQUIRE(slot2.has_value());
+    ss::sstring data2(200, 'B');
+    chunk.put("banana", *slot2, 200, make_stream(data2), 128_KiB, 4).get();
     chunk.mark_clean("banana");
-    chunk.prepare("cherry", 300);
+
+    auto slot3 = chunk.prepare(300);
+    BOOST_REQUIRE(slot3.has_value());
+    ss::sstring data3(300, 'C');
+    chunk.put("cherry", *slot3, 300, make_stream(data3), 128_KiB, 4).get();
     chunk.mark_clean("cherry");
 
     // Find each key and verify slots
     auto found1 = chunk.find("apple");
     BOOST_REQUIRE(found1.has_value());
-    BOOST_CHECK_EQUAL(found1->payload_size_bytes, 100);
 
     auto found2 = chunk.find("banana");
     BOOST_REQUIRE(found2.has_value());
-    BOOST_CHECK_EQUAL(found2->payload_size_bytes, 200);
 
     auto found3 = chunk.find("cherry");
     BOOST_REQUIRE(found3.has_value());
-    BOOST_CHECK_EQUAL(found3->payload_size_bytes, 300);
 }

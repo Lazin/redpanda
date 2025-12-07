@@ -128,10 +128,7 @@ public:
     struct write_slot {
         /// Offset of the write slot in the chunk.
         uint64_t offset;
-        /// Size of the payload (logical size, not aligned).
-        uint64_t payload_size_bytes;
-        /// Actually occupied space. Always greater or equal to
-        /// payload_size_bytes.
+        /// Actually occupied space (aligned).
         uint64_t slot_size_bytes;
     };
 
@@ -149,12 +146,15 @@ public:
     uint64_t usage_bytes();
 
     /// Prepare the slot for the future write operation.
-    std::optional<write_slot>
-    prepare(const ss::sstring& key, size_t payload_size);
+    /// Does not add anything to the index - only reserves space.
+    std::optional<write_slot> prepare(size_t payload_size);
 
-    /// Write the data using the previously allocated slot
+    /// Write the data using the previously allocated slot and add to index.
+    /// The key is added to the index in dirty state.
     ss::future<> put(
+      const ss::sstring& key,
       write_slot slot,
+      uint64_t payload_size,
       ss::input_stream<char> payload,
       size_t write_buffer_size,
       unsigned int write_behind);

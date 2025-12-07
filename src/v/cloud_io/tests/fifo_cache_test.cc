@@ -653,8 +653,11 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_reserve_space) {
     auto reservation = cache.reserve_space(reserve_size, 1).get();
 
     // Verify reservation was created
-    BOOST_CHECK_EQUAL(reservation.reserved_bytes(), reserve_size);
+    // reserved_bytes() is the aligned slot size, payload_size() is the requested size
+    BOOST_CHECK_EQUAL(*reservation.payload_size(), reserve_size);
     BOOST_CHECK_EQUAL(reservation.reserved_objects(), 1);
+    // The slot size should be aligned to 128 KiB
+    BOOST_CHECK_GE(reservation.reserved_bytes(), reserve_size);
 
     // Write some data using the reservation
     const std::string test_data(50_KiB, 'X');
@@ -686,7 +689,9 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_reserve_space_multiple) {
 
     for (int i = 0; i < num_entries; ++i) {
         auto reservation = cache.reserve_space(entry_size, 1).get();
-        BOOST_CHECK_EQUAL(reservation.reserved_bytes(), entry_size);
+        // Check payload_size instead of reserved_bytes
+        BOOST_CHECK_EQUAL(*reservation.payload_size(), entry_size);
+        BOOST_CHECK_GE(reservation.reserved_bytes(), entry_size);
 
         std::string key = fmt::format("key_{}", i);
         std::string data(entry_size, 'A' + i);
