@@ -80,7 +80,10 @@ public:
       uint64_t reserved_bytes,
       size_t reserved_objects,
       uint64_t used_bytes,
-      size_t used_objects) override;
+      size_t used_objects,
+      std::optional<uint64_t> id = std::nullopt,
+      std::optional<uint64_t> offset = std::nullopt,
+      std::optional<uint64_t> payload_size = std::nullopt) override;
 
     /// Scan all keys starting from the prefix.
     /// The keys are returned in lexicographical order using N-way merge.

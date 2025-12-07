@@ -129,7 +129,14 @@ public:
 
     // Release capacity acquired via `reserve_space`.  This spawns
     // a background fiber in order to be callable from the guard destructor.
-    void reserve_space_release(uint64_t, size_t, uint64_t, size_t) override;
+    void reserve_space_release(
+      uint64_t,
+      size_t,
+      uint64_t,
+      size_t,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt) override;
 
     static ss::future<> initialize(std::filesystem::path);
 
@@ -273,7 +280,14 @@ private:
     /// Release units from _reserved_cache_size: the inner part of
     /// `reserve_space_release`
     /// (only runs on shard 0)
-    void do_reserve_space_release(uint64_t, size_t, uint64_t, size_t);
+    void do_reserve_space_release(
+      uint64_t,
+      size_t,
+      uint64_t,
+      size_t,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt);
 
     /// Update _block_puts and kick _block_puts_cond if necessary.  This is
     /// called on all shards by shard 0 when handling a disk space status

@@ -68,9 +68,15 @@ public:
     basic_space_reservation_guard(basic_space_reservation_guard&& rhs) noexcept
       : _cache(rhs._cache)
       , _bytes(rhs._bytes)
-      , _objects(rhs._objects) {
+      , _objects(rhs._objects)
+      , _id(rhs._id)
+      , _offset(rhs._offset)
+      , _payload_size(rhs._payload_size) {
         rhs._bytes = 0;
         rhs._objects = 0;
+        rhs._id = std::nullopt;
+        rhs._offset = std::nullopt;
+        rhs._payload_size = std::nullopt;
     }
 
     ~basic_space_reservation_guard();
@@ -89,12 +95,35 @@ public:
     /// Get the number of objects reserved
     size_t reserved_objects() const noexcept { return _objects; }
 
+    /// Get the optional id
+    std::optional<uint64_t> id() const noexcept { return _id; }
+
+    /// Get the optional offset
+    std::optional<uint64_t> offset() const noexcept { return _offset; }
+
+    /// Set the optional id
+    void set_id(std::optional<uint64_t> id) noexcept { _id = id; }
+
+    /// Set the optional offset
+    void set_offset(std::optional<uint64_t> offset) noexcept { _offset = offset; }
+
+    /// Get the optional payload_size
+    std::optional<uint64_t> payload_size() const noexcept { return _payload_size; }
+
+    /// Set the optional payload_size
+    void set_payload_size(std::optional<uint64_t> payload_size) noexcept { _payload_size = payload_size; }
+
 private:
     basic_cache_service_api<Clock>& _cache;
 
     // Size acquired at time of reservation
     uint64_t _bytes{0};
     size_t _objects{0};
+
+    // Optional id, offset, and payload_size fields for future use
+    std::optional<uint64_t> _id;
+    std::optional<uint64_t> _offset;
+    std::optional<uint64_t> _payload_size;
 };
 
 template<class Clock = ss::lowres_clock>
@@ -154,6 +183,14 @@ public:
 
     // Release capacity acquired via `reserve_space`.  This spawns
     // a background fiber in order to be callable from the guard destructor.
-    virtual void reserve_space_release(uint64_t, size_t, uint64_t, size_t) = 0;
+    virtual void reserve_space_release(
+      uint64_t,
+      size_t,
+      uint64_t,
+      size_t,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt,
+      std::optional<uint64_t> = std::nullopt)
+      = 0;
 };
 } // namespace cloud_io

@@ -459,7 +459,10 @@ void fifo_cache::reserve_space_release(
   uint64_t reserved_bytes,
   size_t reserved_objects,
   uint64_t used_bytes,
-  size_t used_objects) {
+  size_t used_objects,
+  std::optional<uint64_t> /*id*/,
+  std::optional<uint64_t> /*offset*/,
+  std::optional<uint64_t> /*payload_size*/) {
     vlog(
       log.debug,
       "fifo_cache::reserve_space_release: reserved_bytes={}, "

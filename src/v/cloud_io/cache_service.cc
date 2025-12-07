@@ -1415,7 +1415,10 @@ void cache::reserve_space_release(
   uint64_t bytes,
   size_t objects,
   uint64_t wrote_bytes,
-  uint64_t wrote_objects) {
+  uint64_t wrote_objects,
+  std::optional<uint64_t> id,
+  std::optional<uint64_t> offset,
+  std::optional<uint64_t> payload_size) {
     vlog(
       log.trace,
       "reserve_space_release: releasing {}/{} reserved bytes/objects (wrote "
@@ -1426,21 +1429,27 @@ void cache::reserve_space_release(
       wrote_objects);
 
     if (ss::this_shard_id() == ss::shard_id{0}) {
-        do_reserve_space_release(bytes, objects, wrote_bytes, wrote_objects);
+        do_reserve_space_release(bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size);
     } else {
         ssx::spawn_with_gate(
-          _gate, [this, bytes, objects, wrote_bytes, wrote_objects]() {
+          _gate, [this, bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size]() {
               return container().invoke_on(
-                0, [bytes, objects, wrote_bytes, wrote_objects](cache& c) {
+                0, [bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size](cache& c) {
                     return c.do_reserve_space_release(
-                      bytes, objects, wrote_bytes, wrote_objects);
+                      bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size);
                 });
           });
     }
 }
 
 void cache::do_reserve_space_release(
-  uint64_t bytes, size_t objects, uint64_t wrote_bytes, size_t wrote_objects) {
+  uint64_t bytes,
+  size_t objects,
+  uint64_t wrote_bytes,
+  size_t wrote_objects,
+  std::optional<uint64_t> /*id*/,
+  std::optional<uint64_t> /*offset*/,
+  std::optional<uint64_t> /*payload_size*/) {
     vassert(ss::this_shard_id() == ss::shard_id{0}, "Only call on shard 0");
     vassert(_reserved_cache_size >= bytes, "Double free of reserved bytes?");
     _reserved_cache_size -= bytes;
