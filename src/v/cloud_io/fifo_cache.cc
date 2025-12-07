@@ -295,30 +295,77 @@ ss::future<> fifo_cache::put(
       write_buffer_size,
       write_behind);
 
-    // The put interface was designed for the file cache which
-    // doesn't care about the size. So the only way for us to get
-    // the size of the stream without consuming it is to use the
-    // space reservation. This should probably be refactored in the
-    // future. For now there is value in keeping the compatibility.
-    auto payload_size = reservation.reserved_bytes();
+    // Check if the reservation guard fields are already populated
+    // (from the key-aware reserve_space overload)
+    fifo_chunk* target_chunk = nullptr;
+    fifo_chunk::write_slot write_slot;
+    uint64_t chunk_id = 0;
 
-    // Get the chunk to write to (may roll to a new chunk if needed)
-    auto target_chunk = co_await get_or_roll_chunk();
+    if (reservation.id().has_value() && reservation.offset().has_value()
+        && reservation.payload_size().has_value()) {
+        // Fields are already set - use them directly
+        chunk_id = *reservation.id();
+        write_slot.offset = *reservation.offset();
+        write_slot.payload_size_bytes = *reservation.payload_size();
+        write_slot.slot_size_bytes = reservation.reserved_bytes();
 
-    // Now write to the target chunk
-    auto write_slot = target_chunk->prepare(key_str, payload_size);
-    if (!write_slot) {
-        throw std::runtime_error(
-          fmt::format("Failed to prepare write slot for key: {}", key_str));
+        // Find the chunk by id
+        auto chunk_it = std::ranges::find_if(
+          _chunks, [chunk_id](const chunk_info& info) {
+              return info.chunk_id == chunk_id;
+          });
+
+        if (chunk_it == _chunks.end()) {
+            throw std::runtime_error(fmt::format(
+              "Chunk with id {} not found for key: {}", chunk_id, key_str));
+        }
+
+        target_chunk = chunk_it->chunk.get();
+    } else {
+        // Fields not set - this is the legacy path
+        // Call get_or_roll_chunk and prepare, then update the reservation guard
+
+        auto payload_size = reservation.reserved_bytes();
+
+        // Get the chunk to write to (may roll to a new chunk if needed)
+        target_chunk = co_await get_or_roll_chunk();
+
+        // Prepare the write slot
+        auto write_slot_opt = target_chunk->prepare(key_str, payload_size);
+        if (!write_slot_opt) {
+            throw std::runtime_error(
+              fmt::format("Failed to prepare write slot for key: {}", key_str));
+        }
+        write_slot = *write_slot_opt;
+
+        // Find the chunk_id
+        for (const auto& chunk_info : _chunks) {
+            if (chunk_info.chunk.get() == target_chunk) {
+                chunk_id = chunk_info.chunk_id;
+                break;
+            }
+        }
+
+        // Update the reservation guard with the prepared values
+        reservation.set_id(chunk_id);
+        reservation.set_offset(write_slot.offset);
+        reservation.set_payload_size(write_slot.payload_size_bytes);
     }
 
+    // Now write to the target chunk using the prepared slot
     co_await target_chunk->put(
-      *write_slot, std::move(data), write_buffer_size, write_behind);
+      write_slot, std::move(data), write_buffer_size, write_behind);
     target_chunk->mark_clean(key_str);
     // TODO: rollback allocated chunk slot in case of error
 
     // Serialize and write the index to disk
-    auto index_path = _chunks.back().file_path;
+    // Find the chunk_it for the file_path
+    auto chunk_it = std::ranges::find_if(
+      _chunks, [chunk_id](const chunk_info& info) {
+          return info.chunk_id == chunk_id;
+      });
+
+    auto index_path = chunk_it->file_path;
     index_path.replace_extension(".index");
 
     auto index_buf = target_chunk->serialize_index();
@@ -343,7 +390,7 @@ ss::future<> fifo_cache::put(
       log.debug,
       "fifo_cache: successfully wrote key={}, size={}",
       key_str,
-      payload_size);
+      write_slot.payload_size_bytes);
 }
 
 seastar::coroutine::experimental::generator<ss::sstring>
@@ -453,6 +500,59 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
 
     co_return basic_space_reservation_guard<ss::lowres_clock>(
       *this, bytes, objects);
+}
+
+ss::future<basic_space_reservation_guard<ss::lowres_clock>>
+fifo_cache::reserve_space(std::filesystem::path key, uint64_t bytes, size_t objects) {
+    ss::sstring key_str = key.string();
+
+    vlog(
+      log.debug,
+      "fifo_cache::reserve_space: requesting bytes={}, objects={}, key={}",
+      bytes,
+      objects,
+      key_str);
+
+    // Get the chunk to write to (may roll to a new chunk if needed)
+    auto target_chunk = co_await get_or_roll_chunk();
+
+    // Prepare a write slot in the target chunk
+    auto write_slot = target_chunk->prepare(key_str, bytes);
+    if (!write_slot) {
+        throw std::runtime_error(
+          fmt::format("Failed to prepare write slot for key: {}", key_str));
+    }
+
+    // Find the chunk_id for the target chunk
+    uint64_t chunk_id = 0;
+    for (const auto& chunk_info : _chunks) {
+        if (chunk_info.chunk.get() == target_chunk) {
+            chunk_id = chunk_info.chunk_id;
+            break;
+        }
+    }
+
+    vlog(
+      log.debug,
+      "fifo_cache::reserve_space: granted reservation bytes={}, objects={}, "
+      "chunk_id={}, offset={}, payload_size={}, slot_size={}",
+      bytes,
+      objects,
+      chunk_id,
+      write_slot->offset,
+      write_slot->payload_size_bytes,
+      write_slot->slot_size_bytes);
+
+    // Create reservation guard with the slot_size as reserved_bytes
+    auto guard = basic_space_reservation_guard<ss::lowres_clock>(
+      *this, write_slot->slot_size_bytes, objects);
+
+    // Populate the optional fields with the write_slot information
+    guard.set_id(chunk_id);
+    guard.set_offset(write_slot->offset);
+    guard.set_payload_size(write_slot->payload_size_bytes);
+
+    co_return guard;
 }
 
 void fifo_cache::reserve_space_release(
