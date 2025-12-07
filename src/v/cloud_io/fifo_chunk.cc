@@ -1,6 +1,5 @@
 #include "cloud_io/fifo_chunk.h"
 
-#include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/cache_service.h"
 #include "cloud_io/logger.h"
 #include "serde/envelope.h"
@@ -115,16 +114,6 @@ ss::future<> fifo_chunk::put(
         break;
     }
 
-    // Add to index in dirty state
-    auto new_element = detail::fifo_index_entry{
-      .offset = slot.offset,
-      .payload_size = payload_size,
-      .slot_size = slot.slot_size_bytes,
-      .dirty = true,
-    };
-    auto [_, ok] = _index.entries.insert(std::make_pair(key, new_element));
-    vassert(ok, "Key {} is already added", key);
-
     auto h = _gate.hold();
     // This is a simplistic approach which I think will work well in practice
     // since we don't need to overly optimize a single cache write. The payload
@@ -165,27 +154,22 @@ ss::future<> fifo_chunk::put(
             throw std::runtime_error("Short write");
         }
     }
+
+    // Add to index after the data is flushed
+    auto new_element = detail::fifo_index_entry{
+      .offset = slot.offset,
+      .payload_size = payload_size,
+      .slot_size = slot.slot_size_bytes,
+    };
+    auto [_, ok] = _index.entries.insert(std::make_pair(key, new_element));
+    vassert(ok, "Key {} is already added", key);
+
     vlog(
       log.debug,
       "fifo_chunk::put completed: key={}, slot={{offset={}, slot_size={}}}",
       key,
       slot.offset,
       slot.slot_size_bytes);
-}
-
-void fifo_chunk::mark_clean(const ss::sstring& key) {
-    vlog(log.debug, "fifo_chunk::mark_clean: key={}", key);
-    auto it = _index.entries.find(key);
-    if (it != _index.entries.end()) {
-        it->second.dirty = false;
-        vlog(
-          log.debug,
-          "fifo_chunk::mark_clean succeeded: key={}, entry={}",
-          key,
-          it->second);
-    } else {
-        vlog(log.debug, "fifo_chunk::mark_clean: key={} not found", key);
-    }
 }
 
 ss::input_stream<char> fifo_chunk::stream_at(
@@ -210,8 +194,7 @@ cache_element_status fifo_chunk::is_cached(const ss::sstring& key) const {
     auto it = _index.entries.find(key);
     cache_element_status result;
     if (it != _index.entries.end()) {
-        result = it->second.dirty ? cache_element_status::in_progress
-                                  : cache_element_status::available;
+        result = cache_element_status::available;
     } else {
         result = cache_element_status::not_available;
     }
@@ -224,8 +207,8 @@ std::optional<fifo_chunk::read_slot> fifo_chunk::find(const ss::sstring& key) {
     // This method can be used on both primary and secondary.
     // On a secondary it can be used only if the index was installed previously.
     auto it = _index.entries.find(key);
-    if (it == _index.entries.end() || it->second.dirty) {
-        vlog(log.debug, "fifo_chunk::find: key={} not found or dirty", key);
+    if (it == _index.entries.end()) {
+        vlog(log.debug, "fifo_chunk::find: key={} not found", key);
         return std::nullopt;
     }
     read_slot slot{

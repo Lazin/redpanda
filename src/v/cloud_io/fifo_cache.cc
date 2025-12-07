@@ -334,7 +334,6 @@ ss::future<> fifo_cache::put(
     // Write to the target chunk using the prepared slot
     co_await target_chunk->put(
       key_str, write_slot, payload_size, std::move(data), write_buffer_size, write_behind);
-    target_chunk->mark_clean(key_str);
     // TODO: rollback allocated chunk slot in case of error
 
     // Serialize and write the index to disk

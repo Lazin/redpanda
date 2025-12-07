@@ -134,7 +134,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_is_cached) {
     BOOST_CHECK_EQUAL(
       chunk.is_cached("key1"), cache_element_status::not_available);
 
-    // After put (but before mark_clean), it should be in progress (dirty)
+    // After put, the entry is added to the index (already flushed)
     auto slot = chunk.prepare(100);
     BOOST_REQUIRE(slot.has_value());
 
@@ -143,16 +143,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_is_cached) {
     chunk.put("key1", *slot, 100, std::move(stream), 128_KiB, 4).get();
 
     BOOST_CHECK_EQUAL(
-      chunk.is_cached("key1"), cache_element_status::in_progress);
-
-    // Mark as clean
-    chunk.mark_clean("key1");
-    BOOST_CHECK_EQUAL(chunk.is_cached("key1"), cache_element_status::available);
-
-    // Key doesn't exist, not an error but no observable effects
-    chunk.mark_clean("key2");
-    BOOST_CHECK_EQUAL(
-      chunk.is_cached("key2"), cache_element_status::not_available);
+      chunk.is_cached("key1"), cache_element_status::available);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_nonexistent) {
@@ -164,8 +155,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_nonexistent) {
     BOOST_CHECK(!slot.has_value());
 }
 
-SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty_slot) {
-    // Check that if the entry is dirty it's not searchable.
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_after_put) {
+    // Check that after put, the entry is searchable (added after flush)
     temporary_dir tmpdir("fifo-chunk");
     const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
@@ -174,7 +165,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty_slot) {
     auto chunk = fifo_chunk(
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare and put creates a dirty entry
+    // Prepare and put adds entry to index after flush
     auto prepared_slot = chunk.prepare(100);
     BOOST_REQUIRE(prepared_slot.has_value());
 
@@ -182,9 +173,11 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty_slot) {
     auto stream = make_stream(test_data);
     chunk.put("key1", *prepared_slot, 100, std::move(stream), 128_KiB, 4).get();
 
-    // Find should return nullopt for dirty slots
+    // Find should return the slot after put completes
     auto found_slot = chunk.find("key1");
-    BOOST_CHECK(!found_slot.has_value());
+    BOOST_REQUIRE(found_slot.has_value());
+    BOOST_CHECK_EQUAL(found_slot->offset, prepared_slot->offset);
+    BOOST_CHECK_EQUAL(found_slot->payload_size_bytes, 100);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_index_complete_flag) {
@@ -236,10 +229,11 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_serialize_deserialize_index) {
 
     BOOST_CHECK_EQUAL(usage, chunk2.usage_bytes());
     BOOST_CHECK(chunk2.is_index_complete());
+    // Entries are available (added to index only after flush in primary)
     BOOST_CHECK_EQUAL(
-      chunk2.is_cached("key1"), cache_element_status::in_progress);
+      chunk2.is_cached("key1"), cache_element_status::available);
     BOOST_CHECK_EQUAL(
-      chunk2.is_cached("key2"), cache_element_status::in_progress);
+      chunk2.is_cached("key2"), cache_element_status::available);
     BOOST_CHECK_EQUAL(
       chunk2.is_cached("key3"), cache_element_status::not_available);
 }
@@ -280,12 +274,12 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_basic) {
     // Put data into the slot
     chunk.put("key1", *slot, 1024, std::move(stream), 128_KiB, 4).get();
 
-    // Key should still be in_progress (dirty)
+    // Key should be available (added to index after flush)
     BOOST_CHECK_EQUAL(
-      chunk.is_cached("key1"), cache_element_status::in_progress);
+      chunk.is_cached("key1"), cache_element_status::available);
 }
 
-SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_and_mark_clean) {
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_available) {
     temporary_dir tmpdir("fifo-chunk");
     const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
@@ -302,10 +296,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_and_mark_clean) {
     auto stream = make_stream(test_data);
     chunk.put("key1", *slot, 1024, std::move(stream), 128_KiB, 4).get();
 
-    // Mark as clean
-    chunk.mark_clean("key1");
-
-    // Now it should be available
+    // After put, it should be available
     BOOST_CHECK_EQUAL(chunk.is_cached("key1"), cache_element_status::available);
 }
 
@@ -326,9 +317,6 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_stream_at_after_put) {
     test_data.resize(256, ' '); // Pad to 256 bytes
     auto stream = make_stream(test_data);
     chunk.put("key1", *slot, 256, std::move(stream), 128_KiB, 4).get();
-
-    // Mark clean
-    chunk.mark_clean("key1");
 
     // Find and read back
     auto read_slot = chunk.find("key1");
@@ -377,11 +365,6 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_concurrent_puts) {
     fut2.get();
     fut3.get();
 
-    // Mark all as clean
-    chunk.mark_clean("key1");
-    chunk.mark_clean("key2");
-    chunk.mark_clean("key3");
-
     // Verify all keys are available
     BOOST_CHECK_EQUAL(chunk.is_cached("key1"), cache_element_status::available);
     BOOST_CHECK_EQUAL(chunk.is_cached("key2"), cache_element_status::available);
@@ -428,8 +411,6 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
 
     auto stream = make_stream(pattern_data);
     chunk.put("large_key", *slot, large_size, std::move(stream), 128_KiB, 4).get();
-
-    chunk.mark_clean("large_key");
 
     // Read back and verify
     auto read_slot = chunk.find("large_key");
@@ -746,18 +727,16 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_not_found) {
     // Add some keys
     auto slot1 = chunk.prepare(100);
     chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
-    chunk.mark_clean("apple");
 
     auto slot2 = chunk.prepare(100);
     chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
-    chunk.mark_clean("banana");
 
     // Find non-existent key
     auto slot = chunk.find("cherry");
     BOOST_CHECK(!slot.has_value());
 }
 
-SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty) {
+SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_after_put_no_mark_clean) {
     temporary_dir tmpdir("fifo-chunk");
     const std::filesystem::path chunk_path = tmpdir.get_path() / "chunk.dat";
     const size_t file_size = 1_MiB;
@@ -766,16 +745,18 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_dirty) {
     auto chunk = fifo_chunk(
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare and put but don't mark clean - key is dirty
+    // Prepare and put - entry is added to index after flush
     auto write_slot = chunk.prepare(100);
     BOOST_REQUIRE(write_slot.has_value());
 
     ss::sstring test_data(100, 'A');
     chunk.put("apple", *write_slot, 100, make_stream(test_data), 128_KiB, 4).get();
 
-    // Find should return nullopt for dirty keys
+    // Find should return the slot (entry is already in index)
     auto slot = chunk.find("apple");
-    BOOST_CHECK(!slot.has_value());
+    BOOST_REQUIRE(slot.has_value());
+    BOOST_CHECK_EQUAL(slot->offset, write_slot->offset);
+    BOOST_CHECK_EQUAL(slot->payload_size_bytes, 100);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_clean) {
@@ -787,14 +768,13 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_clean) {
     auto chunk = fifo_chunk(
       std::move(file), fifo_chunk::status_t::primary, file_size);
 
-    // Prepare, put, and mark clean
+    // Prepare and put
     auto write_slot = chunk.prepare(100);
     BOOST_REQUIRE(write_slot.has_value());
 
     ss::sstring test_data(100, 'A');
     auto stream = make_stream(test_data);
     chunk.put("apple", *write_slot, 100, std::move(stream), 128_KiB, 4).get();
-    chunk.mark_clean("apple");
 
     // Find should succeed
     auto read_slot = chunk.find("apple");
@@ -817,19 +797,16 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_multiple_keys) {
     BOOST_REQUIRE(slot1.has_value());
     ss::sstring data1(100, 'A');
     chunk.put("apple", *slot1, 100, make_stream(data1), 128_KiB, 4).get();
-    chunk.mark_clean("apple");
 
     auto slot2 = chunk.prepare(200);
     BOOST_REQUIRE(slot2.has_value());
     ss::sstring data2(200, 'B');
     chunk.put("banana", *slot2, 200, make_stream(data2), 128_KiB, 4).get();
-    chunk.mark_clean("banana");
 
     auto slot3 = chunk.prepare(300);
     BOOST_REQUIRE(slot3.has_value());
     ss::sstring data3(300, 'C');
     chunk.put("cherry", *slot3, 300, make_stream(data3), 128_KiB, 4).get();
-    chunk.mark_clean("cherry");
 
     // Find each key and verify slots
     auto found1 = chunk.find("apple");

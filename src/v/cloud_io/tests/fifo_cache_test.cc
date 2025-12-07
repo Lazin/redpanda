@@ -1198,3 +1198,155 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_roll_on_object_limit) {
 
     cache.stop().get();
 }
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_concurrent_roll_invalidation) {
+    temporary_dir tmp_dir("fifo_cache_test");
+    auto cache_dir = tmp_dir.get_path();
+
+    // Create a cache with room for two chunks
+    const uint64_t chunk_size = 1_MiB;
+    const uint64_t cache_size = 2 * chunk_size; // Room for 2 chunks
+
+    fifo_cache cache(
+      cache_dir,
+      {.cache_size = cache_size, .chunk_size = chunk_size});
+    cache.start().get();
+
+    // Fill the current chunk almost completely
+    const size_t first_entry_size = 800_KiB;
+    std::string first_key = "first_key";
+    std::string first_data(first_entry_size, 'A');
+
+    auto reservation1 = cache.reserve_space(first_entry_size, 1).get();
+    iobuf buf1;
+    buf1.append(first_data.data(), first_data.size());
+    auto stream1 = make_iobuf_input_stream(std::move(buf1));
+    cache.put(first_key, stream1, reservation1).get();
+
+    // Verify we have only 1 chunk
+    size_t chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 1);
+
+    // The chunk now has 896 KiB allocated (800 KiB rounds up to 896 KiB = 917504 bytes)
+    // There's only room for 128 KiB more
+
+    // Make first reservation - should fit in current chunk (128 KiB slot)
+    const size_t small_entry_size = 100_KiB;
+    auto reservation_small = cache.reserve_space(small_entry_size, 1).get();
+
+    // Extract the chunk_id from the small reservation
+    uint64_t small_chunk_id = *reservation_small.id();
+
+    // The chunk is now full (896 + 128 = 1024 KiB)
+
+    // Make second reservation for any size - this will trigger a chunk roll
+    // Now we have 2 chunks (cache can hold 2 chunks)
+    const size_t second_entry_size = 100_KiB;
+    auto reservation_second = cache.reserve_space(second_entry_size, 1).get();
+
+    // Extract the chunk_id from the second reservation
+    uint64_t second_chunk_id = *reservation_second.id();
+
+    // The two reservations should reference different chunks
+    BOOST_CHECK_NE(small_chunk_id, second_chunk_id);
+
+    // Verify we now have 2 chunks
+    chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 2);
+
+    // Now try to use the second reservation (should work - it's for the new chunk)
+    std::string second_key = "second_key";
+    std::string second_data(second_entry_size, 'S');
+    iobuf buf_second;
+    buf_second.append(second_data.data(), second_data.size());
+    auto stream_second = make_iobuf_input_stream(std::move(buf_second));
+
+    // This should succeed
+    cache.put(second_key, stream_second, reservation_second).get();
+
+    // Verify second_key is now cached
+    auto status = cache.is_cached(second_key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    // Now fill chunk 1 completely by adding more entries
+    // Chunk 1 has 128 KiB used, so we need to fill the remaining 896 KiB
+    const size_t fill_entry_size = 800_KiB;
+    std::string fill_key = "fill_key";
+    std::string fill_data(fill_entry_size, 'F');
+
+    auto reservation_fill = cache.reserve_space(fill_entry_size, 1).get();
+    iobuf buf_fill;
+    buf_fill.append(fill_data.data(), fill_data.size());
+    auto stream_fill = make_iobuf_input_stream(std::move(buf_fill));
+    cache.put(fill_key, stream_fill, reservation_fill).get();
+
+    // Verify chunk 1 is now full (128 + 896 = 1024 KiB)
+
+    // Now make a THIRD reservation - this should trigger eviction of chunk 0
+    // because we can only hold 2 chunks and need to create chunk 2
+    const size_t third_entry_size = 100_KiB;
+    auto reservation_third = cache.reserve_space(third_entry_size, 1).get();
+
+    // Extract the chunk_id from the third reservation
+    uint64_t third_chunk_id = *reservation_third.id();
+
+    // The third reservation should be for yet another chunk (chunk 2)
+    BOOST_CHECK_NE(third_chunk_id, small_chunk_id);
+    BOOST_CHECK_NE(third_chunk_id, second_chunk_id);
+
+    // Verify we still have only 2 chunks (chunk 0 was evicted)
+    chunk_count = 0;
+    for (auto _ : cache.get_chunk_file_paths()) {
+        ++chunk_count;
+    }
+    BOOST_CHECK_EQUAL(chunk_count, 2);
+
+    // Use the third reservation (should work)
+    std::string third_key = "third_key";
+    std::string third_data(third_entry_size, 'T');
+    iobuf buf_third;
+    buf_third.append(third_data.data(), third_data.size());
+    auto stream_third = make_iobuf_input_stream(std::move(buf_third));
+
+    cache.put(third_key, stream_third, reservation_third).get();
+
+    // Verify third_key is now cached
+    status = cache.is_cached(third_key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::available);
+
+    // Try to use the small reservation (should fail - chunk was evicted)
+    std::string small_key = "small_key";
+    std::string small_data(small_entry_size, 'Z');
+    iobuf buf_small;
+    buf_small.append(small_data.data(), small_data.size());
+    auto stream_small = make_iobuf_input_stream(std::move(buf_small));
+
+    // This should throw or fail because the chunk referenced by the reservation
+    // was evicted when we rolled to accommodate the second entry
+    bool put_failed = false;
+    try {
+        cache.put(small_key, stream_small, reservation_small).get();
+    } catch (const std::exception& e) {
+        // Expected: the chunk that small_reservation references was evicted
+        put_failed = true;
+    }
+
+    // The put should have failed because the chunk was evicted
+    BOOST_CHECK(put_failed);
+
+    // Verify small_key is not in the cache
+    status = cache.is_cached(small_key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::not_available);
+
+    // Verify the original first_key was also evicted
+    status = cache.is_cached(first_key).get();
+    BOOST_CHECK_EQUAL(status, cache_element_status::not_available);
+
+    cache.stop().get();
+}

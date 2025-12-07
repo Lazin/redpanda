@@ -59,12 +59,8 @@ struct fifo_index_entry
     uint64_t offset;
     uint64_t payload_size;
     uint64_t slot_size;
-    /// True if the space is allocated but the payload is not yet written.
-    bool dirty{false};
 
-    auto serde_fields() {
-        return std::tie(offset, payload_size, slot_size, dirty);
-    }
+    auto serde_fields() { return std::tie(offset, payload_size, slot_size); }
 };
 
 struct fifo_index
@@ -150,7 +146,7 @@ public:
     std::optional<write_slot> prepare(size_t payload_size);
 
     /// Write the data using the previously allocated slot and add to index.
-    /// The key is added to the index in dirty state.
+    /// The key is added to the index after data is flushed to disk.
     ss::future<> put(
       const ss::sstring& key,
       write_slot slot,
@@ -159,12 +155,7 @@ public:
       size_t write_buffer_size,
       unsigned int write_behind);
 
-    /// Mark key as clean and allow others to read it
-    void mark_clean(const ss::sstring& key);
-
     /// Check if the key is cached.
-    /// If the slot for the cache element was allocated but not comitted
-    /// yet the 'cache_element_status::in_progress' is returned.
     /// The index of the secondary chunk could be obsolete. The elements
     /// of the chunk are never rewritten so it's safe to cache the index.
     cache_element_status is_cached(const ss::sstring& key) const;
