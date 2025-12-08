@@ -154,6 +154,10 @@ private:
     /// Start method for non-zero shards - gets chunk info from shard 0
     ss::future<> start_other_shard();
 
+    /// Write the index for a chunk to disk
+    /// Should only be called on shard 0 (where primary chunks live)
+    ss::future<> write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str);
+
     std::filesystem::path _cache_dir;
     uint64_t _chunk_size;
     uint64_t _cache_size;

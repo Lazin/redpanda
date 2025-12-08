@@ -308,6 +308,48 @@ fifo_cache::get_reconciled_chunks() {
     co_return metadata;
 }
 
+ss::future<> fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
+    // Find the chunk by id
+    auto chunk_it = std::ranges::find_if(
+      _chunks,
+      [chunk_id](const chunk_info& info) {
+          return info.chunk_id == chunk_id;
+      });
+
+    if (chunk_it == _chunks.end()) {
+        throw std::runtime_error(
+          fmt::format("Chunk with id {} not found on shard {}", chunk_id, ss::this_shard_id()));
+    }
+
+    auto* target_chunk = chunk_it->chunk.get();
+    auto index_path = chunk_it->file_path;
+    index_path.replace_extension(".index");
+
+    auto index_buf = target_chunk->serialize_index();
+
+    vlog(
+      log.debug,
+      "fifo_cache: writing index to {}, size={}",
+      index_path.string(),
+      index_buf.size_bytes());
+
+    co_await ss::recursive_touch_directory(_cache_dir.string());
+    auto index_file = co_await ss::open_file_dma(
+      index_path.string(),
+      ss::open_flags::wo | ss::open_flags::create
+        | ss::open_flags::truncate);
+
+    auto out = co_await ss::make_file_output_stream(index_file);
+    co_await write_iobuf_to_output_stream(std::move(index_buf), out);
+    co_await out.flush();
+    co_await out.close();
+
+    vlog(
+      log.debug,
+      "fifo_cache: successfully wrote index for key={}",
+      key_str);
+}
+
 ss::future<> fifo_cache::start_other_shard() {
     vlog(
       log.info,
@@ -478,28 +520,20 @@ ss::future<> fifo_cache::put(
       std::move(data),
       write_buffer_size,
       write_behind);
-    
+
     // Serialize and write the index to disk
-    auto index_path = chunk_it->file_path;
-    index_path.replace_extension(".index");
-
-    auto index_buf = target_chunk->serialize_index();
-
-    vlog(
-      log.debug,
-      "fifo_cache: writing index to {}, size={}",
-      index_path.string(),
-      index_buf.size_bytes());
-
-    co_await ss::recursive_touch_directory(_cache_dir.string());
-    auto index_file = co_await ss::open_file_dma(
-      index_path.string(),
-      ss::open_flags::wo | ss::open_flags::create | ss::open_flags::truncate);
-
-    auto out = co_await ss::make_file_output_stream(index_file);
-    co_await write_iobuf_to_output_stream(std::move(index_buf), out);
-    co_await out.flush();
-    co_await out.close();
+    // Only shard 0 (primary chunks) should write index files
+    if (ss::this_shard_id() == ss::shard_id{0}) {
+        // We're on shard 0, update index directly
+        co_await write_chunk_index(chunk_id, key_str);
+    } else {
+        // We're on another shard, delegate to shard 0 using invoke_on
+        co_await container().invoke_on(
+          ss::shard_id{0},
+          [chunk_id, key_str](fifo_cache& cache) -> ss::future<> {
+              return cache.write_chunk_index(chunk_id, key_str);
+          });
+    }
 
     vlog(
       log.debug,
