@@ -111,6 +111,14 @@ private:
         std::filesystem::path file_path;
     };
 
+    /// Remove chunks until enough space is available.
+    /// \returns true on success
+    /// The success means that enough data was removed to satisfy
+    /// requirements. Failure means that the trimming is impossible
+    /// for some reason (maybe all attempts to delete data from disk
+    /// has failed).
+    ss::future<bool> trim();
+
     /// Calculate total disk space used by all chunks
     uint64_t calculate_disk_usage() const;
 
@@ -130,14 +138,6 @@ private:
     uint64_t _cache_size;
     size_t _max_objects_per_chunk;
     chunked_vector<chunk_info> _chunks;
-
-    /// Semaphore to track available cache space
-    /// Initialized with the total cache size
-    ssx::semaphore _space_sem{0, "fifo_cache/space"};
-
-    /// Semaphore to track available object slots
-    /// Initialized with max_objects
-    ssx::semaphore _objects_sem{0, "fifo_cache/objects"};
 
     /// Mutex to protect chunk modifications (rolling, eviction)
     /// Prevents concurrent modifications to _chunks collection

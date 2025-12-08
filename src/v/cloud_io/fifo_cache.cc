@@ -21,6 +21,7 @@
 #include <fmt/core.h>
 
 #include <algorithm>
+#include <exception>
 #include <regex>
 #include <stdexcept>
 
@@ -72,9 +73,7 @@ fifo_cache::fifo_cache(
   , _cache_size(config.cache_size)
   , _max_objects_per_chunk(
       config.max_objects
-      / std::max(size_t{1}, config.cache_size / config.chunk_size))
-  , _space_sem(config.cache_size, "fifo_cache/space")
-  , _objects_sem(config.max_objects, "fifo_cache/objects") {
+      / std::max(size_t{1}, config.cache_size / config.chunk_size)) {
     vlog(
       log.info,
       "fifo_cache created: cache_dir={}, cache_size={}, chunk_size={}, "
@@ -174,17 +173,9 @@ ss::future<> fifo_cache::start() {
         auto usage = chunk_info.chunk->usage_bytes();
         auto num_keys = chunk_info.chunk->get_index_entries().size();
 
-        // Consume semaphore units for the used space and objects
-        if (usage > 0) {
-            auto space_units = co_await ss::get_units(_space_sem, usage);
-            space_units.return_all();
-            _current_cache_size += usage;
-        }
-        if (num_keys > 0) {
-            auto object_units = co_await ss::get_units(_objects_sem, num_keys);
-            object_units.return_all();
-            _current_cache_objects += num_keys;
-        }
+        // Update current cache usage
+        _current_cache_size += usage;
+        _current_cache_objects += num_keys;
 
         vlog(
           log.debug,
@@ -197,11 +188,10 @@ ss::future<> fifo_cache::start() {
     vlog(
       log.info,
       "fifo_cache started: loaded {} chunks, current_size={}, "
-      "current_objects={}, available_space={}",
+      "current_objects={}",
       _chunks.size(),
       _current_cache_size,
-      _current_cache_objects,
-      _space_sem.available_units());
+      _current_cache_objects);
 
     // Check if disk usage overshoots and evict chunks if necessary
     auto disk_usage = calculate_disk_usage();
@@ -213,19 +203,32 @@ ss::future<> fifo_cache::start() {
           disk_usage,
           _cache_size);
 
+        bool trim_res = co_await trim();
+
+        vlog(
+          log.info,
+          "fifo_cache::start: after eviction, {} chunks remaining, "
+          "disk_usage={}, trim succeeded: {}",
+          _chunks.size(),
+          calculate_disk_usage(),
+          trim_res);
+    }
+
+    co_return;
+}
+
+ss::future<bool> fifo_cache::trim() {
+    try {
         // Evict chunks until we're under the limit
         while (!_chunks.empty() && calculate_disk_usage() > _cache_size) {
             co_await remove_oldest_chunk();
         }
-
+    } catch (...) {
         vlog(
-          log.info,
-          "fifo_cache::start: after eviction, {} chunks remaining, disk_usage={}",
-          _chunks.size(),
-          calculate_disk_usage());
+          log.error, "fifo_cache::trim: failure: {}", std::current_exception());
+        co_return false;
     }
-
-    co_return;
+    co_return true;
 }
 
 ss::future<> fifo_cache::stop() {
@@ -233,10 +236,7 @@ ss::future<> fifo_cache::stop() {
 
     for (auto& chunk_info : _chunks) {
         co_await chunk_info.chunk->stop();
-        vlog(
-          log.debug,
-          "fifo_cache: stopped chunk_id={}",
-          chunk_info.chunk_id);
+        vlog(log.debug, "fifo_cache: stopped chunk_id={}", chunk_info.chunk_id);
     }
 
     vlog(log.info, "fifo_cache stopped");
@@ -244,9 +244,7 @@ ss::future<> fifo_cache::stop() {
 }
 
 ss::future<std::optional<cache_item_stream>> fifo_cache::get_stream(
-  std::filesystem::path key,
-  size_t read_buffer_size,
-  unsigned int read_ahead) {
+  std::filesystem::path key, size_t read_buffer_size, unsigned int read_ahead) {
     vlog(
       log.debug,
       "fifo_cache::get_stream: key={}, read_buffer_size={}, read_ahead={}",
@@ -296,15 +294,17 @@ ss::future<> fifo_cache::put(
       write_behind);
 
     // Get fields from the reservation guard (populated by reserve_space)
-    if (!reservation.id().has_value() || !reservation.offset().has_value()
-        || !reservation.payload_size().has_value()) {
-        throw std::runtime_error(fmt::format(
-          "Reservation guard missing required fields for key: {}. "
-          "id={}, offset={}, payload_size={}",
-          key_str,
-          reservation.id().has_value() ? "set" : "unset",
-          reservation.offset().has_value() ? "set" : "unset",
-          reservation.payload_size().has_value() ? "set" : "unset"));
+    if (
+      !reservation.id().has_value() || !reservation.offset().has_value()
+      || !reservation.payload_size().has_value()) {
+        throw std::runtime_error(
+          fmt::format(
+            "Reservation guard missing required fields for key: {}. "
+            "id={}, offset={}, payload_size={}",
+            key_str,
+            reservation.id().has_value() ? "set" : "unset",
+            reservation.offset().has_value() ? "set" : "unset",
+            reservation.payload_size().has_value() ? "set" : "unset"));
     }
 
     uint64_t chunk_id = *reservation.id();
@@ -314,13 +314,13 @@ ss::future<> fifo_cache::put(
 
     // Find the chunk by id
     auto chunk_it = std::ranges::find_if(
-      _chunks, [chunk_id](const chunk_info& info) {
-          return info.chunk_id == chunk_id;
-      });
+      _chunks,
+      [chunk_id](const chunk_info& info) { return info.chunk_id == chunk_id; });
 
     if (chunk_it == _chunks.end()) {
         throw std::runtime_error(
-          fmt::format("Chunk with id {} not found for key: {}", chunk_id, key_str));
+          fmt::format(
+            "Chunk with id {} not found for key: {}", chunk_id, key_str));
     }
 
     auto* target_chunk = chunk_it->chunk.get();
@@ -333,9 +333,13 @@ ss::future<> fifo_cache::put(
 
     // Write to the target chunk using the prepared slot
     co_await target_chunk->put(
-      key_str, write_slot, payload_size, std::move(data), write_buffer_size, write_behind);
-    // TODO: rollback allocated chunk slot in case of error
-
+      key_str,
+      write_slot,
+      payload_size,
+      std::move(data),
+      write_buffer_size,
+      write_behind);
+    
     // Serialize and write the index to disk
     auto index_path = chunk_it->file_path;
     index_path.replace_extension(".index");
@@ -447,10 +451,7 @@ fifo_cache::is_cached(const std::filesystem::path& key) {
         }
     }
 
-    vlog(
-      log.debug,
-      "fifo_cache::is_cached: key={} not found",
-      key_str);
+    vlog(log.debug, "fifo_cache::is_cached: key={} not found", key_str);
     co_return cache_element_status::not_available;
 }
 
@@ -464,6 +465,12 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
 
     // Get the chunk to write to (may roll to a new chunk if needed)
     auto target_chunk = co_await get_or_roll_chunk();
+
+    // Validate that we're not writing to a complete chunk
+    vassert(
+      !target_chunk->is_index_complete(),
+      "Attempting to write to a complete chunk - this violates the invariant "
+      "that only the last chunk should be incomplete");
 
     // Prepare a write slot in the target chunk
     auto write_slot = target_chunk->prepare(bytes);
@@ -520,8 +527,9 @@ void fifo_cache::reserve_space_release(
       used_bytes,
       used_objects);
 
-    // Semaphore units are managed by chunk allocation/eviction in get_or_roll_chunk
-    // and remove_oldest_chunk, so we don't need to update anything here
+    // Semaphore units are managed by chunk allocation/eviction in
+    // get_or_roll_chunk and remove_oldest_chunk, so we don't need to update
+    // anything here
 }
 
 uint64_t fifo_cache::calculate_disk_usage() const {
@@ -646,11 +654,6 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
     _current_cache_size -= usage;
     _current_cache_objects -= num_keys;
 
-    // Return space to semaphores
-    // Signal full chunk capacity since that's what was reserved when allocated
-    _space_sem.signal(_chunk_size);
-    _objects_sem.signal(_max_objects_per_chunk);
-
     // Remove from vector by shifting all elements
     // chunked_vector doesn't support erase, so we need to rebuild
     chunked_vector<chunk_info> new_chunks;
@@ -712,20 +715,51 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
     }
 
     if (need_new_chunk) {
-        vlog(
-          log.debug,
-          "fifo_cache: rolling chunk, reason: {}",
-          roll_reason);
+        vlog(log.debug, "fifo_cache: rolling chunk, reason: {}", roll_reason);
+
+        // Mark the current last chunk as complete before creating a new one
+        if (!_chunks.empty()) {
+            auto& last_chunk_info = _chunks.back();
+            last_chunk_info.chunk->set_index_complete(true);
+            vlog(
+              log.debug,
+              "fifo_cache: marked chunk_id={} as complete before rolling",
+              last_chunk_info.chunk_id);
+
+            // Persist the complete flag by writing the index to disk
+            auto index_path = last_chunk_info.file_path;
+            index_path.replace_extension(".index");
+            auto index_buf = last_chunk_info.chunk->serialize_index();
+
+            vlog(
+              log.debug,
+              "fifo_cache: persisting complete=true for chunk_id={}, writing "
+              "index to {}",
+              last_chunk_info.chunk_id,
+              index_path.string());
+
+            co_await ss::recursive_touch_directory(_cache_dir.string());
+            auto index_file = co_await ss::open_file_dma(
+              index_path.string(),
+              ss::open_flags::wo | ss::open_flags::create
+                | ss::open_flags::truncate);
+            auto out = co_await ss::make_file_output_stream(index_file);
+            co_await write_iobuf_to_output_stream(std::move(index_buf), out);
+            co_await out.flush();
+            co_await out.close();
+        }
 
         // Need to create a new chunk
         // First check if we need to evict old chunks to make room
         auto eviction_success = co_await evict_chunks(_chunk_size);
         if (!eviction_success) {
-            throw std::runtime_error(fmt::format(
-              "Failed to allocate new chunk: insufficient space, cache_size={}, "
-              "chunk_size={}",
-              _cache_size,
-              _chunk_size));
+            throw std::runtime_error(
+              fmt::format(
+                "Failed to allocate new chunk: insufficient space, "
+                "cache_size={}, "
+                "chunk_size={}",
+                _cache_size,
+                _chunk_size));
         }
 
         uint64_t chunk_id = 0;
@@ -760,17 +794,10 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
             .file_path = file_path,
           });
 
-        // Consume semaphore units for the newly allocated chunk
-        co_await _space_sem.wait(_chunk_size);
-        co_await _objects_sem.wait(_max_objects_per_chunk);
-
         vlog(
           log.debug,
-          "fifo_cache: created new chunk with id={}, consumed space={}, "
-          "objects={}",
-          chunk_id,
-          _chunk_size,
-          _max_objects_per_chunk);
+          "fifo_cache: created new chunk with id={}",
+          chunk_id);
     }
 
     co_return target_chunk;
