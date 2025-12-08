@@ -350,6 +350,58 @@ ss::future<> fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring&
       key_str);
 }
 
+ss::future<fifo_cache::reservation_metadata>
+fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
+    vlog(
+      log.debug,
+      "fifo_cache::do_reserve_space on shard {}: requesting bytes={}, objects={}",
+      ss::this_shard_id(),
+      bytes,
+      objects);
+
+    // Get the chunk to write to (may roll to a new chunk if needed)
+    auto target_chunk = co_await get_or_roll_chunk();
+
+    // Validate that we're not writing to a complete chunk
+    vassert(
+      !target_chunk->is_index_complete(),
+      "Attempting to write to a complete chunk - this violates the invariant "
+      "that only the last chunk should be incomplete");
+
+    // Prepare a write slot in the target chunk
+    auto write_slot = target_chunk->prepare(bytes);
+    if (!write_slot) {
+        throw std::runtime_error(
+          fmt::format("Failed to prepare write slot for {} bytes", bytes));
+    }
+
+    // Find the chunk_id for the target chunk
+    uint64_t chunk_id = 0;
+    for (const auto& chunk_info : _chunks) {
+        if (chunk_info.chunk.get() == target_chunk) {
+            chunk_id = chunk_info.chunk_id;
+            break;
+        }
+    }
+
+    vlog(
+      log.debug,
+      "fifo_cache::do_reserve_space: granted reservation bytes={}, objects={}, "
+      "chunk_id={}, offset={}, slot_size={}",
+      bytes,
+      objects,
+      chunk_id,
+      write_slot->offset,
+      write_slot->slot_size_bytes);
+
+    co_return reservation_metadata{
+      .chunk_id = chunk_id,
+      .offset = write_slot->offset,
+      .slot_size_bytes = write_slot->slot_size_bytes,
+      .payload_size = bytes,
+    };
+}
+
 ss::future<> fifo_cache::start_other_shard() {
     vlog(
       log.info,
@@ -636,49 +688,29 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
       bytes,
       objects);
 
-    // Get the chunk to write to (may roll to a new chunk if needed)
-    auto target_chunk = co_await get_or_roll_chunk();
-
-    // Validate that we're not writing to a complete chunk
-    vassert(
-      !target_chunk->is_index_complete(),
-      "Attempting to write to a complete chunk - this violates the invariant "
-      "that only the last chunk should be incomplete");
-
-    // Prepare a write slot in the target chunk
-    auto write_slot = target_chunk->prepare(bytes);
-    if (!write_slot) {
-        throw std::runtime_error(
-          fmt::format("Failed to prepare write slot for {} bytes", bytes));
+    // Perform space allocation on shard 0
+    // If we're on shard 0, do it directly; otherwise delegate via invoke_on
+    reservation_metadata metadata;
+    if (ss::this_shard_id() == ss::shard_id{0}) {
+        // We're on shard 0, allocate space directly
+        metadata = co_await do_reserve_space(bytes, objects);
+    } else {
+        // We're on another shard, delegate to shard 0 using invoke_on
+        metadata = co_await container().invoke_on(
+          ss::shard_id{0},
+          [bytes, objects](fifo_cache& cache) -> ss::future<reservation_metadata> {
+              return cache.do_reserve_space(bytes, objects);
+          });
     }
-
-    // Find the chunk_id for the target chunk
-    uint64_t chunk_id = 0;
-    for (const auto& chunk_info : _chunks) {
-        if (chunk_info.chunk.get() == target_chunk) {
-            chunk_id = chunk_info.chunk_id;
-            break;
-        }
-    }
-
-    vlog(
-      log.debug,
-      "fifo_cache::reserve_space: granted reservation bytes={}, objects={}, "
-      "chunk_id={}, offset={}, slot_size={}",
-      bytes,
-      objects,
-      chunk_id,
-      write_slot->offset,
-      write_slot->slot_size_bytes);
 
     // Create reservation guard with the slot_size as reserved_bytes
     auto guard = basic_space_reservation_guard<ss::lowres_clock>(
-      *this, write_slot->slot_size_bytes, objects);
+      *this, metadata.slot_size_bytes, objects);
 
-    // Populate the optional fields with the write_slot information
-    guard.set_id(chunk_id);
-    guard.set_offset(write_slot->offset);
-    guard.set_payload_size(bytes);
+    // Populate the optional fields with the reservation metadata
+    guard.set_id(metadata.chunk_id);
+    guard.set_offset(metadata.offset);
+    guard.set_payload_size(metadata.payload_size);
 
     co_return guard;
 }

@@ -158,6 +158,16 @@ private:
     /// Should only be called on shard 0 (where primary chunks live)
     ss::future<> write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str);
 
+    /// Perform the actual space reservation on shard 0
+    /// Returns reservation metadata needed to construct reservation guard
+    struct reservation_metadata {
+        uint64_t chunk_id;
+        uint64_t offset;
+        uint64_t slot_size_bytes;
+        uint64_t payload_size;
+    };
+    ss::future<reservation_metadata> do_reserve_space(uint64_t bytes, size_t objects);
+
     std::filesystem::path _cache_dir;
     uint64_t _chunk_size;
     uint64_t _cache_size;
