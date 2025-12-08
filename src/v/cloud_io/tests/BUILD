@@ -154,3 +154,22 @@ redpanda_cc_btest(
         "@seastar//:testing",
     ],
 )
+
+redpanda_cc_btest(
+    name = "fifo_cache_mt_test",
+    timeout = "short",
+    cpu = 2,  # Use 2 shards for multi-shard testing
+    srcs = [
+        "fifo_cache_mt_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes:iostream",
+        "//src/v/cloud_io:fifo_cache",
+        "//src/v/test_utils:seastar_boost",
+        "//src/v/test_utils:tmp_dir",
+        "@boost//:test",
+        "@fmt",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)

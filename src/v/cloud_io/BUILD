@@ -248,6 +248,7 @@ redpanda_cc_library(
         ":fifo_chunk",
         "//src/v/bytes:iostream",
         "//src/v/ssx:checkpoint_mutex",
+        "//src/v/ssx:event",
         "//src/v/ssx:semaphore",
         "//src/v/utils:directory_walker",
         "@fmt",

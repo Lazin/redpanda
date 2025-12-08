@@ -13,6 +13,7 @@
 #include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/fifo_chunk.h"
 #include "ssx/checkpoint_mutex.h"
+#include "ssx/event.h"
 #include "ssx/semaphore.h"
 
 #include <seastar/core/lowres_clock.hh>
@@ -93,6 +94,20 @@ public:
     seastar::coroutine::experimental::generator<ss::sstring>
     scan_keys(std::optional<std::filesystem::path> prefix = std::nullopt) const;
 
+    /// Metadata for a chunk to be shared across shards
+    struct chunk_metadata {
+        uint64_t chunk_id;
+        std::filesystem::path file_path;
+        iobuf serialized_index;
+    };
+
+    /// Get the list of reconciled chunks from shard 0
+    /// This method waits for reconciliation to complete and returns chunk metadata
+    /// Uses foreign_ptr for safe cross-shard memory management
+    /// Should only be called from non-zero shards
+    ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<chunk_metadata>>>>
+    get_reconciled_chunks();
+
     /// Get a range of chunk file paths.
     /// Can be used in range-based for loops.
     /// This method should only be used in tests.
@@ -133,6 +148,12 @@ private:
     /// Returns a pointer to the chunk that should be used for writing
     ss::future<fifo_chunk*> get_or_roll_chunk();
 
+    /// Start method for shard 0 - enumerates directory and reconciles chunks
+    ss::future<> start_shard_zero();
+
+    /// Start method for non-zero shards - gets chunk info from shard 0
+    ss::future<> start_other_shard();
+
     std::filesystem::path _cache_dir;
     uint64_t _chunk_size;
     uint64_t _cache_size;
@@ -142,6 +163,11 @@ private:
     /// Mutex to protect chunk modifications (rolling, eviction)
     /// Prevents concurrent modifications to _chunks collection
     ssx::checkpoint_mutex _chunks_mutex{"fifo_cache/chunks"};
+
+    /// Synchronization for cross-shard initialization
+    /// Shard 0 sets this after completing directory enumeration and reconciliation
+    /// Other shards wait on this before requesting chunk metadata
+    ssx::event _reconciliation_complete{"fifo_cache/reconciliation_complete"};
 
     /// Current bytes used in the cache
     uint64_t _current_cache_size{0};
