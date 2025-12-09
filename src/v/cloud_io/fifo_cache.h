@@ -101,13 +101,6 @@ public:
         iobuf serialized_index;
     };
 
-    /// Get the list of reconciled chunks from shard 0
-    /// This method waits for reconciliation to complete and returns chunk metadata
-    /// Uses foreign_ptr for safe cross-shard memory management
-    /// Should only be called from non-zero shards
-    ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<chunk_metadata>>>>
-    get_reconciled_chunks();
-
     /// Get a range of chunk file paths.
     /// Can be used in range-based for loops.
     /// This method should only be used in tests.
@@ -125,6 +118,16 @@ private:
         std::unique_ptr<fifo_chunk> chunk;
         std::filesystem::path file_path;
     };
+
+    /// Get the list of reconciled chunks from shard 0
+    /// This method waits for reconciliation to complete and returns chunk metadata
+    /// Uses foreign_ptr for safe cross-shard memory management
+    /// Should only be called from non-zero shards
+    ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<chunk_metadata>>>>
+    get_reconciled_chunks();
+    ss::future<
+      ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+    do_get_reconciled_chunks();
 
     /// Remove chunks until enough space is available.
     /// \returns true on success

@@ -33,6 +33,18 @@ struct chunk_file_info {
     uint64_t chunk_id;
 };
 
+static void require_zero_shard() {
+    vassert(
+      ss::this_shard_id() == ss::shard_id(0),
+      "The method should only be called from shard 0");
+}
+
+static void require_non_zero_shard() {
+    vassert(
+      ss::this_shard_id() != ss::shard_id{0},
+      "The method should only be called from non-zero shards");
+}
+
 struct chunk_walker {
     ss::future<> operator()(ss::directory_entry entry) {
         if (entry.type != ss::directory_entry_type::regular) {
@@ -72,8 +84,7 @@ fifo_cache::fifo_cache(
   , _chunk_size(config.chunk_size)
   , _cache_size(config.cache_size)
   , _max_objects_per_chunk(
-      config.max_objects
-      / std::max(size_t{1}, config.cache_size / config.chunk_size)) {
+      config.max_objects / std::max(1ul, _cache_size / _chunk_size)) {
     vlog(
       log.info,
       "fifo_cache created: cache_dir={}, cache_size={}, chunk_size={}, "
@@ -95,6 +106,7 @@ ss::future<> fifo_cache::start() {
 }
 
 ss::future<> fifo_cache::start_shard_zero() {
+    require_zero_shard();
     vlog(
       log.info,
       "fifo_cache starting on shard 0: enumerating chunks in {}",
@@ -222,7 +234,8 @@ ss::future<> fifo_cache::start_shard_zero() {
           trim_res);
     }
 
-    // Signal that reconciliation is complete
+    // Signal that reconciliation is complete. This should unblock
+    // other shards that can reconcile chunks.
     _reconciliation_complete.set();
 
     vlog(
@@ -234,6 +247,7 @@ ss::future<> fifo_cache::start_shard_zero() {
 }
 
 ss::future<bool> fifo_cache::trim() {
+    require_zero_shard();
     try {
         // Evict chunks until we're under the limit
         while (!_chunks.empty() && calculate_disk_usage() > _cache_size) {
@@ -259,45 +273,48 @@ ss::future<> fifo_cache::stop() {
     co_return;
 }
 
-ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+ss::future<
+  ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+fifo_cache::do_get_reconciled_chunks() {
+    // NOTE: this is a counterpart for the get_reconciled_chunks which
+    // is always running on shard zero.
+    require_zero_shard();
+
+    co_await _reconciliation_complete.wait();
+
+    vlog(
+      log.debug,
+      "fifo_cache shard 0 reconciliation complete, fetching metadata");
+
+    auto result = std::make_unique<chunked_vector<chunk_metadata>>();
+    for (const auto& chunk_info : _chunks) {
+        result->push_back(
+          chunk_metadata{
+            .chunk_id = chunk_info.chunk_id,
+            .file_path = chunk_info.file_path,
+            .serialized_index = chunk_info.chunk->serialize_index(),
+          });
+    }
+    // The data is consumed on another shard so we need to deallocate
+    // it on shard zero.
+    co_return ss::make_foreign(std::move(result));
+}
+
+ss::future<
+  ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
 fifo_cache::get_reconciled_chunks() {
-    // Must be called from non-zero shards
-    vassert(
-      ss::this_shard_id() != ss::shard_id{0},
-      "get_reconciled_chunks should only be called from non-zero shards");
+    require_non_zero_shard();
 
     vlog(
       log.debug,
       "fifo_cache shard {}: waiting for shard 0 reconciliation",
       ss::this_shard_id());
 
-    // Wait for shard 0 to complete reconciliation
-    co_await container().invoke_on(
-      ss::shard_id{0},
-      [](fifo_cache& cache) -> ss::future<> {
-          return cache._reconciliation_complete.wait();
-      });
-
-    vlog(
-      log.debug,
-      "fifo_cache shard {}: shard 0 reconciliation complete, fetching metadata",
-      ss::this_shard_id());
-
-    // Get chunk metadata from shard 0
-    // Use foreign_ptr for safe cross-shard memory management
+    // This will wait until shard 0 completes reconciliation
+    // and then pull the metadata.
     auto metadata = co_await container().invoke_on(
       ss::shard_id{0},
-      [](fifo_cache& cache) -> ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<chunk_metadata>>>> {
-          auto result = std::make_unique<chunked_vector<chunk_metadata>>();
-          for (const auto& chunk_info : cache._chunks) {
-              result->push_back(chunk_metadata{
-                .chunk_id = chunk_info.chunk_id,
-                .file_path = chunk_info.file_path,
-                .serialized_index = chunk_info.chunk->serialize_index(),
-              });
-          }
-          co_return ss::make_foreign(std::move(result));
-      });
+      [](fifo_cache& cache) { return cache.do_get_reconciled_chunks(); });
 
     vlog(
       log.debug,
@@ -308,17 +325,19 @@ fifo_cache::get_reconciled_chunks() {
     co_return metadata;
 }
 
-ss::future<> fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
+ss::future<>
+fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
     // Find the chunk by id
     auto chunk_it = std::ranges::find_if(
       _chunks,
-      [chunk_id](const chunk_info& info) {
-          return info.chunk_id == chunk_id;
-      });
+      [chunk_id](const chunk_info& info) { return info.chunk_id == chunk_id; });
 
     if (chunk_it == _chunks.end()) {
         throw std::runtime_error(
-          fmt::format("Chunk with id {} not found on shard {}", chunk_id, ss::this_shard_id()));
+          fmt::format(
+            "Chunk with id {} not found on shard {}",
+            chunk_id,
+            ss::this_shard_id()));
     }
 
     auto* target_chunk = chunk_it->chunk.get();
@@ -336,25 +355,22 @@ ss::future<> fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring&
     co_await ss::recursive_touch_directory(_cache_dir.string());
     auto index_file = co_await ss::open_file_dma(
       index_path.string(),
-      ss::open_flags::wo | ss::open_flags::create
-        | ss::open_flags::truncate);
+      ss::open_flags::wo | ss::open_flags::create | ss::open_flags::truncate);
 
     auto out = co_await ss::make_file_output_stream(index_file);
     co_await write_iobuf_to_output_stream(std::move(index_buf), out);
     co_await out.flush();
     co_await out.close();
 
-    vlog(
-      log.debug,
-      "fifo_cache: successfully wrote index for key={}",
-      key_str);
+    vlog(log.debug, "fifo_cache: successfully wrote index for key={}", key_str);
 }
 
 ss::future<fifo_cache::reservation_metadata>
 fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
     vlog(
       log.debug,
-      "fifo_cache::do_reserve_space on shard {}: requesting bytes={}, objects={}",
+      "fifo_cache::do_reserve_space on shard {}: requesting bytes={}, "
+      "objects={}",
       ss::this_shard_id(),
       bytes,
       objects);
@@ -408,7 +424,6 @@ ss::future<> fifo_cache::start_other_shard() {
       "fifo_cache starting on shard {}: waiting for shard 0",
       ss::this_shard_id());
 
-    // Get reconciled chunk list from shard 0 (returned as foreign_ptr)
     auto chunk_list_ptr = co_await get_reconciled_chunks();
 
     vlog(
@@ -417,8 +432,8 @@ ss::future<> fifo_cache::start_other_shard() {
       ss::this_shard_id(),
       chunk_list_ptr->size());
 
-    // Load each chunk as secondary
     for (const auto& metadata : *chunk_list_ptr) {
+        // Load each chunk as secondary
         vlog(
           log.debug,
           "fifo_cache shard {}: loading chunk_id={}, file={}",
@@ -426,28 +441,27 @@ ss::future<> fifo_cache::start_other_shard() {
           metadata.chunk_id,
           metadata.file_path.string());
 
-        // Open the chunk file (each shard gets its own file handle)
         auto file = co_await ss::open_file_dma(
           metadata.file_path.string(), ss::open_flags::rw);
 
         auto file_size = co_await file.size();
 
-        // Create chunk with SECONDARY status (key difference from shard 0)
         auto chunk = std::make_unique<fifo_chunk>(
           std::move(file), fifo_chunk::status_t::secondary, file_size);
 
-        // Install the index received from shard 0
         chunk->install_index(metadata.serialized_index.copy());
 
-        // Store the chunk info
-        _chunks.push_back(chunk_info{
-          .chunk_id = metadata.chunk_id,
-          .chunk = std::move(chunk),
-          .file_path = metadata.file_path,
-        });
+        _chunks.push_back(
+          chunk_info{
+            .chunk_id = metadata.chunk_id,
+            .chunk = std::move(chunk),
+            .file_path = metadata.file_path,
+          });
     }
 
-    // Account for space usage (same as shard 0)
+    // Account for space usage (same as shard 0) but no need to truncate
+    // the list of chunks. Shard 0 is truncating before signalling other
+    // shards.
     for (const auto& chunk_info : _chunks) {
         auto usage = chunk_info.chunk->usage_bytes();
         auto num_keys = chunk_info.chunk->get_index_entries().size();
@@ -457,7 +471,8 @@ ss::future<> fifo_cache::start_other_shard() {
 
         vlog(
           log.debug,
-          "fifo_cache shard {}: accounted for chunk_id={}, usage={}, num_keys={}",
+          "fifo_cache shard {}: accounted for chunk_id={}, usage={}, "
+          "num_keys={}",
           ss::this_shard_id(),
           chunk_info.chunk_id,
           usage,
@@ -516,6 +531,7 @@ ss::future<> fifo_cache::put(
   basic_space_reservation_guard<ss::lowres_clock>& reservation,
   size_t write_buffer_size,
   unsigned int write_behind) {
+    // NOTE: the reservation could be created on another shard.
     // Convert path to sstring for fifo_chunk API
     ss::sstring key_str = key.string();
 
@@ -596,6 +612,7 @@ ss::future<> fifo_cache::put(
 
 seastar::coroutine::experimental::generator<ss::sstring>
 fifo_cache::scan_keys(std::optional<std::filesystem::path> prefix) const {
+    // NOTE: can be used on any shard
     struct key_iterator {
         ss::sstring key;
         absl::btree_map<ss::sstring, detail::fifo_index_entry>::const_iterator
@@ -658,6 +675,9 @@ fifo_cache::scan_keys(std::optional<std::filesystem::path> prefix) const {
 
 ss::future<cache_element_status>
 fifo_cache::is_cached(const std::filesystem::path& key) {
+    // NOTE: is cached always uses the shard local index.
+    // In case of the conflict we will rewrite the cache entry
+    // which is fine given that the cache entries are immutable.
     ss::sstring key_str = key.string();
 
     vlog(log.debug, "fifo_cache::is_cached: checking key={}", key_str);
@@ -698,7 +718,8 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
         // We're on another shard, delegate to shard 0 using invoke_on
         metadata = co_await container().invoke_on(
           ss::shard_id{0},
-          [bytes, objects](fifo_cache& cache) -> ss::future<reservation_metadata> {
+          [bytes,
+           objects](fifo_cache& cache) -> ss::future<reservation_metadata> {
               return cache.do_reserve_space(bytes, objects);
           });
     }
@@ -999,10 +1020,7 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
             .file_path = file_path,
           });
 
-        vlog(
-          log.debug,
-          "fifo_cache: created new chunk with id={}",
-          chunk_id);
+        vlog(log.debug, "fifo_cache: created new chunk with id={}", chunk_id);
     }
 
     co_return target_chunk;
