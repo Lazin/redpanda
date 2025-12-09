@@ -129,14 +129,6 @@ private:
       ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
     do_get_reconciled_chunks();
 
-    /// Remove chunks until enough space is available.
-    /// \returns true on success
-    /// The success means that enough data was removed to satisfy
-    /// requirements. Failure means that the trimming is impossible
-    /// for some reason (maybe all attempts to delete data from disk
-    /// has failed).
-    ss::future<bool> trim();
-
     /// Calculate total disk space used by all chunks
     uint64_t calculate_disk_usage() const;
 

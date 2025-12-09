@@ -223,7 +223,9 @@ ss::future<> fifo_cache::start_shard_zero() {
           disk_usage,
           _cache_size);
 
-        bool trim_res = co_await trim();
+        // Make sure the current cache doesn't overshoot but don't make a room
+        // for a new chunk.
+        bool trim_res = co_await evict_chunks(0);
 
         vlog(
           log.info,
@@ -244,21 +246,6 @@ ss::future<> fifo_cache::start_shard_zero() {
       _chunks.size());
 
     co_return;
-}
-
-ss::future<bool> fifo_cache::trim() {
-    require_zero_shard();
-    try {
-        // Evict chunks until we're under the limit
-        while (!_chunks.empty() && calculate_disk_usage() > _cache_size) {
-            co_await remove_oldest_chunk();
-        }
-    } catch (...) {
-        vlog(
-          log.error, "fifo_cache::trim: failure: {}", std::current_exception());
-        co_return false;
-    }
-    co_return true;
 }
 
 ss::future<> fifo_cache::stop() {
@@ -327,12 +314,14 @@ fifo_cache::get_reconciled_chunks() {
 
 ss::future<>
 fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
-    // Find the chunk by id
-    auto chunk_it = std::ranges::find_if(
+    require_zero_shard();
+    auto chunk_it = std::ranges::lower_bound(
       _chunks,
-      [chunk_id](const chunk_info& info) { return info.chunk_id == chunk_id; });
+      chunk_id,
+      [](uint64_t lhs, uint64_t rhs) { return lhs < rhs; },
+      [](const chunk_info& info) { return info.chunk_id; });
 
-    if (chunk_it == _chunks.end()) {
+    if (chunk_it == _chunks.end() || chunk_it->chunk_id > chunk_id) {
         throw std::runtime_error(
           fmt::format(
             "Chunk with id {} not found on shard {}",
@@ -367,11 +356,11 @@ fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
 
 ss::future<fifo_cache::reservation_metadata>
 fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
+    require_zero_shard();
     vlog(
       log.debug,
-      "fifo_cache::do_reserve_space on shard {}: requesting bytes={}, "
+      "fifo_cache::do_reserve_space: requesting bytes={}, "
       "objects={}",
-      ss::this_shard_id(),
       bytes,
       objects);
 
@@ -710,7 +699,7 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
 
     // Perform space allocation on shard 0
     // If we're on shard 0, do it directly; otherwise delegate via invoke_on
-    reservation_metadata metadata;
+    reservation_metadata metadata{};
     if (ss::this_shard_id() == ss::shard_id{0}) {
         // We're on shard 0, allocate space directly
         metadata = co_await do_reserve_space(bytes, objects);
@@ -727,8 +716,6 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
     // Create reservation guard with the slot_size as reserved_bytes
     auto guard = basic_space_reservation_guard<ss::lowres_clock>(
       *this, metadata.slot_size_bytes, objects);
-
-    // Populate the optional fields with the reservation metadata
     guard.set_id(metadata.chunk_id);
     guard.set_offset(metadata.offset);
     guard.set_payload_size(metadata.payload_size);
@@ -744,6 +731,17 @@ void fifo_cache::reserve_space_release(
   std::optional<uint64_t> /*id*/,
   std::optional<uint64_t> /*offset*/,
   std::optional<uint64_t> /*payload_size*/) {
+    // There is no way to reclaim reserved space at the moment.
+    // The space is reserved using the index. If the put operation
+    // fails this method is reserved but if any other reservation
+    // have happened we will not be able to do anything. There will
+    // be an empty gap left in the chunk.
+    // In the future this problem could be solved by a) tracking
+    // and observability which would guide b) compaction of fifo
+    // chunks. This is not implemented because the situation in
+    // which the reservation doesn't lead to the successful put
+    // call are very rare. Also, the space is naturally reclaimed
+    // while the chunks roll.
     vlog(
       log.debug,
       "fifo_cache::reserve_space_release: reserved_bytes={}, "
@@ -752,10 +750,6 @@ void fifo_cache::reserve_space_release(
       reserved_objects,
       used_bytes,
       used_objects);
-
-    // Semaphore units are managed by chunk allocation/eviction in
-    // get_or_roll_chunk and remove_oldest_chunk, so we don't need to update
-    // anything here
 }
 
 uint64_t fifo_cache::calculate_disk_usage() const {
@@ -769,6 +763,7 @@ uint64_t fifo_cache::calculate_disk_usage() const {
 }
 
 ss::future<bool> fifo_cache::evict_chunks(uint64_t required_space) {
+    require_zero_shard();
     vlog(
       log.debug,
       "fifo_cache::evict_chunks_for_space: required_space={}",
