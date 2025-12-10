@@ -30,7 +30,6 @@ inline constexpr uint64_t default_fifo_chunk_size = 2_GiB;
 inline constexpr uint64_t default_fifo_cache_size = 20_GiB;
 inline constexpr uint64_t default_fifo_cache_max_objects = 1000000;
 
-
 /// Configuration for fifo_cache
 struct fifo_cache_config {
     uint64_t cache_size = default_fifo_cache_size;
@@ -44,8 +43,7 @@ class fifo_cache
   , public ss::peering_sharded_service<fifo_cache> {
 public:
     explicit fifo_cache(
-      std::filesystem::path cache_dir,
-      fifo_cache_config config = {});
+      std::filesystem::path cache_dir, fifo_cache_config config = {});
     ~fifo_cache() override = default;
 
     /// Start the cache - enumerate existing chunks and initialize them
@@ -119,14 +117,20 @@ private:
         std::filesystem::path file_path;
     };
 
+    struct reconciled_chunk_metadata {
+        chunked_vector<chunk_metadata> chunks;
+    };
+    using reconciled_chunk_metadata_ptr
+      = std::unique_ptr<reconciled_chunk_metadata>;
+
     /// Get the list of reconciled chunks from shard 0
-    /// This method waits for reconciliation to complete and returns chunk metadata
-    /// Uses foreign_ptr for safe cross-shard memory management
-    /// Should only be called from non-zero shards
-    ss::future<ss::foreign_ptr<std::unique_ptr<chunked_vector<chunk_metadata>>>>
+    /// This method waits for reconciliation to complete and returns chunk
+    /// metadata Uses foreign_ptr for safe cross-shard memory management Should
+    /// only be called from non-zero shards
+    ss::future<ss::foreign_ptr<reconciled_chunk_metadata_ptr>>
     get_reconciled_chunks();
-    ss::future<
-      ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+
+    ss::future<ss::foreign_ptr<reconciled_chunk_metadata_ptr>>
     do_get_reconciled_chunks();
 
     /// Calculate total disk space used by all chunks
@@ -151,7 +155,8 @@ private:
 
     /// Write the index for a chunk to disk
     /// Should only be called on shard 0 (where primary chunks live)
-    ss::future<> write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str);
+    ss::future<>
+    write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str);
 
     /// Perform the actual space reservation on shard 0
     /// Returns reservation metadata needed to construct reservation guard
@@ -161,7 +166,8 @@ private:
         uint64_t slot_size_bytes;
         uint64_t payload_size;
     };
-    ss::future<reservation_metadata> do_reserve_space(uint64_t bytes, size_t objects);
+    ss::future<reservation_metadata>
+    do_reserve_space(uint64_t bytes, size_t objects);
 
     std::filesystem::path _cache_dir;
     uint64_t _chunk_size;
@@ -174,9 +180,10 @@ private:
     ssx::checkpoint_mutex _chunks_mutex{"fifo_cache/chunks"};
 
     /// Synchronization for cross-shard initialization
-    /// Shard 0 sets this after completing directory enumeration and reconciliation
-    /// Other shards wait on this before requesting chunk metadata
-    ssx::event _reconciliation_complete{"fifo_cache/reconciliation_complete"};
+    /// Shard 0 sets this after completing directory enumeration and
+    /// reconciliation Other shards wait on this before requesting chunk
+    /// metadata
+    ssx::event _reconciliation_barrier{"fifo_cache/reconciliation_complete"};
 
     /// Current bytes used in the cache
     uint64_t _current_cache_size{0};

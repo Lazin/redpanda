@@ -238,7 +238,7 @@ ss::future<> fifo_cache::start_shard_zero() {
 
     // Signal that reconciliation is complete. This should unblock
     // other shards that can reconcile chunks.
-    _reconciliation_complete.set();
+    _reconciliation_barrier.set();
 
     vlog(
       log.info,
@@ -260,22 +260,21 @@ ss::future<> fifo_cache::stop() {
     co_return;
 }
 
-ss::future<
-  ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+ss::future<ss::foreign_ptr<fifo_cache::reconciled_chunk_metadata_ptr>>
 fifo_cache::do_get_reconciled_chunks() {
     // NOTE: this is a counterpart for the get_reconciled_chunks which
     // is always running on shard zero.
     require_zero_shard();
 
-    co_await _reconciliation_complete.wait();
+    co_await _reconciliation_barrier.wait();
 
     vlog(
       log.debug,
       "fifo_cache shard 0 reconciliation complete, fetching metadata");
 
-    auto result = std::make_unique<chunked_vector<chunk_metadata>>();
+    auto result = std::make_unique<reconciled_chunk_metadata>();
     for (const auto& chunk_info : _chunks) {
-        result->push_back(
+        result->chunks.push_back(
           chunk_metadata{
             .chunk_id = chunk_info.chunk_id,
             .file_path = chunk_info.file_path,
@@ -287,8 +286,7 @@ fifo_cache::do_get_reconciled_chunks() {
     co_return ss::make_foreign(std::move(result));
 }
 
-ss::future<
-  ss::foreign_ptr<std::unique_ptr<chunked_vector<fifo_cache::chunk_metadata>>>>
+ss::future<ss::foreign_ptr<fifo_cache::reconciled_chunk_metadata_ptr>>
 fifo_cache::get_reconciled_chunks() {
     require_non_zero_shard();
 
@@ -307,7 +305,7 @@ fifo_cache::get_reconciled_chunks() {
       log.debug,
       "fifo_cache shard {}: received {} chunks from shard 0",
       ss::this_shard_id(),
-      metadata->size());
+      metadata->chunks.size());
 
     co_return metadata;
 }
@@ -419,9 +417,9 @@ ss::future<> fifo_cache::start_other_shard() {
       log.debug,
       "fifo_cache shard {} received {} chunks from shard 0",
       ss::this_shard_id(),
-      chunk_list_ptr->size());
+      chunk_list_ptr->chunks.size());
 
-    for (const auto& metadata : *chunk_list_ptr) {
+    for (const auto& metadata : chunk_list_ptr->chunks) {
         // Load each chunk as secondary
         vlog(
           log.debug,
