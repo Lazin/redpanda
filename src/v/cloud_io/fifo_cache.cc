@@ -352,7 +352,7 @@ fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
     vlog(log.debug, "fifo_cache: successfully wrote index for key={}", key_str);
 }
 
-ss::future<fifo_cache::reservation_metadata>
+ss::future<ss::foreign_ptr<fifo_cache::reservation_metadata_ptr>>
 fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
     require_zero_shard();
     vlog(
@@ -361,6 +361,10 @@ fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
       "objects={}",
       bytes,
       objects);
+
+    // Track the number of chunks before rolling to detect if a new chunk was
+    // created
+    auto chunks_before = _chunks.size();
 
     // Get the chunk to write to (may roll to a new chunk if needed)
     auto target_chunk = co_await get_or_roll_chunk();
@@ -378,31 +382,53 @@ fifo_cache::do_reserve_space(uint64_t bytes, size_t objects) {
           fmt::format("Failed to prepare write slot for {} bytes", bytes));
     }
 
-    // Find the chunk_id for the target chunk
+    // Find the chunk_id and file_path for the target chunk
     uint64_t chunk_id = 0;
+    std::filesystem::path file_path;
     for (const auto& chunk_info : _chunks) {
         if (chunk_info.chunk.get() == target_chunk) {
             chunk_id = chunk_info.chunk_id;
+            file_path = chunk_info.file_path;
             break;
         }
+    }
+
+    // Check if a new chunk was rolled
+    std::optional<chunk_metadata> new_chunk_meta;
+    if (_chunks.size() > chunks_before) {
+        // A new chunk was created, serialize its metadata for cross-shard sync
+        vlog(
+          log.debug,
+          "fifo_cache::do_reserve_space: new chunk rolled, chunk_id={}",
+          chunk_id);
+
+        new_chunk_meta = chunk_metadata{
+          .chunk_id = chunk_id,
+          .file_path = file_path,
+          .serialized_index = target_chunk->serialize_index(),
+        };
     }
 
     vlog(
       log.debug,
       "fifo_cache::do_reserve_space: granted reservation bytes={}, objects={}, "
-      "chunk_id={}, offset={}, slot_size={}",
+      "chunk_id={}, offset={}, slot_size={}, new_chunk={}",
       bytes,
       objects,
       chunk_id,
       write_slot->offset,
-      write_slot->slot_size_bytes);
+      write_slot->slot_size_bytes,
+      new_chunk_meta.has_value());
 
-    co_return reservation_metadata{
+    auto metadata = std::make_unique<reservation_metadata>(reservation_metadata{
       .chunk_id = chunk_id,
       .offset = write_slot->offset,
       .slot_size_bytes = write_slot->slot_size_bytes,
       .payload_size = bytes,
-    };
+      .new_chunk = std::move(new_chunk_meta),
+    });
+
+    co_return ss::make_foreign(std::move(metadata));
 }
 
 ss::future<> fifo_cache::start_other_shard() {
@@ -700,18 +726,63 @@ fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
 
     // Perform space allocation on shard 0
     // If we're on shard 0, do it directly; otherwise delegate via invoke_on
-    reservation_metadata metadata{};
+    ss::foreign_ptr<std::unique_ptr<reservation_metadata>> metadata_ptr;
     if (ss::this_shard_id() == ss::shard_id{0}) {
         // We're on shard 0, allocate space directly
-        metadata = co_await do_reserve_space(bytes, objects);
+        metadata_ptr = co_await do_reserve_space(bytes, objects);
     } else {
         // We're on another shard, delegate to shard 0 using invoke_on
-        metadata = co_await container().invoke_on(
+        metadata_ptr = co_await container().invoke_on(
           ss::shard_id{0},
-          [bytes,
-           objects](fifo_cache& cache) -> ss::future<reservation_metadata> {
+          [bytes, objects](fifo_cache& cache)
+            -> ss::future<
+              ss::foreign_ptr<std::unique_ptr<reservation_metadata>>> {
               return cache.do_reserve_space(bytes, objects);
           });
+    }
+
+    // Extract metadata from foreign_ptr
+    auto& metadata = *metadata_ptr;
+
+    // If a new chunk was rolled on shard 0, we need to create it as
+    // secondary on this shard (only on non-zero shards)
+    if (
+      ss::this_shard_id() != ss::shard_id{0}
+      && metadata.new_chunk.has_value()) {
+        auto& new_chunk_meta = *metadata.new_chunk;
+        vlog(
+          log.info,
+          "fifo_cache::reserve_space: shard {} creating secondary chunk "
+          "chunk_id={}, file={}",
+          ss::this_shard_id(),
+          new_chunk_meta.chunk_id,
+          new_chunk_meta.file_path.string());
+
+        // Open the chunk file as secondary (read-only access to shared file)
+        auto file = co_await ss::open_file_dma(
+          new_chunk_meta.file_path.string(), ss::open_flags::rw);
+        auto file_size = co_await file.size();
+
+        auto chunk = std::make_unique<fifo_chunk>(
+          std::move(file), fifo_chunk::status_t::secondary, file_size);
+
+        // Install the index from shard 0
+        chunk->install_index(new_chunk_meta.serialized_index.copy());
+
+        // Add to chunks list
+        _chunks.push_back(
+          chunk_info{
+            .chunk_id = new_chunk_meta.chunk_id,
+            .chunk = std::move(chunk),
+            .file_path = new_chunk_meta.file_path,
+          });
+
+        vlog(
+          log.debug,
+          "fifo_cache::reserve_space: shard {} created secondary chunk "
+          "chunk_id={}",
+          ss::this_shard_id(),
+          new_chunk_meta.chunk_id);
     }
 
     // Create reservation guard with the slot_size as reserved_bytes

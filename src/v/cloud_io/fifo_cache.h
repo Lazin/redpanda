@@ -164,13 +164,17 @@ private:
 
     /// Perform the actual space reservation on shard 0
     /// Returns reservation metadata needed to construct reservation guard
+    /// Wrapped in foreign_ptr for safe cross-shard transfer
     struct reservation_metadata {
         uint64_t chunk_id;
         uint64_t offset;
         uint64_t slot_size_bytes;
         uint64_t payload_size;
+        // Optional: if a new chunk was rolled, this contains its metadata
+        std::optional<chunk_metadata> new_chunk;
     };
-    ss::future<reservation_metadata>
+    using reservation_metadata_ptr = std::unique_ptr<reservation_metadata>;
+    ss::future<ss::foreign_ptr<reservation_metadata_ptr>>
     do_reserve_space(uint64_t bytes, size_t objects);
 
     std::filesystem::path _cache_dir;
