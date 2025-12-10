@@ -24,6 +24,8 @@
 #include <exception>
 #include <regex>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cloud_io {
 
@@ -251,6 +253,15 @@ ss::future<> fifo_cache::start_shard_zero() {
 ss::future<> fifo_cache::stop() {
     vlog(log.info, "fifo_cache stopping: closing {} chunks", _chunks.size());
 
+    // Cancel periodic reconciliation timer if running
+    if (_reconciliation_timer.armed()) {
+        _reconciliation_timer.cancel();
+        vlog(
+          log.debug,
+          "fifo_cache shard {}: cancelled periodic reconciliation timer",
+          ss::this_shard_id());
+    }
+
     for (auto& chunk_info : _chunks) {
         co_await chunk_info.chunk->stop();
         vlog(log.debug, "fifo_cache: stopped chunk_id={}", chunk_info.chunk_id);
@@ -310,8 +321,10 @@ fifo_cache::get_reconciled_chunks() {
     co_return metadata;
 }
 
-ss::future<>
-fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
+ss::future<> fifo_cache::write_chunk_index(
+  uint64_t chunk_id,
+  const ss::sstring& key_str,
+  std::optional<iobuf> serialized_index) {
     require_zero_shard();
     auto chunk_it = std::ranges::lower_bound(
       _chunks,
@@ -330,6 +343,12 @@ fifo_cache::write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str) {
     auto* target_chunk = chunk_it->chunk.get();
     auto index_path = chunk_it->file_path;
     index_path.replace_extension(".index");
+
+    // If serialized_index is provided, install it first
+    // This happens when a secondary chunk (on another shard) made updates
+    if (serialized_index.has_value()) {
+        target_chunk->install_index(std::move(*serialized_index));
+    }
 
     auto index_buf = target_chunk->serialize_index();
 
@@ -501,6 +520,180 @@ ss::future<> fifo_cache::start_other_shard() {
       _current_cache_size,
       _current_cache_objects);
 
+    // Start periodic reconciliation timer for non-zero shards
+    if (ss::this_shard_id() != ss::shard_id{0}) {
+        _reconciliation_timer.set_callback([this] {
+            // Run reconciliation in background, discarding the result
+            // Errors are logged inside periodic_reconciliation()
+            (void)periodic_reconciliation().handle_exception([](
+                                                               std::
+                                                                 exception_ptr
+                                                                   e) {
+                vlog(
+                  log.warn,
+                  "fifo_cache shard {}: periodic reconciliation exception: {}",
+                  ss::this_shard_id(),
+                  e);
+            });
+        });
+        _reconciliation_timer.arm_periodic(reconciliation_interval);
+        vlog(
+          log.debug,
+          "fifo_cache shard {}: started periodic reconciliation timer",
+          ss::this_shard_id());
+    }
+
+    co_return;
+}
+
+ss::future<> fifo_cache::periodic_reconciliation() {
+    // This method runs periodically on non-zero shards to sync with shard 0
+    // It ensures eventual consistency of chunk list and indexes
+
+    vassert(
+      ss::this_shard_id() != ss::shard_id{0},
+      "periodic_reconciliation should only run on non-zero shards");
+
+    vlog(
+      log.trace,
+      "fifo_cache shard {}: periodic reconciliation starting",
+      ss::this_shard_id());
+
+    try {
+        // Get the latest chunk metadata from shard 0
+        auto chunk_list_ptr = co_await container().invoke_on(
+          ss::shard_id{0},
+          [](fifo_cache& cache)
+            -> ss::future<ss::foreign_ptr<reconciled_chunk_metadata_ptr>> {
+              return cache.do_get_reconciled_chunks();
+          });
+
+        // Acquire mutex to protect chunk modifications
+        auto units = co_await _chunks_mutex.get_units();
+
+        // Build a map of current chunks by chunk_id for efficient lookup
+        std::unordered_map<uint64_t, size_t> current_chunks;
+        for (size_t i = 0; i < _chunks.size(); ++i) {
+            current_chunks[_chunks[i].chunk_id] = i;
+        }
+
+        // Process chunks from shard 0
+        for (const auto& metadata : chunk_list_ptr->chunks) {
+            auto it = current_chunks.find(metadata.chunk_id);
+
+            if (it == current_chunks.end()) {
+                // New chunk that we don't have yet - create it
+                vlog(
+                  log.info,
+                  "fifo_cache shard {}: reconciliation found new chunk_id={}",
+                  ss::this_shard_id(),
+                  metadata.chunk_id);
+
+                auto file = co_await ss::open_file_dma(
+                  metadata.file_path.string(), ss::open_flags::rw);
+                auto file_size = co_await file.size();
+
+                auto chunk = std::make_unique<fifo_chunk>(
+                  std::move(file), fifo_chunk::status_t::secondary, file_size);
+                chunk->install_index(metadata.serialized_index.copy());
+
+                auto usage = chunk->usage_bytes();
+                auto num_keys = chunk->get_index_entries().size();
+                _current_cache_size += usage;
+                _current_cache_objects += num_keys;
+
+                _chunks.push_back(
+                  chunk_info{
+                    .chunk_id = metadata.chunk_id,
+                    .chunk = std::move(chunk),
+                    .file_path = metadata.file_path,
+                  });
+            } else {
+                // Existing chunk - update its index if it changed
+                auto& chunk_info = _chunks[it->second];
+
+                // Update the index (this handles both new entries and
+                // completion status)
+                auto old_usage = chunk_info.chunk->usage_bytes();
+                auto old_num_keys
+                  = chunk_info.chunk->get_index_entries().size();
+
+                chunk_info.chunk->install_index(
+                  metadata.serialized_index.copy());
+
+                auto new_usage = chunk_info.chunk->usage_bytes();
+                auto new_num_keys
+                  = chunk_info.chunk->get_index_entries().size();
+
+                // Update accounting
+                _current_cache_size = _current_cache_size - old_usage
+                                      + new_usage;
+                _current_cache_objects = _current_cache_objects - old_num_keys
+                                         + new_num_keys;
+
+                if (old_num_keys != new_num_keys) {
+                    vlog(
+                      log.debug,
+                      "fifo_cache shard {}: reconciliation updated "
+                      "chunk_id={}, "
+                      "keys: {} -> {}",
+                      ss::this_shard_id(),
+                      metadata.chunk_id,
+                      old_num_keys,
+                      new_num_keys);
+                }
+            }
+        }
+
+        // Remove chunks that shard 0 no longer has
+        std::unordered_set<uint64_t> shard0_chunks;
+        for (const auto& metadata : chunk_list_ptr->chunks) {
+            shard0_chunks.insert(metadata.chunk_id);
+        }
+
+        // Build a new chunk list without evicted chunks
+        chunked_vector<chunk_info> updated_chunks;
+        for (auto& chunk_info : _chunks) {
+            if (
+              shard0_chunks.find(chunk_info.chunk_id) != shard0_chunks.end()) {
+                // Keep this chunk
+                updated_chunks.push_back(std::move(chunk_info));
+            } else {
+                // This chunk was evicted on shard 0
+                vlog(
+                  log.info,
+                  "fifo_cache shard {}: reconciliation removing evicted "
+                  "chunk_id={}",
+                  ss::this_shard_id(),
+                  chunk_info.chunk_id);
+
+                auto usage = chunk_info.chunk->usage_bytes();
+                auto num_keys = chunk_info.chunk->get_index_entries().size();
+                _current_cache_size -= usage;
+                _current_cache_objects -= num_keys;
+
+                co_await chunk_info.chunk->stop();
+            }
+        }
+        _chunks = std::move(updated_chunks);
+
+        vlog(
+          log.trace,
+          "fifo_cache shard {}: periodic reconciliation completed, "
+          "chunks={}, size={}, objects={}",
+          ss::this_shard_id(),
+          _chunks.size(),
+          _current_cache_size,
+          _current_cache_objects);
+
+    } catch (const std::exception& e) {
+        vlog(
+          log.warn,
+          "fifo_cache shard {}: periodic reconciliation failed: {}",
+          ss::this_shard_id(),
+          e.what());
+    }
+
     co_return;
 }
 
@@ -609,11 +802,15 @@ ss::future<> fifo_cache::put(
         // We're on shard 0, update index directly
         co_await write_chunk_index(chunk_id, key_str);
     } else {
-        // We're on another shard, delegate to shard 0 using invoke_on
+        // We're on another shard, serialize the index and send it to shard 0
+        // This ensures shard 0's primary chunk has the updated index
+        auto serialized_index = target_chunk->serialize_index();
         co_await container().invoke_on(
           ss::shard_id{0},
-          [chunk_id, key_str](fifo_cache& cache) -> ss::future<> {
-              return cache.write_chunk_index(chunk_id, key_str);
+          [chunk_id, key_str, serialized_index = std::move(serialized_index)](
+            fifo_cache& cache) mutable -> ss::future<> {
+              return cache.write_chunk_index(
+                chunk_id, key_str, std::move(serialized_index));
           });
     }
 

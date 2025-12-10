@@ -157,10 +157,17 @@ private:
     /// Start method for non-zero shards - gets chunk info from shard 0
     ss::future<> start_other_shard();
 
+    /// Periodic reconciliation callback for non-zero shards
+    /// Syncs chunk list and indexes with shard 0
+    ss::future<> periodic_reconciliation();
+
     /// Write the index for a chunk to disk
     /// Should only be called on shard 0 (where primary chunks live)
-    ss::future<>
-    write_chunk_index(uint64_t chunk_id, const ss::sstring& key_str);
+    /// If serialized_index is provided, installs it before writing
+    ss::future<> write_chunk_index(
+      uint64_t chunk_id,
+      const ss::sstring& key_str,
+      std::optional<iobuf> serialized_index = std::nullopt);
 
     /// Perform the actual space reservation on shard 0
     /// Returns reservation metadata needed to construct reservation guard
@@ -192,6 +199,13 @@ private:
     /// reconciliation Other shards wait on this before requesting chunk
     /// metadata
     ssx::event _reconciliation_barrier{"fifo_cache/reconciliation_complete"};
+
+    /// Periodic reconciliation timer for non-zero shards
+    /// Syncs chunk list and indexes with shard 0
+    ss::timer<ss::lowres_clock> _reconciliation_timer;
+
+    /// Reconciliation interval (5 seconds by default)
+    static constexpr std::chrono::seconds reconciliation_interval{5};
 
     /// Current bytes used in the cache
     uint64_t _current_cache_size{0};

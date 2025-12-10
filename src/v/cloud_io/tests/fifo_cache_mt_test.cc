@@ -157,3 +157,174 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_empty_directory_multi_shard) {
 
     sharded_cache.stop().get();
 }
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_write_before_start_read_all_shards) {
+    // Test: Write data before sharded service starts, verify all shards can
+    // read This tests the startup reconciliation mechanism
+
+    temporary_dir tmp_dir("fifo_cache_mt_test");
+    auto cache_dir = tmp_dir.get_path();
+
+    const fifo_cache_config config{
+      .cache_size = 10_MiB,
+      .chunk_size = 1_MiB,
+      .max_objects = 1000,
+    };
+
+    // Phase 1: Write data with single-shard cache
+    const std::string test_key = "pre_start_key";
+    const size_t data_size = 256_KiB;
+    const std::string test_data(data_size, 'X');
+
+    {
+        fifo_cache cache(cache_dir, config);
+        cache.start().get();
+
+        auto make_stream = [](const std::string& data) {
+            iobuf buf;
+            buf.append(data.data(), data.size());
+            return make_iobuf_input_stream(std::move(buf));
+        };
+
+        auto reservation = cache.reserve_space(test_data.size(), 1).get();
+        auto stream = make_stream(test_data);
+        cache.put(test_key, stream, reservation).get();
+
+        cache.stop().get();
+    }
+
+    // Phase 2: Start sharded service and verify all shards can read
+    ss::sharded<fifo_cache> sharded_cache;
+    sharded_cache.start(cache_dir, config).get();
+    sharded_cache.invoke_on_all(&fifo_cache::start).get();
+
+    // Verify all shards can read the data
+    auto results
+      = sharded_cache
+          .map([test_key, test_data](fifo_cache& cache) -> ss::future<bool> {
+              // Check if cached
+              auto status = co_await cache.is_cached(test_key);
+              if (status != cache_element_status::available) {
+                  co_return false;
+              }
+
+              // Read the data
+              auto stream_opt = co_await cache.get_stream(test_key);
+              if (!stream_opt.has_value()) {
+                  co_return false;
+              }
+
+              auto& stream = stream_opt->body;
+              auto buf = co_await read_iobuf_exactly(stream, stream_opt->size);
+              co_await stream.close();
+
+              // Convert to string for verification
+              std::string read_data;
+              for (const auto& frag : buf) {
+                  read_data.append(frag.get(), frag.size());
+              }
+
+              co_return read_data == test_data;
+          })
+          .get();
+
+    // All shards should successfully read the data
+    for (const auto& success : results) {
+        BOOST_CHECK(success);
+    }
+
+    sharded_cache.stop().get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_fifo_cache_cross_shard_reserve_and_write) {
+    // Test: Reserve space on shard 1 (triggers cross-shard RPC to shard 0)
+    // This verifies that secondary chunks are created when chunk rolling occurs
+
+    if (ss::smp::count < 2) {
+        // Skip test if we don't have at least 2 shards
+        return;
+    }
+
+    temporary_dir tmp_dir("fifo_cache_mt_test");
+    auto cache_dir = tmp_dir.get_path();
+
+    const fifo_cache_config config{
+      .cache_size = 10_MiB,
+      .chunk_size = 1_MiB,
+      .max_objects = 1000,
+    };
+
+    ss::sharded<fifo_cache> sharded_cache;
+    sharded_cache.start(cache_dir, config).get();
+    sharded_cache.invoke_on_all(&fifo_cache::start).get();
+
+    // Phase 1: Write data on shard 1
+    // This triggers cross-shard RPC to shard 0 for space reservation
+    // If a new chunk is rolled, shard 1 will receive metadata and create
+    // secondary chunk
+    const std::string test_key = "cross_shard_key_1";
+    const size_t data_size = 256_KiB;
+    const std::string test_data(data_size, 'Y');
+
+    sharded_cache
+      .invoke_on(
+        ss::shard_id{1},
+        [test_key, test_data](fifo_cache& cache) -> ss::future<> {
+            auto make_stream = [](const std::string& data) {
+                iobuf buf;
+                buf.append(data.data(), data.size());
+                return make_iobuf_input_stream(std::move(buf));
+            };
+
+            // This triggers cross-shard RPC to shard 0 for reservation
+            auto reservation = co_await cache.reserve_space(
+              test_data.size(), 1);
+            auto stream = make_stream(test_data);
+            co_await cache.put(test_key, stream, reservation);
+        })
+      .get();
+
+    // Phase 2: Verify both shards have at least one chunk
+    auto chunk_counts = sharded_cache
+                          .map([](fifo_cache& cache) {
+                              size_t count = 0;
+                              for (auto _ : cache.get_chunk_file_paths()) {
+                                  ++count;
+                              }
+                              return count;
+                          })
+                          .get();
+
+    // Both shards should have the same chunk(s)
+    BOOST_REQUIRE_GT(chunk_counts[0], 0);
+    for (size_t i = 1; i < chunk_counts.size(); ++i) {
+        BOOST_CHECK_EQUAL(chunk_counts[i], chunk_counts[0]);
+    }
+
+    // Phase 3: Verify all shards can see the written data
+    // Note: Only the shard that wrote the data (and shard 0 which owns the
+    // primary chunk) will have the key in their index. Other shards won't have
+    // the updated index until they enumerate the chunks again or receive index
+    // updates. For now, we just verify shard 0 and shard 1 can find it.
+    auto shard0_status = sharded_cache
+                           .invoke_on(
+                             ss::shard_id{0},
+                             [test_key](fifo_cache& cache) {
+                                 return cache.is_cached(test_key);
+                             })
+                           .get();
+
+    auto shard1_status = sharded_cache
+                           .invoke_on(
+                             ss::shard_id{1},
+                             [test_key](fifo_cache& cache) {
+                                 return cache.is_cached(test_key);
+                             })
+                           .get();
+
+    // Both shards should be able to find the data
+    BOOST_CHECK_EQUAL(shard0_status, cache_element_status::available);
+    BOOST_CHECK_EQUAL(shard1_status, cache_element_status::available);
+
+    sharded_cache.stop().get();
+}
