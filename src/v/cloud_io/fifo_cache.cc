@@ -518,6 +518,7 @@ ss::future<> fifo_cache::put(
   basic_space_reservation_guard<ss::lowres_clock>& reservation,
   size_t write_buffer_size,
   unsigned int write_behind) {
+    // NOTE: runs on any shard
     // NOTE: the reservation could be created on another shard.
     // Convert path to sstring for fifo_chunk API
     ss::sstring key_str = key.string();
@@ -662,6 +663,7 @@ fifo_cache::scan_keys(std::optional<std::filesystem::path> prefix) const {
 
 ss::future<cache_element_status>
 fifo_cache::is_cached(const std::filesystem::path& key) {
+    // NOTE: any shard
     // NOTE: is cached always uses the shard local index.
     // In case of the conflict we will rewrite the cache entry
     // which is fine given that the cache entries are immutable.
@@ -689,6 +691,7 @@ fifo_cache::is_cached(const std::filesystem::path& key) {
 
 ss::future<basic_space_reservation_guard<ss::lowres_clock>>
 fifo_cache::reserve_space(uint64_t bytes, size_t objects) {
+    // NOTE: runs on any shard
     vlog(
       log.debug,
       "fifo_cache::reserve_space: requesting bytes={}, objects={}",
@@ -729,6 +732,8 @@ void fifo_cache::reserve_space_release(
   std::optional<uint64_t> /*id*/,
   std::optional<uint64_t> /*offset*/,
   std::optional<uint64_t> /*payload_size*/) {
+    // NOTE: runs on any shard
+
     // There is no way to reclaim reserved space at the moment.
     // The space is reserved using the index. If the put operation
     // fails this method is reserved but if any other reservation
@@ -751,6 +756,7 @@ void fifo_cache::reserve_space_release(
 }
 
 uint64_t fifo_cache::calculate_disk_usage() const {
+    require_zero_shard();
     uint64_t total = _chunks.size() * _chunk_size;
     vlog(
       log.debug,
@@ -816,6 +822,7 @@ ss::future<bool> fifo_cache::evict_chunks(uint64_t required_space) {
 }
 
 ss::future<> fifo_cache::remove_oldest_chunk() {
+    require_zero_shard();
     if (_chunks.empty()) {
         vlog(log.warn, "fifo_cache::remove_oldest_chunk: no chunks to remove");
         co_return;
@@ -836,6 +843,10 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
 
     // Stop the chunk
     co_await oldest.chunk->stop();
+
+    // TODO: use monotonicity of file names to delete
+    // junk that could be stuck in the cache directory
+    // because of crashes etc.
 
     // Delete chunk file
     try {
@@ -893,6 +904,10 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
 }
 
 ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
+    // The chunk is rolled when there is not enough space.
+    // This is always done on shard zero.
+    require_zero_shard();
+
     // Acquire mutex to protect chunk modifications
     auto units = co_await _chunks_mutex.get_units();
 
@@ -946,26 +961,14 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
               last_chunk_info.chunk_id);
 
             // Persist the complete flag by writing the index to disk
-            auto index_path = last_chunk_info.file_path;
-            index_path.replace_extension(".index");
-            auto index_buf = last_chunk_info.chunk->serialize_index();
-
             vlog(
               log.debug,
-              "fifo_cache: persisting complete=true for chunk_id={}, writing "
-              "index to {}",
-              last_chunk_info.chunk_id,
-              index_path.string());
+              "fifo_cache: persisting complete=true for chunk_id={}",
+              last_chunk_info.chunk_id);
 
-            co_await ss::recursive_touch_directory(_cache_dir.string());
-            auto index_file = co_await ss::open_file_dma(
-              index_path.string(),
-              ss::open_flags::wo | ss::open_flags::create
-                | ss::open_flags::truncate);
-            auto out = co_await ss::make_file_output_stream(index_file);
-            co_await write_iobuf_to_output_stream(std::move(index_buf), out);
-            co_await out.flush();
-            co_await out.close();
+            co_await write_chunk_index(
+              last_chunk_info.chunk_id,
+              fmt::format("chunk_{}", last_chunk_info.chunk_id));
         }
 
         // Need to create a new chunk
