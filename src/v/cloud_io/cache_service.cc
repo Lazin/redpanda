@@ -1429,14 +1429,36 @@ void cache::reserve_space_release(
       wrote_objects);
 
     if (ss::this_shard_id() == ss::shard_id{0}) {
-        do_reserve_space_release(bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size);
+        do_reserve_space_release(
+          bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size);
     } else {
         ssx::spawn_with_gate(
-          _gate, [this, bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size]() {
+          _gate,
+          [this,
+           bytes,
+           objects,
+           wrote_bytes,
+           wrote_objects,
+           id,
+           offset,
+           payload_size]() {
               return container().invoke_on(
-                0, [bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size](cache& c) {
+                0,
+                [bytes,
+                 objects,
+                 wrote_bytes,
+                 wrote_objects,
+                 id,
+                 offset,
+                 payload_size](cache& c) {
                     return c.do_reserve_space_release(
-                      bytes, objects, wrote_bytes, wrote_objects, id, offset, payload_size);
+                      bytes,
+                      objects,
+                      wrote_bytes,
+                      wrote_objects,
+                      id,
+                      offset,
+                      payload_size);
                 });
           });
     }

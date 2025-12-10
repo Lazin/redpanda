@@ -903,6 +903,30 @@ ss::future<> fifo_cache::remove_oldest_chunk() {
     co_return;
 }
 
+ss::future<ss::file> fifo_cache::allocate_chunk_file(uint64_t chunk_id) {
+    require_zero_shard();
+
+    auto file_path = _cache_dir / fmt::format("cache_{}.chunk", chunk_id);
+
+    vlog(
+      log.info,
+      "fifo_cache: allocating chunk file: {}, size={}",
+      file_path.string(),
+      _chunk_size);
+
+    co_await ss::recursive_touch_directory(_cache_dir.string());
+
+    auto file = co_await ss::open_file_dma(
+      file_path.string(),
+      ss::open_flags::rw | ss::open_flags::create | ss::open_flags::truncate);
+
+    co_await file.allocate(0, _chunk_size);
+
+    vlog(log.debug, "fifo_cache: allocated chunk file: {}", file_path.string());
+
+    co_return file;
+}
+
 ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
     // The chunk is rolled when there is not enough space.
     // This is always done on shard zero.
@@ -989,20 +1013,9 @@ ss::future<fifo_chunk*> fifo_cache::get_or_roll_chunk() {
             chunk_id = _chunks.back().chunk_id + 1;
         }
 
+        // Allocate the chunk file on disk
+        auto file = co_await allocate_chunk_file(chunk_id);
         auto file_path = _cache_dir / fmt::format("cache_{}.chunk", chunk_id);
-
-        vlog(
-          log.info,
-          "fifo_cache: creating new chunk file: {}, size={}",
-          file_path.string(),
-          _chunk_size);
-
-        // Allocate the disk space
-        auto file = co_await ss::open_file_dma(
-          file_path.string(),
-          ss::open_flags::rw | ss::open_flags::create
-            | ss::open_flags::truncate);
-        co_await file.allocate(0, _chunk_size);
 
         auto chunk = std::make_unique<fifo_chunk>(
           std::move(file), fifo_chunk::status_t::primary, _chunk_size);

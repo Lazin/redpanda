@@ -534,16 +534,28 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_persistence) {
 
     // Store keys in non-alphabetical order for testing
     std::vector<std::string> keys_to_write = {
-      "zebra", "apple", "mango", "banana", "cherry",
-      "date", "fig", "grape", "kiwi", "lemon",
-      "orange", "peach", "quince", "raspberry", "strawberry"};
+      "zebra",
+      "apple",
+      "mango",
+      "banana",
+      "cherry",
+      "date",
+      "fig",
+      "grape",
+      "kiwi",
+      "lemon",
+      "orange",
+      "peach",
+      "quince",
+      "raspberry",
+      "strawberry"};
 
     std::map<std::string, std::string> test_data;
 
     // Phase 1: Write data to cache
     {
         fifo_cache cache(
-      cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
+          cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
         cache.start().get();
 
         auto make_stream = [](const std::string& data) {
@@ -598,7 +610,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_persistence) {
     // Phase 2: Reload cache and verify data persisted
     {
         fifo_cache cache(
-      cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
+          cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
         cache.start().get();
 
         // Verify chunks were loaded
@@ -653,7 +665,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_reserve_space) {
     auto reservation = cache.reserve_space(reserve_size, 1).get();
 
     // Verify reservation was created
-    // reserved_bytes() is the aligned slot size, payload_size() is the requested size
+    // reserved_bytes() is the aligned slot size, payload_size() is the
+    // requested size
     BOOST_CHECK_EQUAL(*reservation.payload_size(), reserve_size);
     BOOST_CHECK_EQUAL(reservation.reserved_objects(), 1);
     // The slot size should be aligned to 128 KiB
@@ -667,8 +680,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_reserve_space) {
 
     cache.put("test_key", stream, reservation).get();
 
-    // The reservation guard will automatically release when it goes out of scope
-    // and update the cache statistics
+    // The reservation guard will automatically release when it goes out of
+    // scope and update the cache statistics
 
     cache.stop().get();
 }
@@ -900,8 +913,16 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_multi_chunk_scan_keys) {
 
     // Add keys in non-alphabetical order across multiple chunks
     std::vector<std::string> keys_to_write = {
-      "zebra", "apple", "mango", "banana", "cherry",
-      "date", "fig", "grape", "kiwi", "lemon"};
+      "zebra",
+      "apple",
+      "mango",
+      "banana",
+      "cherry",
+      "date",
+      "fig",
+      "grape",
+      "kiwi",
+      "lemon"};
     const size_t entry_size = 80_KiB;
 
     for (const auto& key : keys_to_write) {
@@ -948,7 +969,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_multi_chunk_persistence) {
     // Phase 1: Write data across multiple chunks
     {
         fifo_cache cache(
-      cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
+          cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
         cache.start().get();
 
         for (int i = 0; i < num_entries; ++i) {
@@ -976,7 +997,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_multi_chunk_persistence) {
     // Phase 2: Reload and verify all data
     {
         fifo_cache cache(
-      cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
+          cache_dir, {.cache_size = 20_GiB, .chunk_size = small_chunk_size});
         cache.start().get();
 
         // Verify chunks were loaded
@@ -1076,7 +1097,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_eviction_on_start) {
     {
         fifo_cache cache(
           cache_dir,
-          {.cache_size = 20_GiB, .chunk_size = chunk_size}); // Large cache to allow 4 chunks
+          {.cache_size = 20_GiB,
+           .chunk_size = chunk_size}); // Large cache to allow 4 chunks
         cache.start().get();
 
         for (int chunk_idx = 0; chunk_idx < 4; ++chunk_idx) {
@@ -1101,7 +1123,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_eviction_on_start) {
         cache.stop().get();
     }
 
-    // Phase 2: Reload with smaller cache_size - should evict oldest chunks on start
+    // Phase 2: Reload with smaller cache_size - should evict oldest chunks on
+    // start
     {
         fifo_cache cache(
           cache_dir, {.cache_size = cache_size, .chunk_size = chunk_size});
@@ -1137,7 +1160,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_roll_on_object_limit) {
     auto cache_dir = tmp_dir.get_path();
     const uint64_t chunk_size = 10_MiB;
     const uint64_t cache_size = 100_MiB;
-    const uint64_t max_objects = 30; // With 10 chunks expected, max 3 objects per chunk
+    const uint64_t max_objects
+      = 30; // With 10 chunks expected, max 3 objects per chunk
 
     fifo_cache cache(
       cache_dir,
@@ -1208,8 +1232,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_concurrent_roll_invalidation) {
     const uint64_t cache_size = 2 * chunk_size; // Room for 2 chunks
 
     fifo_cache cache(
-      cache_dir,
-      {.cache_size = cache_size, .chunk_size = chunk_size});
+      cache_dir, {.cache_size = cache_size, .chunk_size = chunk_size});
     cache.start().get();
 
     // Fill the current chunk almost completely
@@ -1230,8 +1253,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_concurrent_roll_invalidation) {
     }
     BOOST_CHECK_EQUAL(chunk_count, 1);
 
-    // The chunk now has 896 KiB allocated (800 KiB rounds up to 896 KiB = 917504 bytes)
-    // There's only room for 128 KiB more
+    // The chunk now has 896 KiB allocated (800 KiB rounds up to 896 KiB =
+    // 917504 bytes) There's only room for 128 KiB more
 
     // Make first reservation - should fit in current chunk (128 KiB slot)
     const size_t small_entry_size = 100_KiB;
@@ -1260,7 +1283,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_concurrent_roll_invalidation) {
     }
     BOOST_CHECK_EQUAL(chunk_count, 2);
 
-    // Now try to use the second reservation (should work - it's for the new chunk)
+    // Now try to use the second reservation (should work - it's for the new
+    // chunk)
     std::string second_key = "second_key";
     std::string second_data(second_entry_size, 'S');
     iobuf buf_second;
@@ -1372,7 +1396,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_complete_flag_invariant) {
 
     // Add entries that will cause multiple chunk rolls
     const size_t entry_size = 200_KiB; // Will fill chunk and trigger roll
-    const int num_entries = 5; // Should create multiple chunks
+    const int num_entries = 5;         // Should create multiple chunks
 
     for (int i = 0; i < num_entries; ++i) {
         std::string key = fmt::format("key_{}", i);
@@ -1390,7 +1414,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_complete_flag_invariant) {
     }
     BOOST_CHECK_GT(chunk_count, 1);
 
-    // Verify the invariant: all chunks except the last should have complete=true
+    // Verify the invariant: all chunks except the last should have
+    // complete=true
     auto chunk_paths = cache.get_chunk_file_paths();
     std::vector<std::filesystem::path> paths;
     for (const auto& path : chunk_paths) {

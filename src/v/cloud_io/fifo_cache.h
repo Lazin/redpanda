@@ -147,6 +147,10 @@ private:
     /// Returns a pointer to the chunk that should be used for writing
     ss::future<fifo_chunk*> get_or_roll_chunk();
 
+    /// Allocate a new chunk file on disk
+    /// Returns the opened file handle
+    ss::future<ss::file> allocate_chunk_file(uint64_t chunk_id);
+
     /// Start method for shard 0 - enumerates directory and reconciles chunks
     ss::future<> start_shard_zero();
 

@@ -46,7 +46,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_cross_shard_consistency) {
             return make_iobuf_input_stream(std::move(buf));
         };
 
-        // Create data in multiple chunks (write 5 small objects to ensure multiple chunks)
+        // Create data in multiple chunks (write 5 small objects to ensure
+        // multiple chunks)
         for (int i = 0; i < 5; ++i) {
             std::string key = fmt::format("key_{}", i);
             size_t data_size = 250_KiB;
@@ -75,17 +76,19 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_cross_shard_consistency) {
         std::vector<std::string> chunk_paths;
     };
 
-    auto results = sharded_cache.map([](fifo_cache& cache) -> shard_info {
-        std::vector<std::string> paths;
-        for (const auto& path : cache.get_chunk_file_paths()) {
-            paths.push_back(path.string());
-        }
-        std::sort(paths.begin(), paths.end());
-        return shard_info{
-          .shard = ss::this_shard_id(),
-          .chunk_paths = std::move(paths),
-        };
-    }).get();
+    auto results = sharded_cache
+                     .map([](fifo_cache& cache) -> shard_info {
+                         std::vector<std::string> paths;
+                         for (const auto& path : cache.get_chunk_file_paths()) {
+                             paths.push_back(path.string());
+                         }
+                         std::sort(paths.begin(), paths.end());
+                         return shard_info{
+                           .shard = ss::this_shard_id(),
+                           .chunk_paths = std::move(paths),
+                         };
+                     })
+                     .get();
 
     // Verify all shards have the same chunk list
     BOOST_REQUIRE_GT(results.size(), 1); // At least 2 shards
@@ -96,9 +99,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_cross_shard_consistency) {
     for (size_t i = 1; i < results.size(); ++i) {
         const auto& shard_paths = results[i].chunk_paths;
 
-        BOOST_REQUIRE_EQUAL(
-          shard_paths.size(),
-          reference_paths.size());
+        BOOST_REQUIRE_EQUAL(shard_paths.size(), reference_paths.size());
 
         for (size_t j = 0; j < reference_paths.size(); ++j) {
             BOOST_CHECK_EQUAL(shard_paths[j], reference_paths[j]);
@@ -109,9 +110,11 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_cross_shard_consistency) {
     for (int i = 0; i < 5; ++i) {
         std::string key = fmt::format("key_{}", i);
 
-        auto statuses = sharded_cache.map([key](fifo_cache& cache) {
-            return cache.is_cached(key).get();
-        }).get();
+        auto statuses = sharded_cache
+                          .map([key](fifo_cache& cache) {
+                              return cache.is_cached(key).get();
+                          })
+                          .get();
 
         // All shards should report the key as available
         for (const auto& status : statuses) {
@@ -138,13 +141,15 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_cache_empty_directory_multi_shard) {
     sharded_cache.invoke_on_all(&fifo_cache::start).get();
 
     // All shards should have 0 chunks
-    auto results = sharded_cache.map([](fifo_cache& cache) {
-        size_t count = 0;
-        for (auto _ : cache.get_chunk_file_paths()) {
-            ++count;
-        }
-        return count;
-    }).get();
+    auto results = sharded_cache
+                     .map([](fifo_cache& cache) {
+                         size_t count = 0;
+                         for (auto _ : cache.get_chunk_file_paths()) {
+                             ++count;
+                         }
+                         return count;
+                     })
+                     .get();
 
     for (const auto& count : results) {
         BOOST_CHECK_EQUAL(count, 0);

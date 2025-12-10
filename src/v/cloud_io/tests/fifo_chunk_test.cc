@@ -142,8 +142,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_is_cached) {
     auto stream = make_stream(test_data);
     chunk.put("key1", *slot, 100, std::move(stream), 128_KiB, 4).get();
 
-    BOOST_CHECK_EQUAL(
-      chunk.is_cached("key1"), cache_element_status::available);
+    BOOST_CHECK_EQUAL(chunk.is_cached("key1"), cache_element_status::available);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_nonexistent) {
@@ -275,8 +274,7 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_basic) {
     chunk.put("key1", *slot, 1024, std::move(stream), 128_KiB, 4).get();
 
     // Key should be available (added to index after flush)
-    BOOST_CHECK_EQUAL(
-      chunk.is_cached("key1"), cache_element_status::available);
+    BOOST_CHECK_EQUAL(chunk.is_cached("key1"), cache_element_status::available);
 }
 
 SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_available) {
@@ -410,7 +408,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_put_roundtrip) {
     }
 
     auto stream = make_stream(pattern_data);
-    chunk.put("large_key", *slot, large_size, std::move(stream), 128_KiB, 4).get();
+    chunk.put("large_key", *slot, large_size, std::move(stream), 128_KiB, 4)
+      .get();
 
     // Read back and verify
     auto read_slot = chunk.find("large_key");
@@ -474,19 +473,27 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_get_keys_multiple_sorted) {
     // Add multiple keys in non-sorted order
     auto slot1 = chunk.prepare(100);
     BOOST_REQUIRE(slot1.has_value());
-    chunk.put("zebra", *slot1, 100, make_stream(ss::sstring(100, 'Z')), 128_KiB, 4).get();
+    chunk
+      .put("zebra", *slot1, 100, make_stream(ss::sstring(100, 'Z')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
     BOOST_REQUIRE(slot2.has_value());
-    chunk.put("alpha", *slot2, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("alpha", *slot2, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
     BOOST_REQUIRE(slot3.has_value());
-    chunk.put("delta", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
+    chunk
+      .put("delta", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4)
+      .get();
 
     auto slot4 = chunk.prepare(100);
     BOOST_REQUIRE(slot4.has_value());
-    chunk.put("beta", *slot4, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put("beta", *slot4, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     // Get keys - should be in lexicographical order
     auto keys = chunk.get_keys();
@@ -526,16 +533,26 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_exact_match) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto slot4 = chunk.prepare(100);
-    chunk.put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
+    chunk
+      .put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4)
+      .get();
 
     // Lower bound with exact match
     auto keys = chunk.lower_bound("banana");
@@ -561,16 +578,26 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_between_keys) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto slot4 = chunk.prepare(100);
-    chunk.put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
+    chunk
+      .put("date", *slot4, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4)
+      .get();
 
     auto keys = chunk.lower_bound("blueberry");
     std::vector<ss::sstring> key_vec;
@@ -595,13 +622,21 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_before_all) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("banana", *slot1, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot1, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("cherry", *slot2, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot2, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("date", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4).get();
+    chunk
+      .put("date", *slot3, 100, make_stream(ss::sstring(100, 'D')), 128_KiB, 4)
+      .get();
 
     auto keys = chunk.lower_bound("aaa");
     std::vector<ss::sstring> key_vec;
@@ -627,13 +662,21 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_after_all) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto keys = chunk.lower_bound("zzz");
     auto begin = keys.begin();
@@ -654,13 +697,21 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_first_key) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto keys = chunk.lower_bound("apple");
     std::vector<ss::sstring> key_vec;
@@ -686,13 +737,21 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_lower_bound_last_key) {
 
     // Add keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     auto slot3 = chunk.prepare(100);
-    chunk.put("cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "cherry", *slot3, 100, make_stream(ss::sstring(100, 'C')), 128_KiB, 4)
+      .get();
 
     auto keys = chunk.lower_bound("cherry");
     std::vector<ss::sstring> key_vec;
@@ -726,10 +785,15 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_not_found) {
 
     // Add some keys
     auto slot1 = chunk.prepare(100);
-    chunk.put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4).get();
+    chunk
+      .put("apple", *slot1, 100, make_stream(ss::sstring(100, 'A')), 128_KiB, 4)
+      .get();
 
     auto slot2 = chunk.prepare(100);
-    chunk.put("banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4).get();
+    chunk
+      .put(
+        "banana", *slot2, 100, make_stream(ss::sstring(100, 'B')), 128_KiB, 4)
+      .get();
 
     // Find non-existent key
     auto slot = chunk.find("cherry");
@@ -750,7 +814,8 @@ SEASTAR_THREAD_TEST_CASE(test_fifo_chunk_find_after_put_no_mark_clean) {
     BOOST_REQUIRE(write_slot.has_value());
 
     ss::sstring test_data(100, 'A');
-    chunk.put("apple", *write_slot, 100, make_stream(test_data), 128_KiB, 4).get();
+    chunk.put("apple", *write_slot, 100, make_stream(test_data), 128_KiB, 4)
+      .get();
 
     // Find should return the slot (entry is already in index)
     auto slot = chunk.find("apple");

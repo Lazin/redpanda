@@ -48,8 +48,7 @@ void fifo_chunk::require_secondary() {
       "chunk instance");
 }
 
-std::optional<fifo_chunk::write_slot>
-fifo_chunk::prepare(size_t payload_size) {
+std::optional<fifo_chunk::write_slot> fifo_chunk::prepare(size_t payload_size) {
     vlog(log.debug, "fifo_chunk::prepare: payload_size={}", payload_size);
     require_primary();
     auto to_allocate = ss::align_up(payload_size, min_slot_size);
@@ -108,8 +107,7 @@ ss::future<> fifo_chunk::put(
           "fifo_chunk::put failed: key={}, already cached (status={})",
           key,
           cached);
-        throw std::runtime_error(
-          fmt::format("Key {} is already cached", key));
+        throw std::runtime_error(fmt::format("Key {} is already cached", key));
     case cache_element_status::not_available:
         break;
     }

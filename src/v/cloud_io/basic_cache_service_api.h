@@ -105,13 +105,19 @@ public:
     void set_id(std::optional<uint64_t> id) noexcept { _id = id; }
 
     /// Set the optional offset
-    void set_offset(std::optional<uint64_t> offset) noexcept { _offset = offset; }
+    void set_offset(std::optional<uint64_t> offset) noexcept {
+        _offset = offset;
+    }
 
     /// Get the optional payload_size
-    std::optional<uint64_t> payload_size() const noexcept { return _payload_size; }
+    std::optional<uint64_t> payload_size() const noexcept {
+        return _payload_size;
+    }
 
     /// Set the optional payload_size
-    void set_payload_size(std::optional<uint64_t> payload_size) noexcept { _payload_size = payload_size; }
+    void set_payload_size(std::optional<uint64_t> payload_size) noexcept {
+        _payload_size = payload_size;
+    }
 
 private:
     basic_cache_service_api<Clock>& _cache;
