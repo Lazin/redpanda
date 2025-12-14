@@ -118,149 +118,24 @@ model::record_batch make_raft_data_batch(materialized_extent ext) {
     return batch;
 }
 
-ss::future<result<iobuf>> materialize_from_cache(
-  std::filesystem::path cache_file_name,
-  cloud_io::basic_cache_service_api<>* cache,
-  micro_probe* probe,
-  std::optional<cloud_storage_clients::http_byte_range> byte_range);
-
-ss::future<result<iobuf>> materialize_from_cloud_storage(
-  std::filesystem::path cache_file_name,
-  cloud_storage_clients::bucket_name bucket,
-  cloud_io::remote_api<>* api,
-  cloud_io::basic_cache_service_api<>* cache,
-  basic_retry_chain_node<>* rtc,
-  micro_probe* probe,
-  std::optional<cloud_storage_clients::http_byte_range> byte_range);
-
 ss::future<result<bool>> materialize(
   materialized_extent* ext,
   cloud_storage_clients::bucket_name bucket,
   cloud_io::remote_api<>* api,
-  cloud_io::basic_cache_service_api<>* cache,
+  cloud_io::basic_cache_service_api<>* /*cache*/,
   basic_retry_chain_node<>* rtc,
   micro_probe* probe) {
-    bool hydrated = false;
-    // This iobuf contains the record batch replaced by the placeholder. It
-    // might potentially contain data that belongs to other placeholder
-    // batches and in order to get the extent of the record batch
-    // placeholder we need to use byte offset and size.
-    iobuf L0_object_content;
-
-    // 2. download object from S3
+    // Download only the relevant byte range directly from cloud storage
+    // Skip cache reads and writes for materialization
     auto cache_file_name = std::filesystem::path(
       object_path_factory::level_zero_path(ext->meta.id));
-
-    std::optional<cloud_io::cache_element_status> status = std::nullopt;
-    basic_retry_chain_node<> is_cached_rtc(retry_strategy::backoff, rtc);
-    retry_permit rp = is_cached_rtc.retry();
-    while (rp.is_allowed && !status.has_value()) {
-        auto is_cached_result
-          = result_from_ready_future<errc::cache_read_error>(
-            co_await ss::coroutine::as_future(
-              cache->is_cached(cache_file_name)));
-
-        if (!is_cached_result.has_value()) {
-            co_return is_cached_result.error();
-        }
-
-        switch (is_cached_result.value()) {
-        case cloud_io::cache_element_status::available:
-        case cloud_io::cache_element_status::not_available:
-            status = is_cached_result.value();
-            break;
-        case cloud_io::cache_element_status::in_progress:
-            // Another fiber is trying to put value into the cache.
-            // Wait until the operation is completed but stay within the
-            // time budget.
-            if (rp.abort_source != nullptr) {
-                co_await ss::sleep_abortable(rp.delay, *rp.abort_source);
-            } else {
-                co_await ss::sleep(rp.delay);
-            }
-            rp = is_cached_rtc.retry();
-            continue;
-        }
-    }
-
-    if (!rp.is_allowed) {
-        co_return errc::timeout;
-    }
 
     // Create byte range from extent metadata
     cloud_storage_clients::http_byte_range byte_range{
       ext->meta.first_byte_offset(),
       ext->meta.first_byte_offset() + ext->meta.byte_range_size() - 1};
 
-    if (status.value() == cloud_io::cache_element_status::available) {
-        auto res = co_await materialize_from_cache(
-          cache_file_name, cache, probe, byte_range);
-        if (!res.has_value()) {
-            co_return res.error();
-        }
-        ext->object = std::move(res.value());
-    } else {
-        auto res = co_await materialize_from_cloud_storage(
-          cache_file_name, bucket, api, cache, rtc, probe, byte_range);
-        if (!res.has_value()) {
-            co_return res.error();
-        }
-        ext->object = std::move(res.value());
-    }
-    co_return hydrated;
-}
-
-ss::future<result<iobuf>> materialize_from_cache(
-  std::filesystem::path cache_file_name,
-  cloud_io::basic_cache_service_api<>* cache,
-  micro_probe* probe,
-  std::optional<cloud_storage_clients::http_byte_range> byte_range) {
-    iobuf result_buf;
-    probe->num_cache_reads++;
-    auto buffer_size = config::shard_local_cfg().storage_read_buffer_size();
-    auto read_ahead = config::shard_local_cfg().storage_read_readahead_count();
-    auto fut = co_await ss::coroutine::as_future(
-      cache->get_stream(cache_file_name, buffer_size, read_ahead));
-    auto sz_stream_result = result_from_ready_future<errc::cache_read_error>(
-      std::move(fut));
-    if (!sz_stream_result.has_value()) {
-        co_return sz_stream_result.error();
-    }
-    auto sz_stream = std::move(sz_stream_result.value());
-    if (!sz_stream.has_value()) {
-        co_return errc::cache_read_error;
-    }
-
-    // Skip to the byte range start if specified
-    size_t bytes_to_read = sz_stream->size;
-    if (byte_range.has_value()) {
-        auto [start, end] = byte_range.value();
-        // Skip to the start of the byte range
-        co_await sz_stream->body.skip(start);
-        // Calculate the number of bytes to read
-        bytes_to_read = end - start + 1;
-    }
-
-    auto target = make_iobuf_ref_output_stream(result_buf);
-    probe->cache_read_bytes += bytes_to_read;
-
-    // Read only the required number of bytes
-    auto temp_buf = co_await sz_stream->body.read_exactly(bytes_to_read);
-    result_buf.append(std::move(temp_buf));
-
-    co_await sz_stream->body.close();
-    co_return result_buf;
-}
-
-ss::future<result<iobuf>> materialize_from_cloud_storage(
-  std::filesystem::path cache_file_name,
-  cloud_storage_clients::bucket_name bucket,
-  cloud_io::remote_api<>* api,
-  cloud_io::basic_cache_service_api<>* cache,
-  basic_retry_chain_node<>* rtc,
-  micro_probe* probe,
-  std::optional<cloud_storage_clients::http_byte_range> byte_range) {
-    // Download only the relevant byte range from the object
+    // Download directly from cloud storage without cache
     iobuf payload;
 
     cloud_io::transfer_details transfer_details{
@@ -305,50 +180,8 @@ ss::future<result<iobuf>> materialize_from_cloud_storage(
         co_return conv(dl_result.value());
     }
 
-    auto buf_str = make_iobuf_input_stream(payload.copy());
-    // TODO: use circuit-breaker here, if the operation fails
-    // repeatedly it can be temporarily short-circuited to avoid
-    // burning cycles.
-    auto sr_guard = result_from_ready_future(
-      co_await ss::coroutine::as_future(
-        cache->reserve_space(payload.size_bytes(), 1)),
-      [](std::exception_ptr e) {
-          vlog(cd_log.error, "Failed to reserve space: {}", e);
-      });
-
-    // The failure to reserve space should only trigger an error
-    // if the cause of the error is a cluster shutdown. If the
-    // failure is caused by anything else we can still return
-    // data to the client. The effect of this is that the client
-    // will not retry the request and will not make things worse
-    // by increasing the load. And we do have data from the cloud
-    // storage at this point anyway.
-
-    if (sr_guard.has_value()) {
-        // TODO: use proper priority class
-        probe->num_cache_writes++;
-        auto put_future = co_await ss::coroutine::as_future(
-          cache->put(cache_file_name, buf_str, sr_guard.value()));
-
-        if (put_future.failed()) {
-            auto e = put_future.get_exception();
-            if (ssx::is_shutdown_exception(e)) {
-                co_return errc::shutting_down;
-            }
-            vlog(
-              cd_log.warn,
-              "Failed to put L0 object into the cache: {}. The error will not "
-              "be "
-              "propagated to the client but Redpanda may use more resources.",
-              e);
-        } else {
-            probe->cache_write_bytes += payload.size_bytes();
-        }
-    } else if (sr_guard.error() == errc::shutting_down) {
-        co_return errc::shutting_down;
-    }
-
-    co_return std::move(payload);
+    ext->object = std::move(payload);
+    co_return true; // Always returns true since we're downloading from cloud
 }
 
 } // namespace cloud_topics::l0

@@ -39,26 +39,16 @@ ss::future<result<chunked_vector<materialized_extent>>> materialize_sorted_run(
   cloud_io::basic_cache_service_api<>* cache,
   retry_chain_node* rtc,
   micro_probe* probe) {
-    absl::node_hash_map<object_id, iobuf> hydrated;
     chunked_vector<materialized_extent> extents;
     for (const auto& extent : query) {
         extents.push_back(materialized_extent{.meta = extent});
         auto& back = extents.back();
-        // reuse hydrated objects if possible
-        auto it = hydrated.find(back.meta.id);
-        if (it != hydrated.end()) {
-            auto& payload = it->second;
-            // TODO: check that id of the payload matches
-            back.object = payload.share(0, payload.size_bytes());
-        } else {
-            auto res = co_await materialize(
-              &back, bucket, api, cache, rtc, probe);
-            if (!res.has_value()) {
-                co_return res.error();
-            }
-            hydrated.insert(
-              std::make_pair(
-                back.meta.id, back.object.share(0, back.object.size_bytes())));
+        // Since we now download specific byte ranges instead of full objects,
+        // each extent must be materialized individually - we cannot reuse
+        // previously downloaded data
+        auto res = co_await materialize(&back, bucket, api, cache, rtc, probe);
+        if (!res.has_value()) {
+            co_return res.error();
         }
     }
     co_return std::move(extents);

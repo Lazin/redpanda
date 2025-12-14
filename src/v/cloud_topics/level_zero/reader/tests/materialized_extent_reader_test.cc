@@ -44,7 +44,8 @@ convert_placeholders(const chunked_vector<model::record_batch>& batches) {
 TEST_F_CORO(materialized_extent_fixture, full_scan_test) {
     const int num_batches = 10;
     co_await add_random_batches(num_batches);
-    produce_placeholders(true, 1);
+    produce_placeholders(
+      false, 1); // false = download from cloud (cache removed)
     auto underlying = convert_placeholders(make_underlying());
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
@@ -64,7 +65,8 @@ TEST_F_CORO(materialized_extent_fixture, full_scan_test) {
 ss::future<> test_aggregated_log_partial_scan(
   materialized_extent_fixture* fx, int num_batches, int begin, int end) {
     co_await fx->add_random_batches(num_batches);
-    fx->produce_placeholders(true, 1, {}, begin, end);
+    fx->produce_placeholders(
+      false, 1, {}, begin, end); // false = download from cloud
 
     // Copy batches that we expect to read
     model::offset base;

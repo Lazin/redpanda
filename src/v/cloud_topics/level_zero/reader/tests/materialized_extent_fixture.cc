@@ -45,7 +45,7 @@ ss::future<> materialized_extent_fixture::add_random_batches(int record_count) {
 }
 
 void materialized_extent_fixture::produce_placeholders(
-  bool use_cache,
+  bool /*use_cache*/,
   int group_by,
   std::queue<injected_failure> injected_failures,
   int begin,
@@ -156,144 +156,49 @@ void materialized_extent_fixture::produce_placeholders(
       uploads.size());
 
     for (auto&& kv : uploads) {
-        auto sz = kv.second.size_bytes();
         injected_failure failure = {};
         if (!injected_failures.empty()) {
             failure = injected_failures.back();
             injected_failures.pop();
         }
-        if (use_cache) {
-            // Simplified event flow:
-            // cache.is_cached() -> available
-            // cache.get() -> payload
 
-            switch (failure.is_cached) {
-            case injected_is_cached_failure::none:
-                cache.expect_is_cached(
-                  kv.first, cloud_io::cache_element_status::available);
-                break;
-            case injected_is_cached_failure::stall_then_ok:
-                cache.expect_is_cached(
-                  kv.first,
-                  std::vector<cloud_io::cache_element_status>{
-                    cloud_io::cache_element_status::in_progress,
-                    cloud_io::cache_element_status::available});
-                break;
-            case injected_is_cached_failure::noop:
-                // The code is supposed to timeout before even
-                // invoking any methods.
-                continue;
-            case injected_is_cached_failure::stall_then_fail:
-                throw std::runtime_error("Not implemented");
-            case injected_is_cached_failure::throw_error:
-                cache.expect_is_cached_throws(
-                  kv.first,
-                  std::make_exception_ptr(std::runtime_error("dummy")));
-                continue;
-            case injected_is_cached_failure::throw_shutdown:
-                cache.expect_is_cached_throws(
-                  kv.first,
-                  std::make_exception_ptr(ss::gate_closed_exception()));
-                continue;
-            };
-
-            cloud_io::cache_item_stream s{
-              .body = make_iobuf_input_stream(kv.second.copy()),
-              .size = sz,
-            };
-            switch (failure.cache_get) {
-            case injected_cache_get_failure::none:
-                cache.expect_get_stream(kv.first, std::move(s));
-                break;
-            case injected_cache_get_failure::return_error:
-                cache.expect_get_stream(kv.first, std::nullopt);
-                break;
-            case injected_cache_get_failure::throw_error:
-                cache.expect_get_stream_throws(
-                  kv.first,
-                  std::make_exception_ptr(std::runtime_error("dummy")));
-                break;
-            case injected_cache_get_failure::throw_shutdown:
-                cache.expect_get_stream_throws(
-                  kv.first,
-                  std::make_exception_ptr(ss::gate_closed_exception()));
-                break;
-            };
-        } else {
-            // Simplified event flow:
-            // cache.is_cached() -> not_available
-            // remote.download_stream() -> payload
-            // cache.reserve_space() -> guard
-            // cache.put(payload, guard)
-            cache.expect_is_cached(
-              kv.first, cloud_io::cache_element_status::not_available);
-            switch (failure.cloud_get) {
-            case injected_cloud_get_failure::none:
-                remote.expect_download_stream(
-                  cloud_storage_clients::object_key(kv.first),
-                  cloud_io::download_result::success,
-                  kv.second.copy());
-                break;
-            case injected_cloud_get_failure::return_failure:
-                remote.expect_download_stream(
-                  cloud_storage_clients::object_key(kv.first),
-                  cloud_io::download_result::failed,
-                  kv.second.copy());
-                continue;
-            case injected_cloud_get_failure::return_notfound:
-                remote.expect_download_stream(
-                  cloud_storage_clients::object_key(kv.first),
-                  cloud_io::download_result::notfound,
-                  kv.second.copy());
-                continue;
-            case injected_cloud_get_failure::return_timeout:
-                remote.expect_download_stream(
-                  cloud_storage_clients::object_key(kv.first),
-                  cloud_io::download_result::timedout,
-                  kv.second.copy());
-                continue;
-            case injected_cloud_get_failure::throw_shutdown:
-                remote.expect_download_stream_throw(
-                  cloud_storage_clients::object_key(kv.first),
-                  ss::abort_requested_exception());
-                continue;
-            case injected_cloud_get_failure::throw_error:
-                remote.expect_download_stream_throw(
-                  cloud_storage_clients::object_key(kv.first),
-                  std::runtime_error("boo"));
-                continue;
-            }
-            switch (failure.cache_rsv) {
-            case injected_cache_rsv_failure::none:
-                cache.expect_reserve_space(
-                  sz,
-                  1,
-                  cloud_io::basic_space_reservation_guard<ss::lowres_clock>(
-                    cache, 0, 0));
-                break;
-            case injected_cache_rsv_failure::throw_error:
-                cache.expect_reserve_space_throw(
-                  std::make_exception_ptr(std::runtime_error("boo")));
-                continue;
-            case injected_cache_rsv_failure::throw_shutdown:
-                cache.expect_reserve_space_throw(
-                  std::make_exception_ptr(ss::abort_requested_exception()));
-                continue;
-            }
-            switch (failure.cache_put) {
-            case injected_cache_put_failure::none:
-                cache.expect_put(kv.first);
-                break;
-            case injected_cache_put_failure::throw_error:
-                cache.expect_put(
-                  kv.first, std::make_exception_ptr(std::runtime_error("boo")));
-                break;
-            case injected_cache_put_failure::throw_shutdown:
-                cache.expect_put(
-                  kv.first,
-                  std::make_exception_ptr(ss::abort_requested_exception()));
-                break;
-            }
+        // Simplified event flow: download directly from cloud storage
+        // No cache involvement - all cache-related test paths removed
+        switch (failure.cloud_get) {
+        case injected_cloud_get_failure::none:
+            remote.expect_download_stream(
+              cloud_storage_clients::object_key(kv.first),
+              cloud_io::download_result::success,
+              kv.second.copy());
+            break;
+        case injected_cloud_get_failure::return_failure:
+            remote.expect_download_stream(
+              cloud_storage_clients::object_key(kv.first),
+              cloud_io::download_result::failed,
+              kv.second.copy());
+            continue;
+        case injected_cloud_get_failure::return_notfound:
+            remote.expect_download_stream(
+              cloud_storage_clients::object_key(kv.first),
+              cloud_io::download_result::notfound,
+              kv.second.copy());
+            continue;
+        case injected_cloud_get_failure::return_timeout:
+            remote.expect_download_stream(
+              cloud_storage_clients::object_key(kv.first),
+              cloud_io::download_result::timedout,
+              kv.second.copy());
+            continue;
+        case injected_cloud_get_failure::throw_shutdown:
+            remote.expect_download_stream_throw(
+              cloud_storage_clients::object_key(kv.first),
+              ss::abort_requested_exception());
+            continue;
+        case injected_cloud_get_failure::throw_error:
+            remote.expect_download_stream_throw(
+              cloud_storage_clients::object_key(kv.first),
+              std::runtime_error("boo"));
+            continue;
         }
     }
     partition = std::move(placeholders);

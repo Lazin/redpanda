@@ -117,7 +117,7 @@ public:
     }
 
     void expect_download_stream(
-      cloud_storage_clients::object_key /*key*/,
+      cloud_storage_clients::object_key key,
       cloud_io::download_result res,
       iobuf body,
       std::optional<cloud_storage_clients::http_byte_range> /*byte_range*/
@@ -125,7 +125,9 @@ public:
         EXPECT_CALL(
           *this,
           download_stream(
-            ::testing::_,
+            ::testing::Field(
+              &cloud_io::basic_transfer_details<ss::lowres_clock>::key,
+              ::testing::Eq(key)),
             ::testing::_,
             ::testing::_,
             ::testing::_,
@@ -152,14 +154,16 @@ public:
 
     template<class Exception>
     void expect_download_stream_throw(
-      cloud_storage_clients::object_key /*key*/,
+      cloud_storage_clients::object_key key,
       Exception err,
       std::optional<cloud_storage_clients::http_byte_range> /*byte_range*/
       = std::nullopt) {
         EXPECT_CALL(
           *this,
           download_stream(
-            ::testing::_,
+            ::testing::Field(
+              &cloud_io::basic_transfer_details<ss::lowres_clock>::key,
+              ::testing::Eq(key)),
             ::testing::_,
             ::testing::_,
             ::testing::_,
