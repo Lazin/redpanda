@@ -115,6 +115,61 @@ public:
           .Times(1)
           .WillOnce(::testing::Throw(err));
     }
+
+    void expect_download_stream(
+      cloud_storage_clients::object_key /*key*/,
+      cloud_io::download_result res,
+      iobuf body,
+      std::optional<cloud_storage_clients::http_byte_range> /*byte_range*/
+      = std::nullopt) {
+        EXPECT_CALL(
+          *this,
+          download_stream(
+            ::testing::_,
+            ::testing::_,
+            ::testing::_,
+            ::testing::_,
+            ::testing::_, // Accept any byte_range
+            ::testing::_))
+          .Times(1)
+          .WillOnce(
+            [body = std::move(body), res](
+              auto,
+              const cloud_io::try_consume_stream& cons,
+              auto,
+              auto,
+              auto,
+              auto) mutable -> ss::future<cloud_io::download_result> {
+                if (res != cloud_io::download_result::success) {
+                    co_return res;
+                }
+                auto size = body.size_bytes();
+                auto stream = make_iobuf_input_stream(std::move(body));
+                co_await cons(size, std::move(stream));
+                co_return cloud_io::download_result::success;
+            });
+    }
+
+    template<class Exception>
+    void expect_download_stream_throw(
+      cloud_storage_clients::object_key /*key*/,
+      Exception err,
+      std::optional<cloud_storage_clients::http_byte_range> /*byte_range*/
+      = std::nullopt) {
+        EXPECT_CALL(
+          *this,
+          download_stream(
+            ::testing::_,
+            ::testing::_,
+            ::testing::_,
+            ::testing::_,
+            ::testing::_, // Accept any byte_range
+            ::testing::_))
+          .Times(1)
+          .WillOnce(
+            ::testing::Return(
+              ss::make_exception_future<cloud_io::download_result>(err)));
+    }
 };
 
 class cache_mock : public cloud_io::basic_cache_service_api<ss::lowres_clock> {

@@ -222,43 +222,43 @@ void materialized_extent_fixture::produce_placeholders(
         } else {
             // Simplified event flow:
             // cache.is_cached() -> not_available
-            // remote.download_object() -> payload
+            // remote.download_stream() -> payload
             // cache.reserve_space() -> guard
             // cache.put(payload, guard)
             cache.expect_is_cached(
               kv.first, cloud_io::cache_element_status::not_available);
             switch (failure.cloud_get) {
             case injected_cloud_get_failure::none:
-                remote.expect_download_object(
+                remote.expect_download_stream(
                   cloud_storage_clients::object_key(kv.first),
                   cloud_io::download_result::success,
                   kv.second.copy());
                 break;
             case injected_cloud_get_failure::return_failure:
-                remote.expect_download_object(
+                remote.expect_download_stream(
                   cloud_storage_clients::object_key(kv.first),
                   cloud_io::download_result::failed,
                   kv.second.copy());
                 continue;
             case injected_cloud_get_failure::return_notfound:
-                remote.expect_download_object(
+                remote.expect_download_stream(
                   cloud_storage_clients::object_key(kv.first),
                   cloud_io::download_result::notfound,
                   kv.second.copy());
                 continue;
             case injected_cloud_get_failure::return_timeout:
-                remote.expect_download_object(
+                remote.expect_download_stream(
                   cloud_storage_clients::object_key(kv.first),
                   cloud_io::download_result::timedout,
                   kv.second.copy());
                 continue;
             case injected_cloud_get_failure::throw_shutdown:
-                remote.expect_download_object_throw(
+                remote.expect_download_stream_throw(
                   cloud_storage_clients::object_key(kv.first),
                   ss::abort_requested_exception());
                 continue;
             case injected_cloud_get_failure::throw_error:
-                remote.expect_download_object_throw(
+                remote.expect_download_stream_throw(
                   cloud_storage_clients::object_key(kv.first),
                   std::runtime_error("boo"));
                 continue;

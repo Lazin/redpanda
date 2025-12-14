@@ -89,16 +89,17 @@ result<T> result_convert(result<T>&& res) {
 }
 
 model::record_batch make_raft_data_batch(materialized_extent ext) {
-    auto offset = ext.meta.first_byte_offset;
     auto size = ext.meta.byte_range_size;
     vassert(
       size() > model::packed_record_batch_header_size,
       "L0 object is smaller ({}) than the batch header",
       size());
+    // Since we now download only the relevant byte range, ext.object
+    // contains data starting from position 0 (not from first_byte_offset)
     auto header_bytes = ext.object.share(
-      offset(), model::packed_record_batch_header_size);
+      0, model::packed_record_batch_header_size);
     auto records_bytes = ext.object.share(
-      offset() + model::packed_record_batch_header_size,
+      model::packed_record_batch_header_size,
       size() - model::packed_record_batch_header_size);
     auto header = storage::batch_header_from_disk_iobuf(
       std::move(header_bytes));
@@ -120,7 +121,8 @@ model::record_batch make_raft_data_batch(materialized_extent ext) {
 ss::future<result<iobuf>> materialize_from_cache(
   std::filesystem::path cache_file_name,
   cloud_io::basic_cache_service_api<>* cache,
-  micro_probe* probe);
+  micro_probe* probe,
+  std::optional<cloud_storage_clients::http_byte_range> byte_range);
 
 ss::future<result<iobuf>> materialize_from_cloud_storage(
   std::filesystem::path cache_file_name,
@@ -128,7 +130,8 @@ ss::future<result<iobuf>> materialize_from_cloud_storage(
   cloud_io::remote_api<>* api,
   cloud_io::basic_cache_service_api<>* cache,
   basic_retry_chain_node<>* rtc,
-  micro_probe* probe);
+  micro_probe* probe,
+  std::optional<cloud_storage_clients::http_byte_range> byte_range);
 
 ss::future<result<bool>> materialize(
   materialized_extent* ext,
@@ -184,16 +187,21 @@ ss::future<result<bool>> materialize(
         co_return errc::timeout;
     }
 
+    // Create byte range from extent metadata
+    cloud_storage_clients::http_byte_range byte_range{
+      ext->meta.first_byte_offset(),
+      ext->meta.first_byte_offset() + ext->meta.byte_range_size() - 1};
+
     if (status.value() == cloud_io::cache_element_status::available) {
         auto res = co_await materialize_from_cache(
-          cache_file_name, cache, probe);
+          cache_file_name, cache, probe, byte_range);
         if (!res.has_value()) {
             co_return res.error();
         }
         ext->object = std::move(res.value());
     } else {
         auto res = co_await materialize_from_cloud_storage(
-          cache_file_name, bucket, api, cache, rtc, probe);
+          cache_file_name, bucket, api, cache, rtc, probe, byte_range);
         if (!res.has_value()) {
             co_return res.error();
         }
@@ -205,7 +213,8 @@ ss::future<result<bool>> materialize(
 ss::future<result<iobuf>> materialize_from_cache(
   std::filesystem::path cache_file_name,
   cloud_io::basic_cache_service_api<>* cache,
-  micro_probe* probe) {
+  micro_probe* probe,
+  std::optional<cloud_storage_clients::http_byte_range> byte_range) {
     iobuf result_buf;
     probe->num_cache_reads++;
     auto buffer_size = config::shard_local_cfg().storage_read_buffer_size();
@@ -222,9 +231,23 @@ ss::future<result<iobuf>> materialize_from_cache(
         co_return errc::cache_read_error;
     }
 
+    // Skip to the byte range start if specified
+    size_t bytes_to_read = sz_stream->size;
+    if (byte_range.has_value()) {
+        auto [start, end] = byte_range.value();
+        // Skip to the start of the byte range
+        co_await sz_stream->body.skip(start);
+        // Calculate the number of bytes to read
+        bytes_to_read = end - start + 1;
+    }
+
     auto target = make_iobuf_ref_output_stream(result_buf);
-    probe->cache_read_bytes += sz_stream->size;
-    co_await ss::copy(sz_stream->body, target);
+    probe->cache_read_bytes += bytes_to_read;
+
+    // Read only the required number of bytes
+    auto temp_buf = co_await sz_stream->body.read_exactly(bytes_to_read);
+    result_buf.append(std::move(temp_buf));
+
     co_await sz_stream->body.close();
     co_return result_buf;
 }
@@ -235,26 +258,40 @@ ss::future<result<iobuf>> materialize_from_cloud_storage(
   cloud_io::remote_api<>* api,
   cloud_io::basic_cache_service_api<>* cache,
   basic_retry_chain_node<>* rtc,
-  micro_probe* probe) {
-    // Populate the cache
+  micro_probe* probe,
+  std::optional<cloud_storage_clients::http_byte_range> byte_range) {
+    // Download only the relevant byte range from the object
     iobuf payload;
-    cloud_io::download_request req{
-      .transfer_details = {
-        .bucket = bucket,
-        .key = cloud_storage_clients::object_key(cache_file_name),
-        .parent_rtc = *rtc,
-        .success_cb =
-          [probe, &payload] {
-              probe->num_cloud_reads++;
-              probe->cloud_read_bytes += payload.size_bytes();
-          },
-        .backoff_cb = [probe] { probe->num_cloud_reads++; },
-      },
-      .display_str = "L0",
-      .payload = payload};
+
+    cloud_io::transfer_details transfer_details{
+      .bucket = bucket,
+      .key = cloud_storage_clients::object_key(cache_file_name),
+      .parent_rtc = *rtc,
+      .success_cb =
+        [probe, &payload] {
+            probe->num_cloud_reads++;
+            probe->cloud_read_bytes += payload.size_bytes();
+        },
+      .backoff_cb = [probe] { probe->num_cloud_reads++; },
+    };
+
+    auto consume_stream =
+      [&payload](
+        uint64_t /*content_length*/,
+        ss::input_stream<char> stream) -> ss::future<uint64_t> {
+        auto target = make_iobuf_ref_output_stream(payload);
+        co_await ss::copy(stream, target);
+        co_await stream.close();
+        co_return payload.size_bytes();
+    };
 
     auto dl_result = result_from_ready_future(
-      co_await ss::coroutine::as_future(api->download_object(std::move(req))),
+      co_await ss::coroutine::as_future(api->download_stream(
+        std::move(transfer_details),
+        consume_stream,
+        "L0",
+        false, // acquire_hydration_units
+        byte_range)),
       [](std::exception_ptr e) {
           vlog(cd_log.error, "Unexpected error during L0 download: {}", e);
       });
