@@ -42,6 +42,22 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "hydrated_object_cache",
+    srcs = [
+        "hydrated_object_cache.cc",
+    ],
+    hdrs = [
+        "hydrated_object_cache.h",
+    ],
+    deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cloud_topics:types",
+        "@abseil-cpp//absl/container:node_hash_map",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "materialized_extent_reader",
     srcs = [
         "materialized_extent_reader.cc",

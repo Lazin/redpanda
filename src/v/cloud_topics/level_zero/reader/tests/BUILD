@@ -83,6 +83,22 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "hydrated_object_cache_test",
+    timeout = "short",
+    srcs = [
+        "hydrated_object_cache_test.cc",
+    ],
+    deps = [
+        "//src/v/cloud_topics:types",
+        "//src/v/cloud_topics/level_zero/reader:hydrated_object_cache",
+        "//src/v/random:generators",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "fetch_handler_test",
     timeout = "short",
     srcs = [
