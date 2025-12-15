@@ -827,6 +827,10 @@ public:
     property<std::chrono::milliseconds> cloud_topics_l0_gc_interval;
     property<std::chrono::milliseconds> cloud_topics_l0_gc_backoff_interval;
 
+    property<size_t> cloud_topics_short_term_cache_size;
+    property<std::chrono::milliseconds>
+      cloud_topics_short_term_cache_idle_timeout;
+
     development_feature_property<int> development_feature_property_testing_only;
 
 private:

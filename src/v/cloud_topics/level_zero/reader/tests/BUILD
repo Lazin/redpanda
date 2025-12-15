@@ -70,6 +70,7 @@ redpanda_cc_gtest(
     deps = [
         "//src/v/base",
         "//src/v/cloud_topics:types",
+        "//src/v/cloud_topics/level_zero/reader:hydrated_object_cache",
         "//src/v/cloud_topics/level_zero/reader:materialized_extent_reader",
         "//src/v/cloud_topics/level_zero/reader/tests:materialized_extent_fixture",
         "//src/v/container:chunked_vector",

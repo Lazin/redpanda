@@ -10,10 +10,9 @@
 
 #pragma once
 
+#include "absl/container/node_hash_map.h"
 #include "bytes/iobuf.h"
 #include "cloud_topics/types.h"
-
-#include "absl/container/node_hash_map.h"
 
 #include <seastar/core/lowres_clock.hh>
 #include <seastar/core/timer.hh>
@@ -38,8 +37,7 @@ public:
     /// \param size_limit_bytes Maximum size of cached objects in bytes
     /// \param idle_timeout Duration of inactivity after which cache is cleared
     explicit basic_hydrated_object_cache(
-      size_t size_limit_bytes,
-      duration_t idle_timeout)
+      size_t size_limit_bytes, duration_t idle_timeout)
       : _size_limit_bytes(size_limit_bytes)
       , _idle_timeout(idle_timeout)
       , _idle_timer([this] { on_idle_timeout(); }) {}

@@ -38,27 +38,23 @@ ss::future<result<chunked_vector<materialized_extent>>> materialize_sorted_run(
   cloud_io::remote_api<>* api,
   cloud_io::basic_cache_service_api<>* cache,
   retry_chain_node* rtc,
-  micro_probe* probe) {
-    absl::node_hash_map<object_id, iobuf> hydrated;
+  micro_probe* probe,
+  hydrated_object_cache* hydrated_cache) {
     chunked_vector<materialized_extent> extents;
     for (const auto& extent : query) {
         extents.push_back(materialized_extent{.meta = extent});
         auto& back = extents.back();
         // reuse hydrated objects if possible
-        auto it = hydrated.find(back.meta.id);
-        if (it != hydrated.end()) {
-            auto& payload = it->second;
-            // TODO: check that id of the payload matches
-            back.object = payload.share(0, payload.size_bytes());
+        auto cached = hydrated_cache->find(back.meta.id);
+        if (cached.has_value()) {
+            back.object = std::move(cached.value());
         } else {
             auto res = co_await materialize(
               &back, bucket, api, cache, rtc, probe);
             if (!res.has_value()) {
                 co_return res.error();
             }
-            hydrated.insert(
-              std::make_pair(
-                back.meta.id, back.object.share(0, back.object.size_bytes())));
+            hydrated_cache->insert(back.meta.id, back.object.share());
         }
     }
     co_return std::move(extents);
@@ -72,10 +68,11 @@ ss::future<materialize_result> materialize_placeholders(
   cloud_io::remote_api<ss::lowres_clock>& api,
   cloud_io::basic_cache_service_api<ss::lowres_clock>& cache,
   retry_chain_node& rtc,
-  retry_chain_logger& logger) {
+  retry_chain_logger& logger,
+  hydrated_object_cache& hydrated_cache) {
     micro_probe probe;
     auto extents = co_await materialize_sorted_run(
-      std::move(query), bucket, &api, &cache, &rtc, &probe);
+      std::move(query), bucket, &api, &cache, &rtc, &probe, &hydrated_cache);
     if (!extents.has_value()) {
         vlog(
           logger.warn,

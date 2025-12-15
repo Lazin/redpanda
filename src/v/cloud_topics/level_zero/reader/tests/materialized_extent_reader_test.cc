@@ -10,6 +10,7 @@
 
 #include "base/vlog.h"
 #include "cloud_topics/errc.h"
+#include "cloud_topics/level_zero/reader/hydrated_object_cache.h"
 #include "cloud_topics/level_zero/reader/materialized_extent_reader.h"
 #include "cloud_topics/level_zero/reader/tests/materialized_extent_fixture.h"
 #include "container/chunked_vector.h"
@@ -49,13 +50,15 @@ TEST_F_CORO(materialized_extent_fixture, full_scan_test) {
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
     retry_chain_logger logger(test_log, rtc, "materialized_extent_reader_test");
+    cloud_topics::l0::hydrated_object_cache hydrated_cache(16_MiB, 30s);
     auto [actual, probe] = co_await cloud_topics::l0::materialize_placeholders(
       cloud_storage_clients::bucket_name("test-bucket-name"),
       std::move(underlying),
       remote,
       cache,
       rtc,
-      logger);
+      logger,
+      hydrated_cache);
     ASSERT_EQ_CORO(actual.value().size(), expected.size());
     ASSERT_TRUE_CORO(actual.value() == expected);
 }
@@ -97,6 +100,7 @@ ss::future<> test_aggregated_log_partial_scan(
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
     retry_chain_logger logger(test_log, rtc, "materialized_extent_reader_test");
+    cloud_topics::l0::hydrated_object_cache hydrated_cache(16_MiB, 30s);
 
     auto [actual, _] = co_await cloud_topics::l0::materialize_placeholders(
       cloud_storage_clients::bucket_name("test-bucket-name"),
@@ -104,7 +108,8 @@ ss::future<> test_aggregated_log_partial_scan(
       fx->remote,
       fx->cache,
       rtc,
-      logger);
+      logger,
+      hydrated_cache);
 
     ASSERT_EQ_CORO(actual.value().size(), expected_view.size());
     ASSERT_TRUE_CORO(actual.value() == expected_view);
@@ -128,6 +133,7 @@ TEST_F_CORO(materialized_extent_fixture, timeout_test) {
     ss::abort_source as;
     retry_chain_node rtc(as, 1s, 100ms);
     retry_chain_logger logger(test_log, rtc, "materialized_extent_reader_test");
+    cloud_topics::l0::hydrated_object_cache hydrated_cache(16_MiB, 30s);
 
     auto [actual, probe] = co_await cloud_topics::l0::materialize_placeholders(
       cloud_storage_clients::bucket_name("test-bucket-name"),
@@ -135,7 +141,8 @@ TEST_F_CORO(materialized_extent_fixture, timeout_test) {
       remote,
       cache,
       rtc,
-      logger);
+      logger,
+      hydrated_cache);
 
     ASSERT_TRUE_CORO(!actual.has_value());
     ASSERT_TRUE_CORO(actual.error() == cloud_topics::errc::timeout);

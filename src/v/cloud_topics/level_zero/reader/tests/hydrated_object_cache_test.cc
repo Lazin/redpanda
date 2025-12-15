@@ -99,7 +99,8 @@ TEST(hydrated_object_cache_test, insert_oversized_object) {
 
     ASSERT_EQ(cache.size(), 2);
 
-    // Trigger eviction. Should fit despite being larger than the cache size limit.
+    // Trigger eviction. Should fit despite being larger than the cache size
+    // limit.
     auto id3 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(3));
     iobuf data3;
     auto str3 = ss::sstring(150, 'c');

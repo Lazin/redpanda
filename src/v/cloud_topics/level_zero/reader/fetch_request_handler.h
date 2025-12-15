@@ -14,6 +14,7 @@
 #include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/remote.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
+#include "cloud_topics/level_zero/reader/hydrated_object_cache.h"
 #include "model/fundamental.h"
 
 #include <seastar/core/abort_source.hh>
@@ -54,5 +55,6 @@ private:
     retry_chain_logger _logger;
     ss::gate _gate;
     l0::read_pipeline<>::stage _pipeline_stage;
+    hydrated_object_cache _hydrated_cache;
 };
 } // namespace cloud_topics::l0

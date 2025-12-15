@@ -4544,6 +4544,18 @@ configuration::configuration()
       "when no progress is being made or errors are occurring.",
       {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       1min)
+  , cloud_topics_short_term_cache_size(
+      *this,
+      "cloud_topics_short_term_cache_size",
+      "The size of the cache used to cache for short lived objects in memory.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      16_MiB)
+  , cloud_topics_short_term_cache_idle_timeout(
+      *this,
+      "cloud_topics_short_term_cache_idle_timeout",
+      "Max time temporary object can stay idle in short term in-memory cache.",
+      {.needs_restart = needs_restart::yes, .visibility = visibility::user},
+      10s)
   , development_feature_property_testing_only(
       *this,
       "development_feature_property_testing_only",

@@ -15,6 +15,7 @@
 #include "cloud_topics/level_zero/reader/materialized_extent_reader.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
 #include "cloud_topics/logger.h"
+#include "config/configuration.h"
 #include "model/record.h"
 #include "model/record_batch_reader.h"
 #include "model/timeout_clock.h"
@@ -42,7 +43,12 @@ fetch_handler::fetch_handler(
   , _cache(cache)
   , _rtc(&pipeline_stage.get_root_rtc())
   , _logger(cd_log, _rtc, "ct:l0_fetch_handler")
-  , _pipeline_stage(pipeline_stage) {}
+  , _pipeline_stage(pipeline_stage)
+  , _hydrated_cache(
+      // TODO: use bindings and make sure that the values could be
+      // tweaked without the restart.
+      config::shard_local_cfg().cloud_topics_short_term_cache_size(),
+      config::shard_local_cfg().cloud_topics_short_term_cache_idle_timeout()) {}
 
 ss::future<> fetch_handler::start() {
     ssx::spawn_with_gate(_gate, [this] { return bg_process_requests(); });
@@ -113,7 +119,8 @@ ss::future<> fetch_handler::process_single_request(l0::read_request<>* req) {
             *_remote,
             *_cache,
             req->rtc,
-            req->rtc_logger));
+            req->rtc_logger,
+            _hydrated_cache));
 
         if (extent.failed()) {
             vlog(

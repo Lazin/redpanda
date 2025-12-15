@@ -15,6 +15,7 @@
 #include "cloud_io/remote.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
 #include "cloud_topics/level_zero/common/micro_probe.h"
+#include "cloud_topics/level_zero/reader/hydrated_object_cache.h"
 #include "model/record_batch_reader.h"
 
 #include <seastar/core/lowres_clock.hh>
@@ -40,12 +41,14 @@ struct materialize_result {
 /// \param cache is a cloud storage cache instance
 /// \param rtc is a retry chain node to use
 /// \param rtc_logger is a logger that should track the progress
+/// \param hydrated_cache is a cache for hydrated L0 objects
 ss::future<materialize_result> materialize_placeholders(
   cloud_storage_clients::bucket_name bucket,
   chunked_vector<extent_meta> query,
   cloud_io::remote_api<ss::lowres_clock>& api,
   cloud_io::basic_cache_service_api<ss::lowres_clock>& cache,
   retry_chain_node& rtc,
-  retry_chain_logger& logger);
+  retry_chain_logger& logger,
+  hydrated_object_cache& hydrated_cache);
 
 } // namespace cloud_topics::l0
