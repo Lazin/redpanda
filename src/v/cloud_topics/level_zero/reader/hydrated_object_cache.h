@@ -44,7 +44,7 @@ public:
 
     /// Find an object in the cache by its ID
     /// \return The cached object if found, std::nullopt otherwise
-    std::optional<iobuf> find(const object_id& id);
+    std::optional<iobuf> get_object(const object_id& id);
 
     /// Insert an object into the cache
     /// If the object doesn't fit and is smaller than the limit, removes
@@ -52,7 +52,7 @@ public:
     /// limit, clears the entire cache and inserts the object anyway.
     /// \param id The unique object ID
     /// \param data The object data to cache
-    void insert(object_id id, iobuf data);
+    void put_object(object_id id, iobuf data);
 
     /// Get the current total size of cached objects in bytes
     size_t current_size_bytes() const { return _current_size_bytes; }

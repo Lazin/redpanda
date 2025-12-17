@@ -17,7 +17,7 @@ namespace cloud_topics::l0 {
 
 template<class Clock>
 std::optional<iobuf>
-basic_hydrated_object_cache<Clock>::find(const object_id& id) {
+basic_hydrated_object_cache<Clock>::get_object(const object_id& id) {
     auto it = _cache.find(id);
     if (it == _cache.end()) {
         return std::nullopt;
@@ -31,7 +31,7 @@ basic_hydrated_object_cache<Clock>::find(const object_id& id) {
 }
 
 template<class Clock>
-void basic_hydrated_object_cache<Clock>::insert(object_id id, iobuf data) {
+void basic_hydrated_object_cache<Clock>::put_object(object_id id, iobuf data) {
     rearm_idle_timer();
 
     auto data_size = data.size_bytes();

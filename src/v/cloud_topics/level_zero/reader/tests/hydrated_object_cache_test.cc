@@ -29,9 +29,9 @@ TEST(hydrated_object_cache_test, basic_insert_and_find) {
     iobuf data;
     data.append("test_data", 9);
 
-    cache.insert(id, data.copy());
+    cache.put_object(id, data.copy());
 
-    auto result = cache.find(id);
+    auto result = cache.get_object(id);
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->size_bytes(), 9);
     ASSERT_EQ(cache.size(), 1);
@@ -42,7 +42,7 @@ TEST(hydrated_object_cache_test, find_nonexistent) {
     cloud_topics::l0::hydrated_object_cache cache(1024, 10s);
 
     auto id = cloud_topics::object_id::create(cloud_topics::cluster_epoch(1));
-    auto result = cache.find(id);
+    auto result = cache.get_object(id);
 
     ASSERT_FALSE(result.has_value());
 }
@@ -55,13 +55,13 @@ TEST(hydrated_object_cache_test, eviction_when_full) {
     iobuf data1;
     auto str1 = ss::sstring(40, 'a');
     data1.append(str1.data(), str1.size());
-    cache.insert(id1, data1.copy());
+    cache.put_object(id1, data1.copy());
 
     auto id2 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(2));
     iobuf data2;
     auto str2 = ss::sstring(40, 'b');
     data2.append(str2.data(), str2.size());
-    cache.insert(id2, data2.copy());
+    cache.put_object(id2, data2.copy());
 
     ASSERT_EQ(cache.size(), 2);
     ASSERT_EQ(cache.current_size_bytes(), 80);
@@ -71,14 +71,14 @@ TEST(hydrated_object_cache_test, eviction_when_full) {
     iobuf data3;
     auto str3 = ss::sstring(50, 'c');
     data3.append(str3.data(), str3.size());
-    cache.insert(id3, data3.copy());
+    cache.put_object(id3, data3.copy());
 
     // Should have evicted enough to fit the new object
     ASSERT_LE(cache.current_size_bytes(), 100);
     ASSERT_LE(cache.size(), 2);
 
     // The new object should be findable
-    auto result = cache.find(id3);
+    auto result = cache.get_object(id3);
     ASSERT_TRUE(result.has_value());
 }
 
@@ -89,13 +89,13 @@ TEST(hydrated_object_cache_test, insert_oversized_object) {
     iobuf data1;
     auto str1 = ss::sstring(40, 'a');
     data1.append(str1.data(), str1.size());
-    cache.insert(id1, data1.copy());
+    cache.put_object(id1, data1.copy());
 
     auto id2 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(2));
     iobuf data2;
     auto str2 = ss::sstring(40, 'b');
     data2.append(str2.data(), str2.size());
-    cache.insert(id2, data2.copy());
+    cache.put_object(id2, data2.copy());
 
     ASSERT_EQ(cache.size(), 2);
 
@@ -105,12 +105,12 @@ TEST(hydrated_object_cache_test, insert_oversized_object) {
     iobuf data3;
     auto str3 = ss::sstring(150, 'c');
     data3.append(str3.data(), str3.size());
-    cache.insert(id3, data3.copy());
+    cache.put_object(id3, data3.copy());
 
     // Should remove all old objects
     ASSERT_EQ(cache.size(), 1);
     ASSERT_EQ(cache.current_size_bytes(), 150);
-    ASSERT_TRUE(cache.find(id3).has_value());
+    ASSERT_TRUE(cache.get_object(id3).has_value());
 }
 
 TEST(hydrated_object_cache_test, clear) {
@@ -119,12 +119,12 @@ TEST(hydrated_object_cache_test, clear) {
     auto id1 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(1));
     iobuf data1;
     data1.append("Foo", 3);
-    cache.insert(id1, data1.copy());
+    cache.put_object(id1, data1.copy());
 
     auto id2 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(2));
     iobuf data2;
     data2.append("Bar", 3);
-    cache.insert(id2, data2.copy());
+    cache.put_object(id2, data2.copy());
 
     ASSERT_EQ(cache.size(), 2);
     ASSERT_EQ(cache.current_size_bytes(), 6);
@@ -133,8 +133,8 @@ TEST(hydrated_object_cache_test, clear) {
 
     ASSERT_EQ(cache.size(), 0);
     ASSERT_EQ(cache.current_size_bytes(), 0);
-    ASSERT_FALSE(cache.find(id1).has_value());
-    ASSERT_FALSE(cache.find(id2).has_value());
+    ASSERT_FALSE(cache.get_object(id1).has_value());
+    ASSERT_FALSE(cache.get_object(id2).has_value());
 }
 
 TEST_CORO(hydrated_object_cache_test, cleanup_on_idle) {
@@ -144,10 +144,10 @@ TEST_CORO(hydrated_object_cache_test, cleanup_on_idle) {
     auto id = cloud_topics::object_id::create(cloud_topics::cluster_epoch(1));
     iobuf data;
     data.append("Foo", 3);
-    cache.insert(id, data.copy());
+    cache.put_object(id, data.copy());
 
     ASSERT_EQ_CORO(cache.size(), 1);
-    ASSERT_TRUE_CORO(cache.find(id).has_value());
+    ASSERT_TRUE_CORO(cache.get_object(id).has_value());
 
     // Advance past the idle timeout
     ss::manual_clock::advance(150ms);
@@ -165,7 +165,7 @@ TEST_CORO(hydrated_object_cache_test, cache_hit_resets_idle_timer) {
     auto id1 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(1));
     iobuf data1;
     data1.append("test_data_1", 11);
-    cache.insert(id1, data1.copy());
+    cache.put_object(id1, data1.copy());
 
     // Advance time but not past timeout
     ss::manual_clock::advance(50ms);
@@ -175,7 +175,7 @@ TEST_CORO(hydrated_object_cache_test, cache_hit_resets_idle_timer) {
     auto id2 = cloud_topics::object_id::create(cloud_topics::cluster_epoch(2));
     iobuf data2;
     data2.append("test_data_2", 11);
-    cache.insert(id2, data2.copy());
+    cache.put_object(id2, data2.copy());
 
     ss::manual_clock::advance(60ms);
     co_await ss::sleep(1ms);
