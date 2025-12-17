@@ -45,7 +45,7 @@ ss::future<result<chunked_vector<materialized_extent>>> materialize_sorted_run(
         extents.push_back(materialized_extent{.meta = extent});
         auto& back = extents.back();
         // reuse hydrated objects if possible
-        auto cached = hydrated_cache->find(back.meta.id);
+        auto cached = hydrated_cache->get_object(back.meta.id);
         if (cached.has_value()) {
             back.object = std::move(cached.value());
         } else {
@@ -54,7 +54,7 @@ ss::future<result<chunked_vector<materialized_extent>>> materialize_sorted_run(
             if (!res.has_value()) {
                 co_return res.error();
             }
-            hydrated_cache->insert(back.meta.id, back.object.share());
+            hydrated_cache->put_object(back.meta.id, back.object.share());
         }
     }
     co_return std::move(extents);
