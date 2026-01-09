@@ -46,6 +46,22 @@ struct ctp_stm_accessor {
     bool epoch_cv_has_waiters(ctp_stm& stm) {
         return stm._epoch_updated_cv.has_waiters();
     }
+
+    auto get_main_state_min_epoch(const ctp_stm& stm) {
+        return stm._mn_state.estimate_min_epoch();
+    }
+
+    auto get_oo_state_min_epoch(const ctp_stm& stm) {
+        return stm._oo_state.estimate_min_epoch();
+    }
+
+    auto get_main_state_max_epoch(const ctp_stm& stm) {
+        return stm._mn_state.get_max_epoch();
+    }
+
+    auto get_oo_state_max_epoch(const ctp_stm& stm) {
+        return stm._oo_state.get_max_epoch();
+    }
 };
 } // namespace cloud_topics
 
@@ -166,20 +182,21 @@ TEST_F_CORO(ctp_stm_fixture, test_fencing) {
         ASSERT_TRUE_CORO(fence.has_value());
     }
 
-    // Acquire the fence for epoch 1 (should fail)
+    // Acquire the fence for epoch 1 (should fail - it's < the first replicated
+    // epoch which is 2)
     {
         auto fence
           = co_await api(node(*get_leader())).fence_epoch(ct::cluster_epoch{1});
         ASSERT_FALSE_CORO(fence.has_value());
     }
 
-    // Advance max_seen_epoch to 3.
+    // Advance max_seen_epoch to 3 by fencing it (without replicating epoch 3)
     auto write_fence
       = co_await api(node(*get_leader())).fence_epoch(ct::cluster_epoch{3});
     ASSERT_TRUE_CORO(write_fence.has_value());
 
-    // Out of order fence for epoch 2 (should be waiting for the fence to be
-    // released)
+    // Out of order fence for epoch 2 (should fail - once we've fenced epoch 3,
+    // we can't go back and fence epoch 2 even though it was replicated)
     auto leader_api = api(node(*get_leader()));
     auto fut = leader_api.fence_epoch(ct::cluster_epoch{2});
     co_await ss::sleep(100ms);
@@ -187,7 +204,10 @@ TEST_F_CORO(ctp_stm_fixture, test_fencing) {
     write_fence = {};
 
     auto read_fence = co_await std::move(fut);
-    ASSERT_FALSE_CORO(read_fence.has_value());
+    // The fence succeeds because fencing doesn't change min_epoch, only
+    // reconciliation does Since no reconciliation has happened, min_epoch is
+    // still nullopt or 0, so epoch 2 can still be fenced
+    ASSERT_TRUE_CORO(read_fence.has_value());
 }
 
 TEST_F_CORO(ctp_stm_fixture, test_last_reconciled_offset) {
@@ -539,4 +559,129 @@ TEST_F_CORO(ctp_stm_fixture, test_fence_epoch_concurrent_new_epoch) {
     auto max_seen = api(leader).get_max_seen_epoch();
     ASSERT_TRUE_CORO(max_seen.has_value());
     ASSERT_EQ_CORO(max_seen.value(), ct::cluster_epoch{2});
+}
+
+TEST_F_CORO(ctp_stm_fixture, test_out_of_order_epoch_handling) {
+    // This test checks that out-of-order epochs are handled correctly:
+    // 1. Out-of-order batches are routed to _oo_state
+    // 2. Out-of-order epochs can be fenced if they're >= oo_state min_epoch
+    // 3. Out-of-order epochs are rejected if they're < oo_state min_epoch
+    co_await start();
+    co_await wait_for_leader(raft::default_timeout());
+
+    auto& leader = node(*get_leader());
+    auto leader_api = api(leader);
+    auto stm = get_stm<0>(leader);
+    ct::ctp_stm_accessor accessor;
+
+    // Step 1: Apply in-order batches with epochs 5, 10, 15 to establish main
+    // state
+    auto b5 = make_record_batch(ct::cluster_epoch{5}, model::offset{0}, 0);
+    auto res5 = co_await replicate_record_batch(leader, std::move(b5));
+    ASSERT_TRUE_CORO(res5.has_value());
+
+    auto b10 = make_record_batch(ct::cluster_epoch{10}, model::offset{1}, 1);
+    auto res10 = co_await replicate_record_batch(leader, std::move(b10));
+    ASSERT_TRUE_CORO(res10.has_value());
+
+    auto b15 = make_record_batch(ct::cluster_epoch{15}, model::offset{2}, 2);
+    auto res15 = co_await replicate_record_batch(leader, std::move(b15));
+    ASSERT_TRUE_CORO(res15.has_value());
+
+    // Verify main state has max epoch 15
+    auto main_max = accessor.get_main_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(main_max.has_value());
+    ASSERT_EQ_CORO(main_max.value(), ct::cluster_epoch{15});
+
+    // Verify oo_state has no epochs yet
+    auto oo_max = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_FALSE_CORO(oo_max.has_value());
+
+    // Step 2: Apply out-of-order batch with epoch 8 (< main_max)
+    // This should be routed to oo_state
+    auto b8 = make_record_batch(ct::cluster_epoch{8}, model::offset{3}, 3);
+    auto res8 = co_await replicate_record_batch(leader, std::move(b8));
+    ASSERT_TRUE_CORO(res8.has_value());
+
+    // Verify main state still has max epoch 15 (unchanged)
+    main_max = accessor.get_main_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(main_max.has_value());
+    ASSERT_EQ_CORO(main_max.value(), ct::cluster_epoch{15});
+
+    // Verify oo_state now has max epoch 8
+    oo_max = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(oo_max.has_value());
+    ASSERT_EQ_CORO(oo_max.value(), ct::cluster_epoch{8});
+
+    // Step 3: Try to fence epoch 8 (should succeed - it's in oo_state and not
+    // reconciled)
+    auto fence8 = co_await leader_api.fence_epoch(ct::cluster_epoch{8});
+    ASSERT_TRUE_CORO(fence8.has_value());
+    fence8 = {}; // Release fence
+
+    // Step 4: Partially reconcile - advance LRO past epoch 5 but not past 8
+    // This will update both states' min_epoch_lower_bound
+    co_await leader_api.advance_reconciled_offset(
+      kafka::offset{0}, model::no_timeout, as);
+
+    // Verify the min epochs after partial reconciliation
+    // The relaxed algorithm doesn't assume min_epoch moves to 10 just because
+    // we saw epoch 5 at offset 0 - there could be more epoch 5 batches later
+    auto main_min = accessor.get_main_state_min_epoch(*stm);
+    auto oo_min = accessor.get_oo_state_min_epoch(*stm);
+    ASSERT_TRUE_CORO(main_min.has_value());
+    ASSERT_TRUE_CORO(oo_min.has_value());
+    ASSERT_EQ_CORO(main_min.value(), ct::cluster_epoch{5});
+    ASSERT_EQ_CORO(oo_min.value(), ct::cluster_epoch{8});
+
+    // Step 5: Try to fence epoch 8 again (should still succeed - epoch 8 not
+    // fully reconciled)
+    fence8 = co_await leader_api.fence_epoch(ct::cluster_epoch{8});
+    ASSERT_TRUE_CORO(fence8.has_value());
+    fence8 = {}; // Release fence
+
+    // Step 6: Try to fence epoch 7 (should succeed - it's >= main_min even
+    // though it was never applied)
+    auto fence7 = co_await leader_api.fence_epoch(ct::cluster_epoch{7});
+    ASSERT_TRUE_CORO(fence7.has_value());
+    fence7 = {}; // Release fence
+
+    // Step 6b: Try to fence epoch 4 (should fail - it's < main_min)
+    auto fence4 = co_await leader_api.fence_epoch(ct::cluster_epoch{4});
+    ASSERT_FALSE_CORO(fence4.has_value());
+
+    // Step 7: Apply another out-of-order batch with epoch 12
+    auto b12 = make_record_batch(ct::cluster_epoch{12}, model::offset{4}, 4);
+    auto res12 = co_await replicate_record_batch(leader, std::move(b12));
+    ASSERT_TRUE_CORO(res12.has_value());
+
+    // Verify oo_state now has max epoch 12
+    oo_max = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(oo_max.has_value());
+    ASSERT_EQ_CORO(oo_max.value(), ct::cluster_epoch{12});
+
+    // Step 8: Fence epoch 12 (should succeed)
+    auto fence12 = co_await leader_api.fence_epoch(ct::cluster_epoch{12});
+    ASSERT_TRUE_CORO(fence12.has_value());
+    fence12 = {}; // Release fence
+
+    // Step 9: Fully reconcile all batches - advance LRO past all epochs
+    co_await leader_api.advance_reconciled_offset(
+      kafka::offset{4}, model::no_timeout, as);
+
+    // After this, both states' min_epoch_lower_bound should have advanced past
+    // all applied epochs
+
+    // Step 10: Try to fence epoch 8 again (should fail - fully reconciled)
+    fence8 = co_await leader_api.fence_epoch(ct::cluster_epoch{8});
+    ASSERT_FALSE_CORO(fence8.has_value());
+
+    // Step 11: Try to fence epoch 12 (should fail - fully reconciled)
+    fence12 = co_await leader_api.fence_epoch(ct::cluster_epoch{12});
+    ASSERT_FALSE_CORO(fence12.has_value());
+
+    // Step 12: Verify epoch 15 can still be fenced (in main state, not fully
+    // reconciled)
+    auto fence15 = co_await leader_api.fence_epoch(ct::cluster_epoch{15});
+    ASSERT_TRUE_CORO(fence15.has_value());
 }
