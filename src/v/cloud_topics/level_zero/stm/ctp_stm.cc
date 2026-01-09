@@ -61,6 +61,16 @@ private:
 };
 } // namespace
 
+/// Wrapper for serializing both main and out-of-order states together
+struct ctp_stm_snapshot
+  : public serde::
+      envelope<ctp_stm_snapshot, serde::version<0>, serde::compat_version<0>> {
+    ctp_stm_state main_state;
+    ctp_stm_state oo_state;
+
+    auto serde_fields() { return std::tie(main_state, oo_state); }
+};
+
 ctp_stm::ctp_stm(ss::logger& logger, raft::consensus* raft)
   : raft::persisted_stm<>(name, logger, raft)
   , _lock(ss::semaphore::max_counter()) {}
@@ -104,12 +114,12 @@ ss::future<> ctp_stm::prefix_truncate_below_lro() {
         vlog(
           _log.trace,
           "Waiting for LRO to advance past {}, current snapshot index: {}",
-          _state.get_max_collectible_offset(),
+          _mn_state.get_max_collectible_offset(),
           _raft->last_snapshot_index());
         try {
             if (
               _raft->last_snapshot_index()
-              >= _state.get_max_collectible_offset()) {
+              >= _mn_state.get_max_collectible_offset()) {
                 co_await _lro_advanced.wait();
             } else {
                 co_await _lro_advanced.wait(retry_backoff_time);
@@ -126,12 +136,12 @@ ss::future<> ctp_stm::prefix_truncate_below_lro() {
               "error waiting for LRO to advance in ctp stm background loop: {}",
               std::current_exception());
         }
-        auto lro = _state.get_max_collectible_offset();
+        auto lro = _mn_state.get_max_collectible_offset();
         auto snapshot_index = _raft->last_snapshot_index();
         vlog(
           _log.trace,
           "Attempting to snapshot ctp at {}, last snapshot at {}",
-          _state.get_max_collectible_offset(),
+          _mn_state.get_max_collectible_offset(),
           _raft->last_snapshot_index());
         try {
             co_await _raft->snapshot_and_truncate_log(lro);
@@ -191,7 +201,22 @@ ss::future<bool> ctp_stm::sync_in_term(
 }
 
 std::optional<cluster_epoch> ctp_stm::estimate_inactive_epoch() const noexcept {
-    return _state.estimate_min_epoch().transform(prev_cluster_epoch);
+    // An epoch is only truly inactive if it's inactive in both states.
+    // We need to take the minimum of the two min_epoch_lower_bounds.
+    auto main_min = _mn_state.estimate_min_epoch();
+    auto oo_min = _oo_state.estimate_min_epoch();
+
+    // If either state has no min epoch, use the other state's value
+    if (!main_min.has_value()) {
+        return oo_min.transform(prev_cluster_epoch);
+    }
+    if (!oo_min.has_value()) {
+        return main_min.transform(prev_cluster_epoch);
+    }
+
+    // Both have values, take the minimum to be conservative
+    auto min_of_both = std::min(main_min.value(), oo_min.value());
+    return prev_cluster_epoch(min_of_both);
 }
 
 ss::future<std::optional<cluster_epoch>> ctp_stm::get_inactive_epoch() {
@@ -206,7 +231,7 @@ ss::future<std::optional<cluster_epoch>> ctp_stm::get_inactive_epoch() {
     // for correctness. However, the local retention could be updated
     // with some arbitrary lag. In order to avoid holding data for too
     // long we're trying to read starting from the LRO.
-    auto lro = _state.get_last_reconciled_log_offset().value_or(
+    auto lro = _mn_state.get_last_reconciled_log_offset().value_or(
       model::prev_offset(so));
 
     // NOTE: we can't make a decision to skip the log read based on offsets
@@ -248,7 +273,7 @@ ss::future<std::optional<cluster_epoch>> ctp_stm::get_inactive_epoch() {
           _log.debug,
           "No epochs found in partition {}, max epoch {}, returning nullopt",
           _raft->ntp(),
-          _state.get_max_epoch());
+          _mn_state.get_max_epoch());
         co_return std::nullopt;
     }
 }
@@ -297,14 +322,18 @@ void ctp_stm::apply_advance_reconciled_offset(model::record record) {
     auto lro = cmd.last_reconciled_offset;
     auto lrlo = cmd.last_reconciled_log_offset;
     vlog(_log.debug, "New LRO value is {}, log offset {}", lro, lrlo);
-    _state.advance_last_reconciled_offset(lro, lrlo);
+    // Update both states with the same LRO
+    _mn_state.advance_last_reconciled_offset(lro, lrlo);
+    _oo_state.advance_last_reconciled_offset(lro, lrlo);
     _lro_advanced.signal();
 }
 
 void ctp_stm::apply_set_start_offset(model::record record) {
     auto cmd = serde::from_iobuf<set_start_offset_cmd>(record.release_value());
     vlog(_log.debug, "Setting start offset {}", cmd.new_start_offset);
-    _state.set_start_offset(cmd.new_start_offset);
+    // Update both states
+    _mn_state.set_start_offset(cmd.new_start_offset);
+    _oo_state.set_start_offset(cmd.new_start_offset);
 }
 
 void ctp_stm::apply_placeholder(const model::record_batch& batch) {
@@ -317,33 +346,59 @@ void ctp_stm::apply_placeholder(const model::record_batch& batch) {
     });
     auto placeholder = serde::from_iobuf<ctp_placeholder>(std::move(value));
     auto id = placeholder.id;
-    // this assertion is made here rather than inside the state object itself
-    // because the assertion is about the physical content of the log rather
-    // than the computed state.
-    vassert(
-      id.epoch >= _last_seen_epoch,
-      "Observed a non-monotonic epoch sequence {} < {}",
-      id.epoch,
-      _last_seen_epoch);
-    _last_seen_epoch = id.epoch;
-    _state.advance_epoch(id.epoch, batch.header().base_offset);
+
+    // Determine which state to update based on epoch order
+    auto get_applied_epoch = [this] { return _mn_state.get_max_epoch(); };
+    auto current_max = _mn_state.get_max_seen_epoch().or_else(
+      get_applied_epoch);
+
+    if (!current_max.has_value() || id.epoch >= current_max.value()) {
+        // In-order: epoch >= current max
+        // This assertion is made here rather than inside the state object
+        // itself because the assertion is about the physical content of the
+        // log rather than the computed state.
+        vassert(
+          id.epoch >= _last_seen_epoch,
+          "Observed a non-monotonic epoch sequence {} < {}",
+          id.epoch,
+          _last_seen_epoch);
+        _last_seen_epoch = id.epoch;
+        _mn_state.advance_epoch(id.epoch, batch.header().base_offset);
+        vlog(
+          _log.trace, "Applied in-order placeholder with epoch {}", id.epoch);
+    } else {
+        // Out-of-order: epoch < current max
+        // Apply to out-of-order state
+        _oo_state.advance_epoch(id.epoch, batch.header().base_offset);
+        vlog(
+          _log.debug,
+          "Applied out-of-order placeholder with epoch {} (current max={})",
+          id.epoch,
+          current_max.value());
+    }
 }
 
 ss::future<raft::local_snapshot_applied>
 ctp_stm::apply_local_snapshot(raft::stm_snapshot_header, iobuf&& buf) {
-    _state = serde::from_iobuf<ctp_stm_state>(std::move(buf));
+    auto snapshot = serde::from_iobuf<ctp_stm_snapshot>(std::move(buf));
+    _mn_state = snapshot.main_state;
+    _oo_state = snapshot.oo_state;
     co_return raft::local_snapshot_applied::yes;
 }
 
 ss::future<raft::stm_snapshot>
 ctp_stm::take_local_snapshot(ssx::semaphore_units) {
-    auto buf = serde::to_iobuf(_state);
+    // Serialize both states using the wrapper struct
+    ctp_stm_snapshot snapshot{.main_state = _mn_state, .oo_state = _oo_state};
+    auto buf = serde::to_iobuf(snapshot);
     co_return raft::stm_snapshot::create(
       0, this->last_applied(), std::move(buf));
 }
 
 ss::future<> ctp_stm::apply_raft_snapshot(const iobuf& buf) {
-    _state = serde::from_iobuf<ctp_stm_state>(buf.copy());
+    auto dual = serde::from_iobuf<ctp_stm_snapshot>(buf.copy());
+    _mn_state = dual.main_state;
+    _oo_state = dual.oo_state;
     co_return;
 }
 
@@ -353,7 +408,10 @@ ss::future<iobuf> ctp_stm::take_raft_snapshot(model::offset snapshot_at) {
       "The snapshot is taken at offset {} but current insync offset is {}",
       snapshot_at,
       last_applied());
-    co_return serde::to_iobuf(_state);
+
+    // Serialize both states using the wrapper struct
+    ctp_stm_snapshot snapshot{.main_state = _mn_state, .oo_state = _oo_state};
+    co_return serde::to_iobuf(snapshot);
 }
 
 ss::future<std::expected<cluster_epoch_fence, stale_cluster_epoch>>
@@ -367,21 +425,21 @@ ctp_stm::fence_epoch(cluster_epoch e) {
     // The max_seen_epoch is not persisted to disk as part of the snapshot
     // because it represents in-flight batches. If this epoch is nullopt we
     // should take max_applied_epoch into account.
-    auto get_applied_epoch = [this] { return _state.get_max_epoch(); };
-
+    auto get_applied_epoch = [this] { return _mn_state.get_max_epoch(); };
     while (true) {
-        auto fence_epoch = _state.get_max_seen_epoch().or_else(
+        auto fence_epoch = _mn_state.get_max_seen_epoch().or_else(
           get_applied_epoch);
         if (fence_epoch.has_value() && fence_epoch.value() == e) {
-            // Case 1. Same epoch, need to acquire read-lock.
+            // Case 1. Same epoch, need to acquire read-lock on main state.
             auto unit = co_await ss::get_units(_lock, 1, _as);
-            if (_state.get_max_seen_epoch().or_else(get_applied_epoch) == e) {
+            if (
+              _mn_state.get_max_seen_epoch().or_else(get_applied_epoch) == e) {
                 // The max_seen_epoch didn't advance after the scheduling point
                 co_return cluster_epoch_fence{
                   .unit = std::move(unit), .term = term};
             }
         } else if (!fence_epoch.has_value() || fence_epoch.value() < e) {
-            // Case 2. New epoch, need to acquire write-lock.
+            // Case 2. New epoch, need to acquire write-lock on main state.
             auto epoch_update_lock = _epoch_update_lock.try_get_units();
             if (!epoch_update_lock) {
                 // Someone else is updating the epoch - wait for the update and
@@ -394,11 +452,11 @@ ctp_stm::fence_epoch(cluster_epoch e) {
             auto unit = co_await ss::get_units(
               _lock, ss::semaphore::max_counter(), _as);
 
-            auto current_epoch = _state.get_max_seen_epoch().or_else(
+            auto current_epoch = _mn_state.get_max_seen_epoch().or_else(
               get_applied_epoch);
             std::optional<cluster_epoch_fence> epoch_fence_opt;
             if (!current_epoch.has_value() || current_epoch.value() <= e) {
-                _state.advance_max_seen_epoch(e);
+                _mn_state.advance_max_seen_epoch(e);
                 // Demote to reader lock after max_seen_epoch is updated.
                 unit.return_units(unit.count() - 1);
                 epoch_fence_opt.emplace(std::move(unit), term);
@@ -412,18 +470,44 @@ ctp_stm::fence_epoch(cluster_epoch e) {
             if (epoch_fence_opt.has_value()) {
                 co_return std::move(epoch_fence_opt).value();
             }
+        } else if (fence_epoch.has_value() && fence_epoch.value() > e) {
+            // Case 3: epoch < main state max_seen_epoch (out-of-order)
+            // Check if acceptable by out-of-order state.
+            // The _oo_state is bounded by the _mn_state. The out-of-order
+            // epoch should be >= min epoch estimated using the _mn_state.
+            // It should also be less than max-seen-epoch of the _mn_state.
+            auto mn_min_epoch = _mn_state.estimate_min_epoch();
+            if (mn_min_epoch.has_value() && e >= mn_min_epoch.value()) {
+                // Acceptable in out-of-order state - still being reconciled
+                vlog(
+                  _log.debug,
+                  "Fencing out-of-order epoch {} (main_max={}, "
+                  "monotonic_min={})",
+                  e,
+                  fence_epoch.value(),
+                  mn_min_epoch.value());
+                auto unit = co_await ss::get_units(_lock, 1, _as);
+                // Double-check after scheduling point
+                mn_min_epoch = _mn_state.estimate_min_epoch();
+                if (mn_min_epoch.has_value() && e >= mn_min_epoch.value()) {
+                    _oo_state.advance_max_seen_epoch(e);
+                    co_return cluster_epoch_fence{
+                      .unit = std::move(unit), .term = term};
+                }
+                // State changed during lock acquisition, fall through to
+                // rejection
+            }
         }
-
         // If we reach here, it means that we need to discard the batch.
         co_return std::unexpected(
-          stale_cluster_epoch(_state.get_max_seen_epoch()
+          stale_cluster_epoch(_mn_state.get_max_seen_epoch()
                                 .or_else(get_applied_epoch)
                                 .value_or(cluster_epoch{-1})));
     }
 }
 
 model::offset ctp_stm::max_removable_local_log_offset() {
-    return _state.get_max_collectible_offset();
+    return _mn_state.get_max_collectible_offset();
 }
 
 l0::producer_queue& ctp_stm::producer_queue() { return _producer_queue; }

@@ -51,10 +51,10 @@ public:
         return raft::stm_initial_recovery_policy::read_everything;
     }
 
-    const ctp_stm_state& state() const noexcept { return _state; }
+    const ctp_stm_state& state() const noexcept { return _mn_state; }
 
     void advance_max_seen_epoch(cluster_epoch epoch) {
-        _state.advance_max_seen_epoch(epoch);
+        _mn_state.advance_max_seen_epoch(epoch);
     }
 
     ss::future<std::expected<cluster_epoch_fence, stale_cluster_epoch>>
@@ -126,15 +126,17 @@ private:
     // lock holder may fail to update the epoch).
     ss::condition_variable _epoch_updated_cv;
 
-    /// Current in-memory state of the STM
-    ctp_stm_state _state;
+    /// Monotonic in-memory state of the STM
+    ctp_stm_state _mn_state;
+    /// Out-of-order state for tracking epochs that arrive out-of-order
+    ctp_stm_state _oo_state;
 
     // The last observed epoch to be applied to the state machine. This value is
     // used to check for violations of monotonicity in epoch order.
     cluster_epoch _last_seen_epoch{};
 
-    // An abort source to stop the prefix truncation loop on stop.
     ss::condition_variable _lro_advanced;
+    // An abort source to stop the prefix truncation loop on stop.
     ss::abort_source _as;
 
     // The last point that we truncated to, so we can skip writing a raft
