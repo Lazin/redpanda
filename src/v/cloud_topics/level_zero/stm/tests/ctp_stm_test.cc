@@ -685,3 +685,292 @@ TEST_F_CORO(ctp_stm_fixture, test_out_of_order_epoch_handling) {
     auto fence15 = co_await leader_api.fence_epoch(ct::cluster_epoch{15});
     ASSERT_TRUE_CORO(fence15.has_value());
 }
+
+TEST_F_CORO(ctp_stm_fixture, test_sequential_operations_fuzz) {
+    // Fuzz test that validates correctness under various operation orderings:
+    // - Bump cluster epoch
+    // - Replicate with current epoch
+    // - Replicate with stale epoch (below min_epoch) - should be rejected
+    // - Replicate with stale epoch (above min_epoch) - should be accepted
+    // - Advance LRO - should be accepted or rejected based on validity
+
+    co_await start();
+    co_await wait_for_leader(raft::default_timeout());
+
+    auto& leader = node(*get_leader());
+    auto leader_api = api(leader);
+    auto stm = get_stm<0>(leader);
+    ct::ctp_stm_accessor accessor;
+
+    // Test state tracking
+    struct test_state {
+        ct::cluster_epoch current_epoch{0};
+        model::offset last_replicated_offset{-1};
+        kafka::offset last_reconciled_offset{-1};
+
+        // Statistics
+        size_t epoch_bumps{0};
+        size_t successful_replications{0};
+        size_t rejected_stale_below_min{0};
+        size_t accepted_stale_above_min{0};
+        size_t successful_lro_advances{0};
+        size_t rejected_lro_advances{0};
+
+        // Track epochs we've replicated for validation
+        std::vector<std::pair<model::offset, ct::cluster_epoch>>
+          replicated_batches;
+    };
+
+    test_state state;
+
+    // Random number generator
+    std::random_device rd;
+    std::mt19937 gen(rd());
+
+    // Run fuzzing iterations
+    constexpr int num_iterations = 5000;
+
+    for (int iteration = 0; iteration < num_iterations; ++iteration) {
+        // Choose random operation (0-4)
+        std::uniform_int_distribution<> op_dist(0, 4);
+        int op = op_dist(gen);
+
+        if (op == 0) {
+            // Operation 1: Bump cluster epoch
+            state.current_epoch = ct::cluster_epoch{state.current_epoch() + 1};
+            state.epoch_bumps++;
+
+            vlog(
+              ct::cd_log.trace,
+              "Iteration {}: Bumped epoch to {}",
+              iteration,
+              state.current_epoch);
+
+        } else if (op == 1 && state.current_epoch() > 0) {
+            // Operation 2: Replicate with current (up-to-date) epoch
+
+            // Acquire fence first
+            auto fence_result = co_await leader_api.fence_epoch(
+              state.current_epoch);
+
+            if (!fence_result.has_value()) {
+                vlog(
+                  ct::cd_log.trace,
+                  "Iteration {}: Failed to fence current epoch {} (stale: {})",
+                  iteration,
+                  state.current_epoch,
+                  fence_result.error().latest_seen);
+                continue;
+            }
+
+            // Replicate batch
+            auto batch = make_record_batch(
+              state.current_epoch,
+              model::offset{state.last_replicated_offset() + 1},
+              iteration);
+
+            auto result = co_await replicate_record_batch(
+              leader, std::move(batch));
+
+            ASSERT_TRUE_CORO(result.has_value());
+            state.last_replicated_offset = result.value();
+            state.successful_replications++;
+            state.replicated_batches.emplace_back(
+              result.value(), state.current_epoch);
+
+            vlog(
+              ct::cd_log.trace,
+              "Iteration {}: Replicated current epoch {} at offset {}",
+              iteration,
+              state.current_epoch,
+              result.value());
+
+        } else if (op == 2 && !state.replicated_batches.empty()) {
+            // Operation 3: Try to replicate with stale epoch BELOW min_epoch
+            // This should be rejected by fence_epoch
+
+            auto main_min = accessor.get_main_state_min_epoch(*stm);
+
+            if (!main_min.has_value()) {
+                // No min_epoch set yet, skip this operation
+                continue;
+            }
+
+            if (main_min.value()() == 0) {
+                // min_epoch is 0, can't go below
+                continue;
+            }
+
+            // Choose an epoch below min_epoch
+            std::uniform_int_distribution<> epoch_dist(
+              0, main_min.value()() - 1);
+            auto stale_epoch = ct::cluster_epoch{epoch_dist(gen)};
+
+            // Try to acquire fence - this should fail
+            auto fence_result = co_await leader_api.fence_epoch(stale_epoch);
+
+            ASSERT_FALSE_CORO(fence_result.has_value());
+            state.rejected_stale_below_min++;
+
+            vlog(
+              ct::cd_log.trace,
+              "Iteration {}: Correctly rejected stale epoch {} (below "
+              "min_epoch {})",
+              iteration,
+              stale_epoch,
+              main_min.value());
+
+        } else if (
+          op == 3 && !state.replicated_batches.empty()
+          && state.current_epoch() > 1) {
+            // Operation 4: Try to replicate with stale epoch ABOVE OR EQUAL TO
+            // min_epoch This should be accepted if the epoch is within valid
+            // range
+
+            auto main_min = accessor.get_main_state_min_epoch(*stm);
+
+            ct::cluster_epoch min_epoch_val{0};
+            if (main_min.has_value()) {
+                min_epoch_val = main_min.value();
+            }
+
+            // Choose an epoch between min_epoch and current_epoch - 1
+            if (state.current_epoch() <= min_epoch_val()) {
+                continue;
+            }
+
+            std::uniform_int_distribution<> epoch_dist(
+              min_epoch_val(), state.current_epoch() - 1);
+            auto stale_epoch = ct::cluster_epoch{epoch_dist(gen)};
+
+            // Try to acquire fence - this should succeed
+            auto fence_result = co_await leader_api.fence_epoch(stale_epoch);
+
+            if (!fence_result.has_value()) {
+                // Fence failed - might be because this epoch is now beyond
+                // max_seen
+                vlog(
+                  ct::cd_log.trace,
+                  "Iteration {}: Stale epoch {} failed fence (latest_seen: {})",
+                  iteration,
+                  stale_epoch,
+                  fence_result.error().latest_seen);
+                continue;
+            }
+
+            // Replicate batch with stale epoch
+            auto batch = make_record_batch(
+              stale_epoch,
+              model::offset{state.last_replicated_offset() + 1},
+              iteration);
+
+            auto result = co_await replicate_record_batch(
+              leader, std::move(batch));
+
+            ASSERT_TRUE_CORO(result.has_value());
+            state.last_replicated_offset = result.value();
+            state.accepted_stale_above_min++;
+            state.replicated_batches.emplace_back(result.value(), stale_epoch);
+
+            vlog(
+              ct::cd_log.trace,
+              "Iteration {}: Replicated stale epoch {} at offset {} "
+              "(min_epoch: {})",
+              iteration,
+              stale_epoch,
+              result.value(),
+              min_epoch_val);
+
+        } else if (op == 4 && state.last_replicated_offset() >= 0) {
+            // Operation 5: Advance LRO
+            // Choose a random offset up to last replicated, or slightly beyond
+
+            std::uniform_int_distribution<> offset_dist(
+              std::max(state.last_reconciled_offset() + 1, 0L),
+              state.last_replicated_offset() + 2);
+            auto new_lro = kafka::offset{offset_dist(gen)};
+
+            // Advancing LRO should always succeed (it's idempotent and can go
+            // forward)
+            co_await leader_api.advance_reconciled_offset(
+              new_lro, model::no_timeout, as);
+
+            if (new_lro > state.last_reconciled_offset) {
+                state.last_reconciled_offset = new_lro;
+                state.successful_lro_advances++;
+
+                vlog(
+                  ct::cd_log.trace,
+                  "Iteration {}: Advanced LRO to {}",
+                  iteration,
+                  new_lro);
+            } else {
+                vlog(
+                  ct::cd_log.trace,
+                  "Iteration {}: LRO already at or beyond {}",
+                  iteration,
+                  new_lro);
+            }
+        }
+    }
+
+    // Final validation
+    vlog(
+      ct::cd_log.info,
+      "Fuzz test completed: {} epoch bumps, {} successful replications, "
+      "{} rejected stale (below min), {} accepted stale (above min), "
+      "{} LRO advances",
+      state.epoch_bumps,
+      state.successful_replications,
+      state.rejected_stale_below_min,
+      state.accepted_stale_above_min,
+      state.successful_lro_advances);
+
+    // Verify STM invariants
+    auto max_epoch = leader_api.get_max_epoch();
+    auto max_seen_epoch = leader_api.get_max_seen_epoch();
+
+    if (max_epoch.has_value() && max_seen_epoch.has_value()) {
+        // max_epoch should be <= max_seen_epoch
+        ASSERT_LE_CORO(max_epoch.value()(), max_seen_epoch.value()());
+
+        vlog(
+          ct::cd_log.info,
+          "Final state: max_epoch={}, max_seen_epoch={}",
+          max_epoch.value(),
+          max_seen_epoch.value());
+    }
+
+    // Verify min_epoch <= max_epoch invariant
+    auto main_min = accessor.get_main_state_min_epoch(*stm);
+    auto main_max = accessor.get_main_state_max_epoch(*stm);
+
+    if (main_min.has_value() && main_max.has_value()) {
+        ASSERT_LE_CORO(main_min.value()(), main_max.value()());
+
+        vlog(
+          ct::cd_log.info,
+          "Final state: main_min={}, main_max={}",
+          main_min.value(),
+          main_max.value());
+    }
+
+    // Verify out-of-order state invariants
+    auto oo_min = accessor.get_oo_state_min_epoch(*stm);
+    auto oo_max = accessor.get_oo_state_max_epoch(*stm);
+
+    if (oo_min.has_value() && oo_max.has_value()) {
+        ASSERT_LE_CORO(oo_min.value()(), oo_max.value()());
+
+        vlog(
+          ct::cd_log.info,
+          "Final state: oo_min={}, oo_max={}",
+          oo_min.value(),
+          oo_max.value());
+    }
+
+    // Verify we had some activity
+    ASSERT_GT_CORO(state.epoch_bumps, 0);
+
+    vlog(ct::cd_log.info, "Sequential fuzz test validation passed");
+}
