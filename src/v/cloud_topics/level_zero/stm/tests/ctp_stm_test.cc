@@ -974,3 +974,92 @@ TEST_F_CORO(ctp_stm_fixture, test_sequential_operations_fuzz) {
 
     vlog(ct::cd_log.info, "Sequential fuzz test validation passed");
 }
+
+TEST_F_CORO(ctp_stm_fixture, test_oo_state_reconciliation) {
+    // This test validates out-of-order batch handling and reconciliation:
+    // 1. Add a couple of batches in order
+    // 2. Add one batch out of order - should be accepted and stored in
+    // _oo_state
+    // 3. Verify _oo_state has data
+    // 4. Add more in-order batches
+    // 5. Reconcile and verify the out-of-order batch is removed from _oo_state
+    co_await start();
+    co_await wait_for_leader(raft::default_timeout());
+
+    auto& leader = node(*get_leader());
+    auto leader_api = api(leader);
+    auto stm = get_stm<0>(leader);
+    ct::ctp_stm_accessor accessor;
+
+    // Step 1: Add a couple of batches in order with epochs 10, 20
+    auto b10 = make_record_batch(ct::cluster_epoch{10}, model::offset{0}, 0);
+    auto res10 = co_await replicate_record_batch(leader, std::move(b10));
+    ASSERT_TRUE_CORO(res10.has_value());
+
+    auto b20 = make_record_batch(ct::cluster_epoch{20}, model::offset{1}, 1);
+    auto res20 = co_await replicate_record_batch(leader, std::move(b20));
+    ASSERT_TRUE_CORO(res20.has_value());
+
+    // Verify main state has max epoch 20
+    auto main_max = accessor.get_main_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(main_max.has_value());
+    ASSERT_EQ_CORO(main_max.value(), ct::cluster_epoch{20});
+
+    // Verify oo_state has no epochs yet
+    auto oo_max_before = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_FALSE_CORO(oo_max_before.has_value());
+
+    // Step 2: Add one batch out of order with epoch 15 (< main_max)
+    // This should be routed to _oo_state
+    auto b15 = make_record_batch(ct::cluster_epoch{15}, model::offset{2}, 2);
+    auto res15 = co_await replicate_record_batch(leader, std::move(b15));
+    ASSERT_TRUE_CORO(res15.has_value());
+
+    // Step 3: Verify _oo_state has data
+    auto oo_max_after = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(oo_max_after.has_value());
+    ASSERT_EQ_CORO(oo_max_after.value(), ct::cluster_epoch{15});
+
+    auto oo_min_after = accessor.get_oo_state_min_epoch(*stm);
+    ASSERT_TRUE_CORO(oo_min_after.has_value());
+    ASSERT_EQ_CORO(oo_min_after.value(), ct::cluster_epoch{15});
+
+    // Verify main state still has max epoch 20 (unchanged)
+    main_max = accessor.get_main_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(main_max.has_value());
+    ASSERT_EQ_CORO(main_max.value(), ct::cluster_epoch{20});
+
+    // Step 4: Add more in-order batches with epochs 25, 30
+    auto b25 = make_record_batch(ct::cluster_epoch{25}, model::offset{3}, 3);
+    auto res25 = co_await replicate_record_batch(leader, std::move(b25));
+    ASSERT_TRUE_CORO(res25.has_value());
+
+    auto b30 = make_record_batch(ct::cluster_epoch{30}, model::offset{4}, 4);
+    auto res30 = co_await replicate_record_batch(leader, std::move(b30));
+    ASSERT_TRUE_CORO(res30.has_value());
+
+    // Verify main state has max epoch 30 now
+    main_max = accessor.get_main_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(main_max.has_value());
+    ASSERT_EQ_CORO(main_max.value(), ct::cluster_epoch{30});
+
+    // Verify oo_state still has epoch 15
+    oo_max_after = accessor.get_oo_state_max_epoch(*stm);
+    ASSERT_TRUE_CORO(oo_max_after.has_value());
+    ASSERT_EQ_CORO(oo_max_after.value(), ct::cluster_epoch{15});
+
+    // Step 5: Reconcile past the out-of-order batch (offset 2)
+    // Advance reconciled offset to include the out-of-order batch and beyond
+    co_await leader_api.advance_reconciled_offset(
+      kafka::offset{2}, model::no_timeout, as);
+
+    // After reconciliation, verify the out-of-order batch is removed from
+    // _oo_state by checking that epoch 15 can no longer be fenced
+    auto fence15 = co_await leader_api.fence_epoch(ct::cluster_epoch{15});
+    ASSERT_FALSE_CORO(fence15.has_value());
+
+    vlog(
+      ct::cd_log.info,
+      "Out-of-order state reconciliation test passed: oo_state correctly "
+      "handled epoch 15 and removed it after reconciliation");
+}
