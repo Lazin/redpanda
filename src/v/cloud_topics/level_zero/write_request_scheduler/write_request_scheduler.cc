@@ -45,8 +45,8 @@ serialized_chunk shallow_copy(serialized_chunk& chunk) {
 
 template<typename Clock>
 write_request_scheduler<Clock>::write_request_scheduler(
-  write_pipeline<Clock>::stage s)
-  : _stage(s)
+  typename write_pipeline<Clock>::stage s)
+  : write_pipeline_actor<Clock>(std::move(s))
   , _max_buffer_size(
       config::shard_local_cfg()
         .cloud_topics_produce_batching_size_threshold.bind())
@@ -59,6 +59,10 @@ write_request_scheduler<Clock>::write_request_scheduler(
 
 template<typename Clock>
 ss::future<> write_request_scheduler<Clock>::start() {
+    // Start the actor loop for processing notifications (data threshold policy)
+    if (!_test_only_disable_data_threshold) {
+        co_await write_pipeline_actor<Clock>::start();
+    }
     // Start the background time based fallback loop on shard 0
     if (
       ss::this_shard_id() == ss::shard_id(0)
@@ -66,16 +70,15 @@ ss::future<> write_request_scheduler<Clock>::start() {
         ssx::spawn_with_gate(
           _gate, [this] { return bg_time_based_fallback(); });
     }
-    if (!_test_only_disable_data_threshold) {
-        ssx::spawn_with_gate(_gate, [this] { return bg_data_threshold(); });
-    }
-    co_return;
 }
 
 template<typename Clock>
 ss::future<> write_request_scheduler<Clock>::stop() {
     _as.request_abort();
     co_await _gate.close();
+    if (!_test_only_disable_data_threshold) {
+        co_await write_pipeline_actor<Clock>::stop();
+    }
 }
 
 template<typename Clock>
@@ -85,7 +88,7 @@ size_t write_request_scheduler<Clock>::shard_bytes() noexcept {
     // _max_buffer_size limits.
     size_t total_bytes = 0;
     size_t total_requests = 0;
-    _stage.process(
+    this->stage().process(
       [&total_bytes, &total_requests, this](
         const l0::write_request<Clock>& req) noexcept
         -> std::expected<l0::request_processing_result, errc> {
@@ -100,39 +103,37 @@ size_t write_request_scheduler<Clock>::shard_bytes() noexcept {
 }
 
 template<typename Clock>
-ss::future<> write_request_scheduler<Clock>::bg_data_threshold() {
-    vassert(
-      !_test_only_disable_data_threshold, "Data threshold is not disabled");
-    while (!_as.abort_requested()) {
-        auto req = co_await _stage.wait_until(
-          _max_buffer_size(), Clock::time_point::max(), &_as);
-        if (!req.has_value()) {
-            if (req.error() == errc::shutting_down) {
-                vlog(cd_log.debug, "bg_data_threshold: shutting down");
-                co_return;
-            } else {
-                vlog(
-                  cd_log.error,
-                  "bg_data_threshold: error waiting for write requests: {}",
-                  req.error());
-            }
-            co_return;
-        }
-        vlog(
-          cd_log.debug,
-          "bg_data_threshold: pending bytes: {}, total bytes: "
-          "{}",
-          req.value().pending_write_bytes,
-          req.value().total_write_bytes);
-
-        // Propagate to the next stage
-        _stage.process(
-          [this](const l0::write_request<Clock>& r) noexcept
-            -> std::expected<l0::request_processing_result, errc> {
-              _probe.register_data_threshold(r.size_bytes());
-              return l0::request_processing_result::advance_and_continue;
-          });
+ss::future<>
+write_request_scheduler<Clock>::process(pipeline_notification msg) {
+    // Data threshold policy: check if we have enough data to trigger upload.
+    // If we've accumulated enough data (>= max_buffer_size), advance all
+    // requests to the next stage.
+    if (msg.pending_bytes < _max_buffer_size()) {
+        // Not enough data yet, wait for more
+        co_return;
     }
+
+    vlog(
+      cd_log.debug,
+      "process: data threshold reached, pending bytes: {}, total bytes: {}",
+      msg.pending_bytes,
+      msg.total_bytes);
+
+    // Propagate to the next stage
+    this->stage().process(
+      [this](const l0::write_request<Clock>& r) noexcept
+        -> std::expected<l0::request_processing_result, errc> {
+          _probe.register_data_threshold(r.size_bytes());
+          return l0::request_processing_result::advance_and_continue;
+      });
+
+    // Notify the next actor (batcher) that work is available
+    this->notify_next(msg.pending_bytes, msg.total_bytes);
+}
+
+template<typename Clock>
+void write_request_scheduler<Clock>::on_error(std::exception_ptr e) noexcept {
+    vlog(cd_log.error, "write_request_scheduler actor error: {}", e);
 }
 
 template<typename Clock>
@@ -193,7 +194,7 @@ ss::future<> write_request_scheduler<Clock>::pull_and_roundtrip(
         if (ss::this_shard_id() == info.shard && info.bytes > 0) {
             // Fast path: process requests locally
             // This shard is the one that has the most data.
-            _stage.process(
+            this->stage().process(
               [this, &signaled](const write_request<Clock>& r) noexcept {
                   signaled = true;
                   _probe.register_time_fallback(r.size_bytes());
@@ -209,7 +210,7 @@ ss::future<> write_request_scheduler<Clock>::pull_and_roundtrip(
         // above will see no write requests. Other shards are depositing their
         // requests to the target shard without signalling the next stage. So we
         // need to signal it here.
-        _stage.signal_next_stage();
+        this->stage().signal_next_stage();
     }
     co_await ss::when_all_succeed(in_flight.begin(), in_flight.end());
 }
@@ -318,7 +319,7 @@ ss::future<> write_request_scheduler<Clock>::bg_time_based_fallback() {
           cd_log.debug,
           "Starting write_request_scheduler time based fallback background "
           "loop");
-        while (!_as.abort_requested() && !_stage.stopped()) {
+        while (!_as.abort_requested() && !this->stage().stopped()) {
             // Sleep before next iteration
             co_await ss::sleep_abortable(_scheduling_interval(), _as);
             co_await apply_time_based_fallback();
@@ -355,7 +356,7 @@ write_request_scheduler<Clock>::proxy_write_request(
       shallow_copy(req->data_chunk),
       req->expiration_time);
     auto fut = proxy.response.get_future();
-    _stage.push_next_stage(proxy, false);
+    this->stage().push_next_stage(proxy, false);
     target_gate_holder.release();
     auto extents_fut = co_await ss::coroutine::as_future(std::move(fut));
     if (extents_fut.failed()) {
@@ -449,7 +450,7 @@ ss::future<> write_request_scheduler<Clock>::forward_to(
   ss::shard_id target_shard,
   ss::foreign_ptr<gate_holder_ptr> target_shard_gate_holder) {
     // Owning shard
-    auto req = _stage.pull_write_requests(
+    auto req = this->stage().pull_write_requests(
       _max_buffer_size(), _max_cardinality());
     co_await roundtrip(
       target_shard, std::move(req), std::move(target_shard_gate_holder));

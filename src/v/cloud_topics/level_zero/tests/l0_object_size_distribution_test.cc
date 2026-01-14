@@ -134,6 +134,10 @@ public:
             }
         });
 
+        // Register scheduler as actor with the pipeline
+        co_await scheduler.invoke_on_all(
+          [this](auto& s) { pipeline.local().register_actor(&s); });
+
         /*
          * setup the remote mock which will track the size of uploaded objects
          */
@@ -158,6 +162,10 @@ public:
           cloud_storage_clients::bucket_name{"bucket0"},
           ss::sharded_parameter([this] { return std::ref(remote.local()); }),
           &cluster_services);
+
+        // Register batcher as actor with the pipeline
+        co_await batcher.invoke_on_all(
+          [this](auto& b) { pipeline.local().register_actor(&b); });
 
         co_await scheduler.invoke_on_all(
           [](auto& sched) { return sched.start(); });

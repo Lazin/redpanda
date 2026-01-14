@@ -13,7 +13,6 @@
 #include "cloud_io/remote.h"
 #include "cloud_topics/errc.h"
 #include "cloud_topics/level_zero/batcher/aggregator.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/pipeline/serializer.h"
 #include "cloud_topics/level_zero/pipeline/write_request.h"
 #include "cloud_topics/logger.h"
@@ -36,11 +35,12 @@ namespace cloud_topics::l0 {
 
 template<class Clock>
 batcher<Clock>::batcher(
-  write_pipeline<Clock>::stage stage,
+  typename write_pipeline<Clock>::stage stage,
   cloud_storage_clients::bucket_name bucket,
   cloud_io::remote_api<Clock>& remote_api,
   cloud_topics::cluster_services* cluster_services)
-  : _cluster_services(cluster_services)
+  : write_pipeline_actor<Clock>(std::move(stage))
+  , _cluster_services(cluster_services)
   , _remote(remote_api)
   , _bucket(std::move(bucket))
   , _upload_timeout(
@@ -50,14 +50,13 @@ batcher<Clock>::batcher(
         .cloud_storage_upload_loop_initial_backoff_ms.bind())
   , _rtc(_as)
   , _logger(cd_log, _rtc)
-  , _stage(std::move(stage))
   , _probe(config::shard_local_cfg().disable_metrics()) {}
 
 template<class Clock>
 ss::future<> batcher<Clock>::start() {
     vlog(cd_log.debug, "Batcher start");
-    ssx::spawn_with_gate(_gate, [this] { return bg_controller_loop(); });
-    return ss::now();
+    // Start the actor's message processing loop
+    co_await write_pipeline_actor<Clock>::start();
 }
 
 template<class Clock>
@@ -65,6 +64,44 @@ ss::future<> batcher<Clock>::stop() {
     vlog(cd_log.debug, "Batcher stop");
     _as.request_abort();
     co_await _gate.close();
+    // Stop the actor's message processing loop
+    co_await write_pipeline_actor<Clock>::stop();
+}
+
+template<class Clock>
+ss::future<> batcher<Clock>::process(pipeline_notification) {
+    // Pull all available write requests from the pipeline
+    auto list = this->stage().pull_write_requests(
+      max_buffer_size, max_cardinality);
+
+    if (list.requests.empty()) {
+        co_return;
+    }
+
+    vlog(_logger.debug, "Processing {} write requests", list.requests.size());
+
+    // Spawn the upload work in the background
+    // We can spawn work without worrying about memory usage because the
+    // pipeline tracks memory for us and will stop accepting new write
+    // requests if we go over the limit.
+    ssx::spawn_with_gate(_gate, [this, list = std::move(list)]() mutable {
+        return run_once(std::move(list))
+          .then([this](std::expected<std::monostate, errc> res) {
+              if (!res.has_value()) {
+                  if (res.error() == errc::shutting_down) {
+                      vlog(_logger.info, "Batcher upload shutting down");
+                  } else {
+                      vlog(
+                        _logger.info, "Batcher upload error: {}", res.error());
+                  }
+              }
+          });
+    });
+}
+
+template<class Clock>
+void batcher<Clock>::on_error(std::exception_ptr e) noexcept {
+    vlog(_logger.error, "Batcher actor error: {}", e);
 }
 
 template<class Clock>
@@ -107,7 +144,7 @@ batcher<Clock>::upload_object(object_id id, iobuf payload) {
           .payload = std::move(payload),
         });
 
-        _stage.register_micro_probe(probe);
+        this->stage().register_micro_probe(probe);
 
         switch (upl_result) {
         case cloud_io::upload_result::success:
@@ -142,7 +179,7 @@ batcher<Clock>::upload_object(object_id id, iobuf payload) {
 
 template<class Clock>
 ss::future<std::expected<std::monostate, errc>> batcher<Clock>::run_once(
-  write_pipeline<Clock>::write_requests_list list) noexcept {
+  typename write_pipeline<Clock>::write_requests_list list) noexcept {
     try {
         // NOTE: the main workflow looks like this:
         // - remove expired write requests
@@ -230,53 +267,6 @@ ss::future<std::expected<std::monostate, errc>> batcher<Clock>::run_once(
         }
         vlog(_logger.error, "Unexpected batcher error: {}", err);
         co_return std::unexpected{errc::unexpected_failure};
-    }
-}
-
-template<class Clock>
-ss::future<> batcher<Clock>::bg_controller_loop() {
-    auto h = _gate.hold();
-    bool more_work = false;
-    while (!_as.abort_requested()) {
-        if (!more_work) {
-            auto wait_res = co_await _stage.wait_next(&_as);
-            if (!wait_res.has_value()) {
-                // Shutting down
-                vlog(
-                  _logger.info,
-                  "Batcher upload loop is shutting down {}",
-                  wait_res.error());
-                co_return;
-            }
-        }
-        if (_as.abort_requested()) {
-            vlog(_logger.info, "Batcher upload loop is shutting down");
-            co_return;
-        }
-
-        auto list = _stage.pull_write_requests(
-          10_MiB); // TODO: use configuration parameter
-
-        // We can spawn the work in the background without worrying about memory
-        // usage because the pipeline tracks the memory usage for us and will
-        // stop accepting new write requests if we go over the limit.
-        ssx::spawn_with_gate(_gate, [this, list = std::move(list)]() mutable {
-            return run_once(std::move(list))
-              .then([this](std::expected<std::monostate, errc> res) {
-                  if (!res.has_value()) {
-                      if (res.error() == errc::shutting_down) {
-                          vlog(
-                            _logger.info,
-                            "Batcher upload loop is shutting down");
-                      } else {
-                          vlog(
-                            _logger.info,
-                            "Batcher upload loop error: {}",
-                            res.error());
-                      }
-                  }
-              });
-        });
     }
 }
 

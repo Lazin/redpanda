@@ -59,11 +59,13 @@ public:
 
         co_await construct_service(_write_pipeline);
 
+        // Create write_request_scheduler with a pipeline stage (first stage)
         co_await construct_service(
           _write_req_scheduler, ss::sharded_parameter([this] {
               return _write_pipeline.local().register_write_pipeline_stage();
           }));
 
+        // Create batcher with a pipeline stage (second stage)
         co_await construct_service(
           _batcher,
           ss::sharded_parameter([this] {
@@ -72,6 +74,16 @@ public:
           ss::sharded_parameter([bucket] { return bucket; }),
           ss::sharded_parameter([io] { return std::ref(io->local()); }),
           ss::sharded_parameter([this] { return &_cluster_services.local(); }));
+
+        // Register actor components with the pipeline in order:
+        // write_request_scheduler -> batcher
+        co_await _write_req_scheduler.invoke_on_all(
+          [this](l0::write_request_scheduler<>& s) {
+              _write_pipeline.local().register_actor(&s);
+          });
+        co_await _batcher.invoke_on_all([this](l0::batcher<>& b) {
+            _write_pipeline.local().register_actor(&b);
+        });
 
         co_await construct_service(_read_pipeline);
 

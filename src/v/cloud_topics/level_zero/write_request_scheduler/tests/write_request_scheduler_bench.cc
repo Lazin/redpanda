@@ -7,7 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/write_request_scheduler/write_request_scheduler.h"
 #include "config/configuration.h"
@@ -50,44 +50,29 @@ struct write_request_balancer_accessor {
 };
 } // namespace l0
 
-struct pipeline_sink {
+struct pipeline_sink : public l0::write_pipeline_actor<> {
     explicit pipeline_sink(l0::write_pipeline<>& p)
-      : stage(p.register_write_pipeline_stage()) {}
+      : l0::write_pipeline_actor<>(p.register_write_pipeline_stage())
+      , _pipeline(p) {
+        _pipeline.register_actor(this);
+    }
 
-    ss::future<> start() {
-        ssx::background = bg_run();
+    ss::future<> start() { co_await l0::write_pipeline_actor<>::start(); }
+
+    ss::future<> stop() { co_await l0::write_pipeline_actor<>::stop(); }
+
+    ss::future<> process(l0::pipeline_notification) override {
+        auto result = stage().pull_write_requests(
+          std::numeric_limits<size_t>::max());
+        for (auto& r : result.requests) {
+            r.set_value(chunked_vector<extent_meta>{});
+        }
         co_return;
     }
 
-    ss::future<> stop() {
-        _as.request_abort();
-        co_await _gate.close();
-    }
+    void on_error(std::exception_ptr) noexcept override {}
 
-    ss::future<> bg_run() {
-        auto h = _gate.hold();
-        while (!_as.abort_requested()) {
-            auto res = co_await stage.wait_next(&_as);
-            if (!res.has_value()) {
-                co_return;
-            }
-            auto event = res.value();
-            if (event.type == l0::event_type::shutting_down) {
-                co_return;
-            }
-            vassert(
-              event.type == l0::event_type::new_write_request,
-              "unexpected event type");
-            auto result = stage.pull_write_requests(
-              std::numeric_limits<size_t>::max());
-            for (auto& r : result.requests) {
-                r.set_value(chunked_vector<extent_meta>{});
-            }
-        }
-    }
-    l0::write_pipeline<>::stage stage;
-    ss::gate _gate;
-    ss::abort_source _as;
+    l0::write_pipeline<>& _pipeline;
 };
 } // namespace cloud_topics
 
@@ -112,6 +97,12 @@ public:
                   cloud_topics::l0::write_request_balancer_accessor::
                     disable_time_based_fallback(&s);
               }
+          });
+
+        // Register scheduler as actor with the pipeline
+        co_await scheduler.invoke_on_all(
+          [this](cloud_topics::l0::write_request_scheduler<>& s) {
+              pipeline.local().register_actor(&s);
           });
 
         co_await scheduler.invoke_on_all(

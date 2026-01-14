@@ -12,6 +12,7 @@
 
 #include "base/seastarx.h"
 #include "cloud_topics/level_zero/common/level_zero_probe.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/write_pipeline.h"
 #include "cloud_topics/level_zero/pipeline/write_request.h"
 #include "config/property.h"
@@ -38,8 +39,9 @@ namespace cloud_topics::l0 {
 ///
 /// The scheduler uses two policies to decide when to trigger uploads:
 ///
-/// - **Data threshold policy** — Forces a shard to upload immediately once its
-/// local data reaches a set threshold. This operates per shard and does not
+/// - **Data threshold policy** — Implemented via the actor's process() method.
+/// When notified, it checks if local data reaches a set threshold and if so,
+/// forwards requests to the next stage. This operates per shard and does not
 /// cross shard boundaries.
 ///
 /// - **Time-based fallback policy** — Runs only on shard 0. After N ms, it
@@ -48,7 +50,8 @@ namespace cloud_topics::l0 {
 /// pipeline to minimize CPU cache invalidation.
 template<typename Clock = seastar::lowres_clock>
 class write_request_scheduler
-  : public ss::peering_sharded_service<write_request_scheduler<Clock>> {
+  : public write_pipeline_actor<Clock>
+  , public ss::peering_sharded_service<write_request_scheduler<Clock>> {
     friend struct write_request_balancer_accessor;
 
     struct shard_info {
@@ -57,11 +60,20 @@ class write_request_scheduler
     };
 
 public:
-    explicit write_request_scheduler(write_pipeline<Clock>::stage s);
+    explicit write_request_scheduler(typename write_pipeline<Clock>::stage s);
 
     ss::future<> start();
 
     ss::future<> stop();
+
+protected:
+    /// Actor interface: called when notified of new write requests.
+    /// Implements the data threshold policy - if enough data accumulated,
+    /// advance requests to the next stage.
+    ss::future<> process(pipeline_notification msg) override;
+
+    /// Actor interface: called on unhandled exceptions in the actor loop.
+    void on_error(std::exception_ptr e) noexcept override;
 
 private:
     /// The fiber that runs on a shard 0 and schedules
@@ -85,12 +97,6 @@ private:
     ///       with other shards to instruct them to forward their requests
     ///       to the target shard to upload.
     ss::future<> pull_and_roundtrip(std::vector<shard_info> infos);
-
-    /// This fiber runs on every shard and is triggered by
-    /// the data accumulation threshold. If enough data is accumulated
-    /// on a shard this shard will trigger the upload without going
-    /// cross shard.
-    ss::future<> bg_data_threshold();
 
     /// Run the load balancing for all available write requests
     ss::future<checked<bool, errc>> run_once() noexcept;
@@ -145,7 +151,6 @@ private:
       ss::shard_id shard,
       ss::foreign_ptr<gate_holder_ptr> target_shard_gate_holder);
 
-    write_pipeline<Clock>::stage _stage;
     ss::abort_source _as;
     ss::gate _gate;
 

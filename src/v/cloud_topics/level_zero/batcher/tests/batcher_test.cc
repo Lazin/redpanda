@@ -96,7 +96,7 @@ namespace cloud_topics::l0 {
 struct batcher_accessor {
     ss::future<std::expected<std::monostate, errc>> run_once() noexcept {
         constexpr static size_t lim = 10_MiB;
-        auto list = batcher->_stage.pull_write_requests(lim);
+        auto list = batcher->stage().pull_write_requests(lim);
         return batcher->run_once(std::move(list));
     }
 

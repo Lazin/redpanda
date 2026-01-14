@@ -18,6 +18,7 @@
 #include "cloud_topics/cluster_services.h"
 #include "cloud_topics/level_zero/cluster_services_impl/cluster_services.h"
 #include "cloud_topics/level_zero/common/level_zero_probe.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/pipeline/write_pipeline.h"
 #include "cloud_topics/types.h"
@@ -58,8 +59,13 @@ struct batcher_accessor;
 /// The batcher collects a list of write_request instances in
 /// memory. Periodically, the data is uploaded to the cloud storage
 /// and removed from memory.
+///
+/// The batcher is a pipeline_actor that receives notifications when
+/// new write requests are available in the pipeline. It processes
+/// requests by aggregating them into L0 objects and uploading to
+/// cloud storage.
 template<class Clock = ss::lowres_clock>
-class batcher {
+class batcher : public write_pipeline_actor<Clock> {
     using clock_t = Clock;
     using timestamp_t = typename Clock::time_point;
 
@@ -67,7 +73,7 @@ class batcher {
 
 public:
     explicit batcher(
-      write_pipeline<Clock>::stage stage,
+      typename write_pipeline<Clock>::stage stage,
       cloud_storage_clients::bucket_name bucket,
       cloud_io::remote_api<Clock>& remote_api,
       cloud_topics::cluster_services* cluster_services);
@@ -75,8 +81,16 @@ public:
     ss::future<> start();
     ss::future<> stop();
 
+protected:
+    /// Actor interface - process notification that work is available.
+    /// Pulls write requests from the pipeline and uploads them.
+    ss::future<> process(pipeline_notification msg) override;
+
+    /// Actor interface - handle errors during processing.
+    void on_error(std::exception_ptr e) noexcept override;
+
 private:
-    /// Run one iteration of the background loop
+    /// Run one iteration of the upload loop
     ///
     /// Single call
     /// - filters out timed out requests
@@ -86,14 +100,7 @@ private:
     ///
     /// \returns error code
     ss::future<std::expected<std::monostate, errc>>
-      run_once(write_pipeline<Clock>::write_requests_list) noexcept;
-
-    /// Background fiber responsible for merging
-    /// aggregated log data and sending it to the
-    /// cloud storage
-    ///
-    /// The method should only be invoked on shard 0
-    ss::future<> bg_controller_loop();
+      run_once(typename write_pipeline<Clock>::write_requests_list) noexcept;
 
     /// Upload L0 object based on placeholders
     ///
@@ -117,8 +124,6 @@ private:
 
     basic_retry_chain_node<Clock> _rtc;
     basic_retry_chain_logger<Clock> _logger;
-
-    write_pipeline<Clock>::stage _stage;
 
     batcher_probe _probe;
 };

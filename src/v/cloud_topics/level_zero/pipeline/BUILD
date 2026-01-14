@@ -146,6 +146,18 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "pipeline_actor",
+    hdrs = [
+        "pipeline_actor.h",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/ssx:actor",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "read_pipeline",
     srcs = [
         "read_pipeline.cc",
@@ -192,6 +204,7 @@ redpanda_cc_library(
         "write_pipeline.h",
     ],
     implementation_deps = [
+        ":pipeline_actor",
         ":serializer",
         "//src/v/cloud_topics:logger",
         "//src/v/resource_mgmt:memory_groups",
