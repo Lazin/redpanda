@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
 
 #include <seastar/core/abort_source.hh>
@@ -18,7 +19,7 @@
 
 namespace cloud_topics::l0 {
 
-/// Read fanout stage coverts vectorized read requests into multiple
+/// Read fanout stage converts vectorized read requests into multiple
 /// parallel requests. The client is allowed to send wide read requests
 /// that target multiple extents that may be stored in different L0
 /// objects. The read fanout stage splits the requests into multiple
@@ -29,7 +30,10 @@ namespace cloud_topics::l0 {
 ///
 /// For requests that target single extent the stage simply forwards
 /// them to the next stage without any modifications.
-class read_fanout {
+///
+/// This is a pipeline_actor that receives notifications when new read
+/// requests are available.
+class read_fanout : public read_pipeline_actor<> {
 public:
     explicit read_fanout(l0::read_pipeline<>::stage);
 
@@ -44,13 +48,17 @@ public:
 
     stats get_stats() const noexcept;
 
-private:
-    ss::future<> bg_process();
+protected:
+    /// Actor interface - process notification that work is available.
+    ss::future<> process(pipeline_notification msg) override;
 
+    /// Actor interface - handle errors during processing.
+    void on_error(std::exception_ptr e) noexcept override;
+
+private:
     ss::future<> process_single_request(l0::read_request<>* req);
 
     ss::gate _gate;
-    l0::read_pipeline<>::stage _pipeline_stage;
     stats _stats;
 };
 } // namespace cloud_topics::l0

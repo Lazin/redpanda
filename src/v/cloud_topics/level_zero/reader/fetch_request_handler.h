@@ -13,6 +13,7 @@
 #include "base/seastarx.h"
 #include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/remote.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
 #include "model/fundamental.h"
 
@@ -26,8 +27,11 @@ namespace cloud_topics::l0 {
 /// This component can process ctp_placeholder batches.
 /// This component should be split up into separate components in the
 /// future (one for materialization step, one for reading from cache,
-// etc). Currently everything is done in one place for simplicity.
-class fetch_handler {
+/// etc). Currently everything is done in one place for simplicity.
+///
+/// This is the final stage of the read pipeline - it materializes
+/// placeholder batches by downloading data from cloud storage.
+class fetch_handler : public read_pipeline_actor<> {
 public:
     explicit fetch_handler(
       l0::read_pipeline<>::stage,
@@ -38,12 +42,14 @@ public:
     ss::future<> start();
     ss::future<> stop();
 
+protected:
+    /// Actor interface - process notification that work is available.
+    ss::future<> process(pipeline_notification msg) override;
+
+    /// Actor interface - handle errors during processing.
+    void on_error(std::exception_ptr e) noexcept override;
+
 private:
-    ss::future<> bg_process_requests();
-
-    /// Run resolver loop once
-    ss::future<checked<bool, errc>> process_requests();
-
     /// Process single request
     ss::future<> process_single_request(l0::read_request<>* req);
 
@@ -53,6 +59,5 @@ private:
     retry_chain_node _rtc;
     retry_chain_logger _logger;
     ss::gate _gate;
-    l0::read_pipeline<>::stage _pipeline_stage;
 };
 } // namespace cloud_topics::l0

@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "cloud_topics/level_zero/pipeline/event_filter.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/read_fanout/read_fanout.h"
 #include "config/configuration.h"
@@ -36,11 +37,12 @@
 using namespace std::chrono_literals;
 namespace cloud_topics {
 
-/// The handler simulates L0 object downloads
-/// by injecting sleeps.
-struct fetch_handler {
-    explicit fetch_handler(l0::read_pipeline<>& p, int concurrency)
-      : stage(p.register_read_pipeline_stage())
+/// The handler simulates L0 object downloads by injecting sleeps.
+/// Uses the actor pattern for notification-based processing.
+class fetch_handler : public l0::read_pipeline_actor<> {
+public:
+    explicit fetch_handler(l0::read_pipeline<>::stage s, int concurrency)
+      : l0::read_pipeline_actor<>(std::move(s))
       , _con(concurrency) {
         // Use same batch to reply to all materialization requests
         // to avoid regenerating it during the run.
@@ -56,31 +58,28 @@ struct fetch_handler {
 
     ss::future<> start(std::chrono::milliseconds d) {
         _download_latency = d;
-        ssx::background = bg_run();
-        return ss::now();
+        co_await l0::read_pipeline_actor<>::start();
     }
 
-    ss::future<> stop() { co_await _gate.close(); }
+    ss::future<> stop() {
+        co_await _gate.close();
+        co_await l0::read_pipeline_actor<>::stop();
+    }
 
-    ss::future<> bg_run() {
-        auto h = _gate.hold();
-        while (!stage.stopped()) {
-            auto result = co_await stage.pull_fetch_requests(
-              std::numeric_limits<size_t>::max());
+    ss::future<> process(l0::pipeline_notification) override {
+        auto result = this->stage().pull_fetch_requests_nowait(
+          std::numeric_limits<size_t>::max());
 
-            if (!result.has_value()) {
-                // Expected during shutdown
-                co_return;
-            }
-
-            for (auto& r : result.value().requests) {
-                // Process every request concurrently because this is what
-                // real fetch handler does.
-                ssx::spawn_with_gate(
-                  _gate, [this, &r] { return process_single_request(&r); });
-            }
+        for (auto& r : result.requests) {
+            // Process every request concurrently because this is what
+            // real fetch handler does.
+            ssx::spawn_with_gate(
+              _gate, [this, &r] { return process_single_request(&r); });
         }
+        co_return;
     }
+
+    void on_error(std::exception_ptr) noexcept override {}
 
     ss::future<> process_single_request(l0::read_request<>* req) {
         auto auto_dispose = ss::defer(
@@ -104,7 +103,6 @@ struct fetch_handler {
     }
 
     std::optional<model::record_batch> _batch;
-    l0::read_pipeline<>::stage stage;
     ss::gate _gate;
     std::chrono::milliseconds _download_latency;
     // Semaphore used to simulate connection pool.
@@ -130,13 +128,26 @@ public:
             co_await fanout.start(ss::sharded_parameter([this] {
                 return pipeline.local().register_read_pipeline_stage();
             }));
-
-            co_await fanout.invoke_on_all([](auto& f) { return f.start(); });
         }
 
         co_await sink.start(
-          ss::sharded_parameter([this] { return std::ref(pipeline.local()); }),
+          ss::sharded_parameter(
+            [this] { return pipeline.local().register_read_pipeline_stage(); }),
           concurrency);
+
+        // Register actors with pipeline
+        if (enable_fanout) {
+            co_await fanout.invoke_on_all(
+              [this](auto& f) { pipeline.local().register_actor(&f); });
+        }
+
+        co_await sink.invoke_on_all(
+          [this](auto& s) { pipeline.local().register_actor(&s); });
+
+        // Start actors after registration
+        if (enable_fanout) {
+            co_await fanout.invoke_on_all([](auto& f) { return f.start(); });
+        }
 
         co_await sink.invoke_on_all(
           [dl_lat](auto& sink) { return sink.start(dl_lat); });

@@ -22,6 +22,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/level_zero/common:extent_meta",
         "//src/v/cloud_topics/level_zero/pipeline:base_pipeline",
         "//src/v/cloud_topics/level_zero/pipeline:event_filter",
+        "//src/v/cloud_topics/level_zero/pipeline:pipeline_actor",
         "//src/v/cloud_topics/level_zero/pipeline:read_pipeline",
         "//src/v/cloud_topics/level_zero/pipeline:read_request",
         "//src/v/config",

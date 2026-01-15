@@ -11,6 +11,7 @@
 #pragma once
 
 #include "base/seastarx.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
 #include "cloud_topics/level_zero/pipeline/read_request.h"
 
@@ -25,8 +26,13 @@ namespace cloud_topics::l0 {
 /// It directs read requests to different shards based on the
 /// object id. The requests that target the same object id will
 /// always go to the same shard.
+///
+/// The scheduler is a pipeline_actor that receives notifications when
+/// new read requests are available in the pipeline. It processes
+/// requests by distributing them to appropriate shards.
 class read_request_scheduler
-  : public ss::peering_sharded_service<read_request_scheduler> {
+  : public read_pipeline_actor<ss::lowres_clock>
+  , public ss::peering_sharded_service<read_request_scheduler> {
 public:
     explicit read_request_scheduler(
       read_pipeline<ss::lowres_clock>::stage stage);
@@ -35,9 +41,15 @@ public:
 
     ss::future<> stop();
 
-private:
-    ss::future<> bg_loop();
+protected:
+    /// Actor interface - process notification that work is available.
+    /// Pulls read requests from the pipeline and schedules them on shards.
+    ss::future<> process(pipeline_notification msg) override;
 
+    /// Actor interface - handle errors during processing.
+    void on_error(std::exception_ptr e) noexcept override;
+
+private:
     /// Schedules request processing on the target shard.
     ///
     /// The method sends the request to the target shard.
@@ -55,7 +67,6 @@ private:
     ss::future<read_request<ss::lowres_clock>::response_t> proxy_read_request(
       const read_request<ss::lowres_clock>& source_req, ss::shard_id target);
 
-    read_pipeline<ss::lowres_clock>::stage _stage;
     ss::gate _gate;
 };
 } // namespace cloud_topics::l0

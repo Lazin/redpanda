@@ -28,8 +28,13 @@
 #include <seastar/core/lowres_clock.hh>
 
 #include <expected>
+#include <vector>
 
 namespace cloud_topics::l0 {
+
+// Forward declaration for actor-based pipeline components
+template<class Clock>
+class read_pipeline_actor;
 
 struct read_pipeline_accessor;
 
@@ -96,6 +101,14 @@ public:
             co_return list;
         }
 
+        /// Extract fetch requests out of the pipeline atomically
+        /// (non-blocking). The caller is responsible for handling each request.
+        /// \param max_bytes Maximum number of bytes to extract
+        /// \return List of fetch requests that were extracted
+        read_requests_list pull_fetch_requests_nowait(size_t max_bytes) {
+            return _parent->get_fetch_requests(max_bytes, _ps);
+        }
+
         bool stopped() const noexcept { return _parent->stopped(); }
 
         basic_retry_chain_node<Clock>& get_root_rtc() noexcept {
@@ -142,6 +155,15 @@ public:
         return _mem_quota_capacity;
     }
 
+    /// Register an actor component with the pipeline.
+    /// Actors are stored in registration order and form a notification chain.
+    /// The pipeline will notify the first actor when new requests arrive.
+    void register_actor(read_pipeline_actor<Clock>* actor);
+
+    /// Notify the first registered actor that new data is available.
+    /// Called internally when requests are added to the pipeline.
+    void notify_first_actor();
+
 private:
     ss::abort_source& get_abort_source() {
         return this->get_root_rtc().root_abort_source();
@@ -175,5 +197,9 @@ private:
     circuit_breaker<Clock> _breaker;
 
     pipeline_probe _probe;
+
+    // Ordered list of actor components registered with the pipeline.
+    // Actors form a chain where each notifies the next after processing.
+    std::vector<read_pipeline_actor<Clock>*> _actors;
 };
 } // namespace cloud_topics::l0

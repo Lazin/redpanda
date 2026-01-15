@@ -9,6 +9,7 @@
 
 #include "cloud_topics/errc.h"
 #include "cloud_topics/level_zero/pipeline/event_filter.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/read_request_scheduler/read_request_scheduler.h"
 #include "cloud_topics/types.h"
@@ -37,48 +38,48 @@ static ss::logger test_log("L0_read_scheduler_test");
 
 namespace cloud_topics {
 
-struct fetch_handler {
-    explicit fetch_handler(l0::read_pipeline<>& p)
-      : stage(p.register_read_pipeline_stage()) {}
+/// Mock fetch handler that uses the actor pattern for testing
+class fetch_handler : public l0::read_pipeline_actor<> {
+public:
+    explicit fetch_handler(l0::read_pipeline<>::stage s)
+      : l0::read_pipeline_actor<>(std::move(s)) {}
 
-    ss::future<> start() {
-        ssx::background = bg_run();
-        return ss::now();
+    ss::future<> start() { co_await l0::read_pipeline_actor<>::start(); }
+
+    ss::future<> stop() {
+        co_await _gate.close();
+        co_await l0::read_pipeline_actor<>::stop();
     }
 
-    ss::future<> stop() { co_await _gate.close(); }
+    ss::future<> process(l0::pipeline_notification) override {
+        auto result = this->stage().pull_fetch_requests_nowait(
+          std::numeric_limits<size_t>::max());
 
-    ss::future<> bg_run() {
-        auto h = _gate.hold();
-        while (!stage.stopped()) {
-            auto result = co_await stage.pull_fetch_requests(
-              std::numeric_limits<size_t>::max());
-            if (!result.has_value()) {
-                co_return;
-            }
-
-            // OK to iterate because there are no scheduling points below
-            for (auto& r : result.value().requests) {
-                requests_cnt++;
-                auto it = injected_errors.find(r.query.meta.front().id.name);
-                if (it != injected_errors.end()) {
-                    r.set_value(it->second);
-                } else {
-                    chunked_vector<model::record_batch> batches;
-                    for (size_t i = 0; i < r.query.meta.size(); i++) {
-                        model::test::record_batch_spec spec{};
-                        spec.count = 1;
-                        spec.records = 1;
-                        auto rb = model::test::make_random_batch(spec);
-                        batches.push_back(std::move(rb));
-                    }
-                    r.set_value({{std::move(batches)}});
+        // OK to iterate because there are no scheduling points below
+        for (auto& r : result.requests) {
+            requests_cnt++;
+            auto it = injected_errors.find(r.query.meta.front().id.name);
+            if (it != injected_errors.end()) {
+                r.set_value(it->second);
+            } else {
+                chunked_vector<model::record_batch> batches;
+                for (size_t i = 0; i < r.query.meta.size(); i++) {
+                    model::test::record_batch_spec spec{};
+                    spec.count = 1;
+                    spec.records = 1;
+                    auto rb = model::test::make_random_batch(spec);
+                    batches.push_back(std::move(rb));
                 }
+                r.set_value({{std::move(batches)}});
             }
         }
+        co_return;
     }
 
-    l0::read_pipeline<>::stage stage;
+    void on_error(std::exception_ptr e) noexcept override {
+        vlog(test_log.error, "Fetch handler error: {}", e);
+    }
+
     ss::gate _gate;
     size_t requests_cnt{0};
     std::map<uuid_t, errc> injected_errors;
@@ -98,11 +99,22 @@ public:
             return pipeline.local().register_read_pipeline_stage();
         }));
 
+        co_await fetch_handler.start(ss::sharded_parameter([this] {
+            return pipeline.local().register_read_pipeline_stage();
+        }));
+
+        // Register actors with pipeline in order: scheduler -> fetch_handler
+        co_await scheduler.invoke_on_all([this](l0::read_request_scheduler& s) {
+            pipeline.local().register_actor(&s);
+        });
+
+        co_await fetch_handler.invoke_on_all([this](ct::fetch_handler& h) {
+            pipeline.local().register_actor(&h);
+        });
+
+        // Start the actors after registration
         co_await scheduler.invoke_on_all(
           [](l0::read_request_scheduler& s) { return s.start(); });
-
-        co_await fetch_handler.start(
-          ss::sharded_parameter([this] { return std::ref(pipeline.local()); }));
 
         co_await fetch_handler.invoke_on_all(
           [](ct::fetch_handler& handler) { return handler.start(); });

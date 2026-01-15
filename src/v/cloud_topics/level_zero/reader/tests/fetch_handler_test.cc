@@ -62,6 +62,9 @@ TEST_F_CORO(materialized_extent_fixture, l0_fetch_handler_test) {
       &remote,
       &cache);
 
+    // Register actor with pipeline
+    pipeline.register_actor(&l0_fetch_handler);
+
     vlog(test_log.debug, "Starting L0 fetch handler");
 
     co_await l0_fetch_handler.start();
@@ -100,6 +103,9 @@ TEST_F_CORO(materialized_extent_fixture, l0_fetch_handler_timeout) {
       cloud_storage_clients::bucket_name("foo"),
       &remote,
       &cache);
+
+    // Register actor with pipeline
+    pipeline.register_actor(&l0_fetch_handler);
 
     vlog(test_log.debug, "Starting L0 fetch handler");
 

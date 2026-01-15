@@ -13,6 +13,7 @@
 #include "base/units.h"
 #include "cloud_topics/level_zero/pipeline/circuit_breaker.h"
 #include "cloud_topics/level_zero/pipeline/event_filter.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/read_request.h"
 #include "cloud_topics/logger.h"
 #include "config/configuration.h"
@@ -272,6 +273,50 @@ template<class Clock>
 void read_pipeline<Clock>::signal(pipeline_stage stage) {
     this->do_signal(
       stage, event_type::new_read_request, _current_size, _bytes_total);
+    // Notify the first actor if signaling the first stage,
+    // otherwise find and notify the actor for the given stage.
+    if (stage == this->first_stage()) {
+        notify_first_actor();
+    } else {
+        // Find and notify the actor registered for this stage
+        for (auto* actor : _actors) {
+            if (actor->stage().id() == stage) {
+                pipeline_notification notification{
+                  .pending_bytes = _current_size,
+                  .total_bytes = _bytes_total,
+                };
+                (void)actor->tell(std::move(notification));
+                break;
+            }
+        }
+    }
+}
+
+template<class Clock>
+void read_pipeline<Clock>::register_actor(read_pipeline_actor<Clock>* actor) {
+    if (!_actors.empty()) {
+        _actors.back()->set_next_actor(actor);
+    }
+    _actors.push_back(actor);
+    vlog(
+      this->logger().debug,
+      "Registered read actor for stage {}, total actors: {}",
+      actor->stage().id(),
+      _actors.size());
+}
+
+template<class Clock>
+void read_pipeline<Clock>::notify_first_actor() {
+    if (!_actors.empty()) {
+        auto* first = _actors[0];
+        pipeline_notification notification{
+          .pending_bytes = _current_size,
+          .total_bytes = _bytes_total,
+        };
+        // Ignore the future - tell() with drop_oldest policy never blocks,
+        // and we don't need to wait for the notification to be delivered.
+        (void)first->tell(std::move(notification));
+    }
 }
 
 template<class Clock>

@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0
 
 #include "cloud_topics/level_zero/pipeline/event_filter.h"
+#include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/read_debounce/read_debounce.h"
 #include "config/configuration.h"
@@ -32,9 +33,11 @@
 using namespace std::chrono_literals;
 namespace cloud_topics {
 
-struct fetch_handler {
-    explicit fetch_handler(l0::read_pipeline<>& p)
-      : stage(p.register_read_pipeline_stage()) {
+/// Mock fetch handler that uses the actor pattern for benchmarks
+class fetch_handler : public l0::read_pipeline_actor<> {
+public:
+    explicit fetch_handler(l0::read_pipeline<>::stage s)
+      : l0::read_pipeline_actor<>(std::move(s)) {
         _batch = model::test::make_random_batch(
           model::test::record_batch_spec{
             .offset = model::offset(0),
@@ -45,29 +48,24 @@ struct fetch_handler {
           });
     }
 
-    ss::future<> start() {
-        ssx::background = bg_run();
-        return ss::now();
+    ss::future<> start() { co_await l0::read_pipeline_actor<>::start(); }
+
+    ss::future<> stop() {
+        co_await _gate.close();
+        co_await l0::read_pipeline_actor<>::stop();
     }
 
-    ss::future<> stop() { co_await _gate.close(); }
+    ss::future<> process(l0::pipeline_notification) override {
+        auto result = this->stage().pull_fetch_requests_nowait(
+          std::numeric_limits<size_t>::max());
 
-    ss::future<> bg_run() {
-        auto h = _gate.hold();
-        while (!stage.stopped()) {
-            auto result = co_await stage.pull_fetch_requests(
-              std::numeric_limits<size_t>::max());
-
-            if (!result.has_value()) {
-                // Expected during shutdown
-                co_return;
-            }
-
-            for (auto& r : result.value().requests) {
-                process_single_request(&r);
-            }
+        for (auto& r : result.requests) {
+            process_single_request(&r);
         }
+        co_return;
     }
+
+    void on_error(std::exception_ptr) noexcept override {}
 
     void process_single_request(l0::read_request<>* req) {
         auto auto_dispose = ss::defer(
@@ -84,7 +82,6 @@ struct fetch_handler {
     }
 
     std::optional<model::record_batch> _batch;
-    l0::read_pipeline<>::stage stage;
     ss::gate _gate;
 };
 } // namespace cloud_topics
@@ -102,12 +99,25 @@ public:
             co_await debounce.start(ss::sharded_parameter([this] {
                 return pipeline.local().register_read_pipeline_stage();
             }));
-
-            co_await debounce.invoke_on_all([](auto& f) { return f.start(); });
         }
 
-        co_await sink.start(
-          ss::sharded_parameter([this] { return std::ref(pipeline.local()); }));
+        co_await sink.start(ss::sharded_parameter([this] {
+            return pipeline.local().register_read_pipeline_stage();
+        }));
+
+        // Register actors with pipeline
+        if (enable_debounce) {
+            co_await debounce.invoke_on_all(
+              [this](auto& d) { pipeline.local().register_actor(&d); });
+        }
+
+        co_await sink.invoke_on_all(
+          [this](auto& s) { pipeline.local().register_actor(&s); });
+
+        // Start actors after registration
+        if (enable_debounce) {
+            co_await debounce.invoke_on_all([](auto& f) { return f.start(); });
+        }
 
         co_await sink.invoke_on_all([](auto& sink) { return sink.start(); });
     }

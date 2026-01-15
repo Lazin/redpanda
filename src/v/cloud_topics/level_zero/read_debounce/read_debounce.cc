@@ -10,6 +10,7 @@
 #include "cloud_topics/level_zero/read_debounce/read_debounce.h"
 
 #include "cloud_topics/level_zero/pipeline/read_request.h"
+#include "cloud_topics/logger.h"
 #include "container/chunked_vector.h"
 #include "ssx/checkpoint_mutex.h"
 #include "ssx/future-util.h"
@@ -23,13 +24,12 @@ constexpr size_t max_bytes_per_iter = 10_MiB;
 constexpr auto debounce_interval = std::chrono::milliseconds(250);
 
 template<class Clock>
-read_debounce<Clock>::read_debounce(read_pipeline<Clock>::stage s)
-  : _pipeline_stage(s) {}
+read_debounce<Clock>::read_debounce(typename read_pipeline<Clock>::stage s)
+  : read_pipeline_actor<Clock>(std::move(s)) {}
 
 template<class Clock>
 ss::future<> read_debounce<Clock>::start() {
-    ssx::spawn_with_gate(_gate, [this] { return bg_loop(); });
-    return ss::now();
+    co_await read_pipeline_actor<Clock>::start();
 }
 
 template<class Clock>
@@ -38,57 +38,33 @@ ss::future<> read_debounce<Clock>::stop() {
         state.lock.broken();
     }
     co_await _gate.close();
+    co_await read_pipeline_actor<Clock>::stop();
 }
 
 template<class Clock>
-ss::future<> read_debounce<Clock>::bg_loop() {
-    auto holder = _gate.hold();
-    while (!_pipeline_stage.stopped()) {
-        // Pick up new requests as fast as possible.
-        // Proxy them forward.
-        auto fut = co_await ss::coroutine::as_future(
-          _pipeline_stage.pull_fetch_requests(max_bytes_per_iter));
-
-        if (fut.failed()) {
-            auto e = fut.get_exception();
-            if (ssx::is_shutdown_exception(e)) {
-                vlog(
-                  _pipeline_stage.logger().debug,
-                  "Read debounce stopping due to shutdown");
-                co_return;
-            }
-            vlog(
-              _pipeline_stage.logger().error,
-              "Read debounce failed to pull requests: {}",
-              e);
-            continue;
-        }
-        auto fut_res = std::move(fut).get();
-        if (!fut_res.has_value()) {
-            auto err = fut_res.error();
-            if (err == errc::shutting_down) {
-                vlog(
-                  _pipeline_stage.logger().debug,
-                  "Read debounce stopping due to shutdown");
-                co_return;
-            }
-            vlog(
-              _pipeline_stage.logger().error,
-              "Read debounce received error pulling requests: {}",
-              fut_res.error());
-            continue;
-        }
-        auto to_process = std::move(fut_res.value());
-        auto queue = std::move(to_process.requests);
-        while (!queue.empty()) {
-            auto req = &queue.front();
-            queue.pop_front();
-            // Safe because the requests are capped by memory use.
-            ssx::spawn_with_gate(_gate, [this, req]() mutable {
-                return process_single_request(req);
-            });
-        }
+ss::future<> read_debounce<Clock>::process(pipeline_notification) {
+    // Pick up new requests as fast as possible.
+    // Proxy them forward.
+    auto to_process = this->stage().pull_fetch_requests_nowait(
+      max_bytes_per_iter);
+    auto queue = std::move(to_process.requests);
+    while (!queue.empty()) {
+        auto req = &queue.front();
+        queue.pop_front();
+        // Safe because the requests are capped by memory use.
+        ssx::spawn_with_gate(
+          _gate, [this, req]() mutable { return process_single_request(req); });
     }
+
+    // Notify next actor that requests have been processed
+    this->notify_next();
+    co_return;
+}
+
+template<class Clock>
+void read_debounce<Clock>::on_error(std::exception_ptr e) noexcept {
+    vlog(cd_log.error, "Read debounce error: {}", e);
+    this->stage().register_pipeline_error(errc::unexpected_failure);
 }
 
 template<class Clock>
@@ -110,7 +86,7 @@ read_debounce<Clock>::process_single_request(read_request<Clock>* req) {
         auto hash = absl::Hash<uuid_t>{}(id);
         auto ix = hash % debounce_hash_size;
         auto u = _in_flight.at(ix).lock.try_get_units();
-        if (!u.has_value() && !_pipeline_stage.stopped()) {
+        if (!u.has_value() && !this->stage().stopped()) {
             try {
                 u = co_await _in_flight.at(ix).lock.get_units(
                   debounce_interval);
@@ -120,7 +96,7 @@ read_debounce<Clock>::process_single_request(read_request<Clock>* req) {
                   "Lock timed out, id: {}, proceeding anyway",
                   id);
             }
-        } else if (_pipeline_stage.stopped()) {
+        } else if (this->stage().stopped()) {
             co_return;
         }
 
@@ -142,10 +118,10 @@ read_debounce<Clock>::process_single_request(read_request<Clock>* req) {
           req->ntp,
           std::move(query),
           req->expiration_time,
-          &_pipeline_stage.get_root_rtc(),
+          &this->stage().get_root_rtc(),
           req->stage);
 
-        _pipeline_stage.push_next_stage(*proxy);
+        this->stage().push_next_stage(*proxy);
 
         auto holder = _gate.hold();
         proxy->response.get_future()

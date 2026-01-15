@@ -87,11 +87,9 @@ public:
 
         co_await construct_service(_read_pipeline);
 
-        co_await construct_service(
-          _read_fanout, ss::sharded_parameter([this] {
-              return _read_pipeline.local().register_read_pipeline_stage();
-          }));
-
+        // Create read pipeline components in order:
+        // read_request_scheduler (optional) -> read_debounce (optional)
+        // -> read_fanout -> fetch_handler
         if (config::shard_local_cfg().cloud_topics_parallel_fetch_enabled()) {
             co_await construct_service(
               _read_request_scheduler, ss::sharded_parameter([this] {
@@ -106,6 +104,11 @@ public:
         }
 
         co_await construct_service(
+          _read_fanout, ss::sharded_parameter([this] {
+              return _read_pipeline.local().register_read_pipeline_stage();
+          }));
+
+        co_await construct_service(
           _fetch_handler,
           ss::sharded_parameter([this] {
               return _read_pipeline.local().register_read_pipeline_stage();
@@ -113,6 +116,26 @@ public:
           ss::sharded_parameter([bucket] { return bucket; }),
           ss::sharded_parameter([io] { return &io->local(); }),
           ss::sharded_parameter([cache] { return &cache->local(); }));
+
+        // Register actor components with the read pipeline in order
+        if (_read_request_scheduler.local_is_initialized()) {
+            co_await _read_request_scheduler.invoke_on_all(
+              [this](l0::read_request_scheduler& s) {
+                  _read_pipeline.local().register_actor(&s);
+              });
+        }
+        if (_read_debounce.local_is_initialized()) {
+            co_await _read_debounce.invoke_on_all(
+              [this](l0::read_debounce<>& s) {
+                  _read_pipeline.local().register_actor(&s);
+              });
+        }
+        co_await _read_fanout.invoke_on_all([this](l0::read_fanout& s) {
+            _read_pipeline.local().register_actor(&s);
+        });
+        co_await _fetch_handler.invoke_on_all([this](l0::fetch_handler& s) {
+            _read_pipeline.local().register_actor(&s);
+        });
 
         co_await construct_service(
           _batch_cache, ss::sharded_parameter([storage_api] {

@@ -166,6 +166,7 @@ redpanda_cc_library(
         "read_pipeline.h",
     ],
     implementation_deps = [
+        ":pipeline_actor",
         ":serializer",
         "//src/v/cloud_topics:logger",
         "//src/v/resource_mgmt:memory_groups",
