@@ -122,7 +122,8 @@ ss::future<consensus_ptr> partition_manager::manage(
   std::optional<xshard_transfer_state> xst_state,
   std::optional<remote_topic_properties> rtp,
   std::optional<cloud_storage_clients::bucket_name> read_replica_bucket,
-  const topic_configuration* topic_cfg) {
+  const topic_configuration* topic_cfg,
+  std::optional<partition_bootstrap_params> bootstrap_params) {
     auto remote_label = topic_cfg ? topic_cfg->properties.remote_label
                                   : std::nullopt;
     auto remote_topic_namespace_override
@@ -272,6 +273,26 @@ ss::future<consensus_ptr> partition_manager::manage(
                   ntp_cfg, manifest, model::prev_offset(max_offset));
             }
         }
+    } else if (bootstrap_params.has_value()) {
+        // Programmatic bootstrap with custom offset/term.
+        // This is used for creating partitions with arbitrary start offset
+        // without requiring cloud storage.
+        vlog(
+          clusterlog.info,
+          "Bootstrapping partition {} with start offset: {}, term: {}",
+          ntp_cfg.ntp(),
+          bootstrap_params->start_offset,
+          bootstrap_params->initial_term);
+
+        co_await seastar::recursive_touch_directory(ntp_cfg.work_directory());
+
+        co_await raft::details::bootstrap_partition_state(
+          _storage,
+          ntp_cfg,
+          group,
+          bootstrap_params->start_offset,
+          bootstrap_params->initial_term,
+          initial_nodes);
     }
     auto translator_batch_types = raft::offset_translator_batch_types(
       ntp_cfg.ntp());

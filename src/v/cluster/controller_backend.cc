@@ -1222,6 +1222,8 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
         auto topic_md = _topics.local().get_topic_metadata_ref(
           model::topic_namespace_view(ntp));
         vassert(topic_md, "topic metadata disappeared for {}", ntp);
+        auto bootstrap_params = _topics.local().get_partition_bootstrap_params(
+          ntp);
         auto ec = co_await create_partition(
           ntp,
           group_id,
@@ -1231,7 +1233,8 @@ ss::future<result<ss::stop_iteration>> controller_backend::reconcile_ntp_step(
           force_reconfiguration{
             replicas_view.update
             && replicas_view.update->is_force_reconfiguration()},
-          topic_md->get());
+          topic_md->get(),
+          std::move(bootstrap_params));
         if (ec) {
             co_return ec;
         }
@@ -1408,7 +1411,8 @@ ss::future<std::error_code> controller_backend::create_partition(
   replicas_t initial_replicas,
   const replicas_revision_map& replica_revision_map,
   force_reconfiguration is_force_reconfigured,
-  const topic_metadata& topic_md) {
+  const topic_metadata& topic_md,
+  std::optional<partition_bootstrap_params> bootstrap_params) {
     vlog(
       clusterlog.debug,
       "[{}] creating partition, log revision: {}, initial_replicas: {}",
@@ -1530,7 +1534,8 @@ ss::future<std::error_code> controller_backend::create_partition(
               std::move(xst_state),
               rtp,
               read_replica_bucket,
-              &cfg);
+              &cfg,
+              bootstrap_params);
 
             _xst_states.erase(ntp);
 

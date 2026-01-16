@@ -234,6 +234,9 @@ public:
         /// Revision id of the last applied update_finished controller command
         /// (or of addition command if none)
         model::revision_id last_update_finished_revision;
+        /// Optional bootstrap params for programmatic partition creation
+        /// with custom start offset and term.
+        std::optional<partition_bootstrap_params> bootstrap_params;
     };
 
     struct topic_metadata_item {
@@ -579,6 +582,8 @@ public:
       apply(set_topic_partitions_disabled_cmd, model::offset);
     ss::future<std::error_code>
       apply(bulk_force_reconfiguration_cmd, model::offset);
+    ss::future<std::error_code>
+      apply(set_partition_bootstrap_params_cmd, model::offset);
 
     ss::future<> fill_snapshot(controller_snapshot&) const;
     ss::future<>
@@ -863,6 +868,11 @@ public:
     get_name_by_id(model::topic_id tp_id) const {
         return _topics.get_name(tp_id);
     }
+
+    /// Returns the bootstrap params for a partition if set during creation.
+    /// Used for programmatic partition creation with custom start offset/term.
+    std::optional<partition_bootstrap_params>
+    get_partition_bootstrap_params(const model::ntp& ntp) const;
 
 private:
     friend topic_table_probe;

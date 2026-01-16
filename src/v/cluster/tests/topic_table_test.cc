@@ -708,3 +708,70 @@ FIXTURE_TEST(test_topic_table_iterator_invalidation, topic_table_fixture) {
     add_random_topic(); // invalidates iterator
     BOOST_REQUIRE_THROW((void)it->first, iterator_stability_violation);
 }
+
+FIXTURE_TEST(test_apply_set_bootstrap_params_cmd, topic_table_fixture) {
+    // First create a topic without bootstrap_params
+    auto cmd = make_create_topic_cmd("test_tp_set_params", 2, 1);
+    auto res = table.local().apply(std::move(cmd), model::offset(0)).get();
+    BOOST_REQUIRE_EQUAL(res, cluster::errc::success);
+
+    // Verify partitions initially have no bootstrap_params
+    auto ntp0 = model::ntp(
+      test_ns, model::topic("test_tp_set_params"), model::partition_id(0));
+    auto ntp1 = model::ntp(
+      test_ns, model::topic("test_tp_set_params"), model::partition_id(1));
+
+    auto params0_before = table.local().get_partition_bootstrap_params(ntp0);
+    auto params1_before = table.local().get_partition_bootstrap_params(ntp1);
+    BOOST_REQUIRE(!params0_before.has_value());
+    BOOST_REQUIRE(!params1_before.has_value());
+
+    // Apply set_partition_bootstrap_params_cmd
+    absl::btree_map<model::partition_id, cluster::partition_bootstrap_params>
+      partition_params;
+    partition_params[model::partition_id(0)]
+      = cluster::partition_bootstrap_params(
+        model::offset(1000), model::term_id(5));
+    partition_params[model::partition_id(1)]
+      = cluster::partition_bootstrap_params(
+        model::offset(2000), model::term_id(10));
+
+    cluster::set_partition_bootstrap_params_cmd_data data{
+      .tp_ns = make_tp_ns("test_tp_set_params"),
+      .partition_params = std::move(partition_params)};
+    cluster::set_partition_bootstrap_params_cmd bp_cmd(
+      make_tp_ns("test_tp_set_params"), std::move(data));
+
+    res = table.local().apply(std::move(bp_cmd), model::offset(1)).get();
+    BOOST_REQUIRE_EQUAL(res, cluster::errc::success);
+
+    // Verify bootstrap_params are now set
+    auto params0_after = table.local().get_partition_bootstrap_params(ntp0);
+    BOOST_REQUIRE(params0_after.has_value());
+    BOOST_REQUIRE_EQUAL(params0_after->start_offset, model::offset(1000));
+    BOOST_REQUIRE_EQUAL(params0_after->initial_term, model::term_id(5));
+
+    auto params1_after = table.local().get_partition_bootstrap_params(ntp1);
+    BOOST_REQUIRE(params1_after.has_value());
+    BOOST_REQUIRE_EQUAL(params1_after->start_offset, model::offset(2000));
+    BOOST_REQUIRE_EQUAL(params1_after->initial_term, model::term_id(10));
+}
+
+FIXTURE_TEST(
+  test_set_bootstrap_params_cmd_nonexistent_topic, topic_table_fixture) {
+    // Apply set_partition_bootstrap_params_cmd to a non-existent topic
+    absl::btree_map<model::partition_id, cluster::partition_bootstrap_params>
+      partition_params;
+    partition_params[model::partition_id(0)]
+      = cluster::partition_bootstrap_params(
+        model::offset(1000), model::term_id(5));
+
+    cluster::set_partition_bootstrap_params_cmd_data data{
+      .tp_ns = make_tp_ns("nonexistent_topic"),
+      .partition_params = std::move(partition_params)};
+    cluster::set_partition_bootstrap_params_cmd cmd(
+      make_tp_ns("nonexistent_topic"), std::move(data));
+
+    auto res = table.local().apply(std::move(cmd), model::offset(0)).get();
+    BOOST_REQUIRE_EQUAL(res, cluster::errc::topic_not_exists);
+}

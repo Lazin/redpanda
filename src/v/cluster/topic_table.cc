@@ -1324,7 +1324,8 @@ topic_table::fill_snapshot(controller_snapshot& controller_snap) const {
                 .replicas = std::move(replicas),
                 .replicas_revisions = p_it->second.replicas_revisions,
                 .last_update_finished_revision
-                = p_it->second.last_update_finished_revision});
+                = p_it->second.last_update_finished_revision,
+                .bootstrap_params = p_it->second.bootstrap_params});
 
             co_await ss::coroutine::maybe_yield();
         }
@@ -1472,6 +1473,7 @@ public:
           .replicas_revisions = partition.replicas_revisions,
           .last_update_finished_revision
           = partition.last_update_finished_revision,
+          .bootstrap_params = partition.bootstrap_params,
         };
 
         if (!prev_assignment) {
@@ -1954,6 +1956,57 @@ topic_table::get_initial_revision(model::topic_namespace_view tp) const {
 std::optional<model::initial_revision_id>
 topic_table::get_initial_revision(const model::ntp& ntp) const {
     return get_initial_revision(model::topic_namespace_view(ntp));
+}
+
+std::optional<partition_bootstrap_params>
+topic_table::get_partition_bootstrap_params(const model::ntp& ntp) const {
+    auto it = _topics.find(model::topic_namespace_view(ntp));
+    if (it == _topics.end()) {
+        return std::nullopt;
+    }
+    auto p_it = it->second.partitions.find(ntp.tp.partition());
+    if (p_it == it->second.partitions.end()) {
+        return std::nullopt;
+    }
+    return p_it->second.bootstrap_params;
+}
+
+ss::future<std::error_code>
+topic_table::apply(set_partition_bootstrap_params_cmd cmd, model::offset o) {
+    const auto& tp_ns = cmd.value.tp_ns;
+
+    auto topic_it = _topics.find(tp_ns);
+    if (topic_it == _topics.end()) {
+        co_return errc::topic_not_exists;
+    }
+
+    auto& topic_meta = topic_it->second;
+
+    for (const auto& [partition_id, params] : cmd.value.partition_params) {
+        auto p_it = topic_meta.partitions.find(partition_id);
+        if (p_it == topic_meta.partitions.end()) {
+            // Partition doesn't exist, skip
+            continue;
+        }
+
+        // Update bootstrap_params
+        p_it->second.bootstrap_params = params;
+
+        vlog(
+          clusterlog.debug,
+          "Set bootstrap params for {}/{}: offset={}, term={}",
+          tp_ns,
+          partition_id,
+          params.start_offset,
+          params.initial_term);
+    }
+
+    // Note: We don't generate deltas here because the partition hasn't
+    // been created yet. controller_backend will pick up bootstrap_params
+    // when it creates the partition.
+
+    co_await notify_waiters();
+    co_return errc::success;
 }
 
 std::optional<replicas_t>

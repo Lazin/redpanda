@@ -125,7 +125,7 @@ struct topics_t
     // backend deltas when applying the snapshot.
     struct partition_t
       : public serde::
-          envelope<partition_t, serde::version<0>, serde::compat_version<0>> {
+          envelope<partition_t, serde::version<1>, serde::compat_version<0>> {
         raft::group_id group;
         /// NOTE: in contrast to topic_table does NOT reflect the result of
         /// current in-progress update.
@@ -133,6 +133,9 @@ struct topics_t
         /// Also does not reflect the current in-progress update.
         replicas_revision_map replicas_revisions;
         model::revision_id last_update_finished_revision;
+        /// Optional bootstrap params for programmatic partition creation
+        /// with custom start offset and term.
+        std::optional<partition_bootstrap_params> bootstrap_params;
 
         friend bool operator==(const partition_t&, const partition_t&)
           = default;
@@ -142,7 +145,8 @@ struct topics_t
               group,
               replicas,
               replicas_revisions,
-              last_update_finished_revision);
+              last_update_finished_revision,
+              bootstrap_params);
         }
     };
 
