@@ -115,31 +115,17 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
-    name = "event_filter",
-    hdrs = [
-        "event_filter.h",
-    ],
-    deps = [
-        ":pipeline_stage",
-        "//src/v/base",
-        "//src/v/container:intrusive",
-        "@seastar",
-    ],
-)
-
-redpanda_cc_library(
     name = "base_pipeline",
     hdrs = [
         "base_pipeline.h",
     ],
     deps = [
-        ":event_filter",
         ":pipeline_stage",
         "//src/v/base",
         "//src/v/cloud_topics:logger",
         "//src/v/cloud_topics:types",
         "//src/v/container:chunked_vector",
-        "//src/v/ssx:future_util",
+        "//src/v/container:intrusive",
         "//src/v/utils:retry_chain_node",
         "@seastar",
     ],
@@ -177,7 +163,6 @@ redpanda_cc_library(
     deps = [
         ":base_pipeline",
         ":circuit_breaker",
-        ":event_filter",
         ":pipeline_stage",
         ":read_request",
         "//src/v/base",
@@ -214,7 +199,6 @@ redpanda_cc_library(
     ],
     deps = [
         ":base_pipeline",
-        ":event_filter",
         ":pipeline_stage",
         ":write_request",
         "//src/v/base",

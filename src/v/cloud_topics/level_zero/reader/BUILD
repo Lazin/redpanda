@@ -85,7 +85,6 @@ redpanda_cc_library(
         "//src/v/cloud_io:remote",
         "//src/v/cloud_topics:logger",
         "//src/v/cloud_topics:types",
-        "//src/v/cloud_topics/level_zero/pipeline:event_filter",
         "//src/v/cloud_topics/level_zero/pipeline:pipeline_actor",
         "//src/v/cloud_topics/level_zero/pipeline:read_pipeline",
         "//src/v/cloud_topics/level_zero/pipeline:read_request",

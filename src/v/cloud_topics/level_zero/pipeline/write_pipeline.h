@@ -12,7 +12,6 @@
 
 #include "cloud_topics/level_zero/common/level_zero_probe.h"
 #include "cloud_topics/level_zero/pipeline/base_pipeline.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/pipeline/write_request.h"
 #include "ssx/semaphore.h"
@@ -181,8 +180,6 @@ public:
     stage register_write_pipeline_stage() noexcept;
 
     void signal(pipeline_stage stage);
-
-    event trigger_event(pipeline_stage stage);
 
     /// Advance a request to the next stage, updating per-stage byte accounting.
     /// This is the canonical way to change a request's stage.

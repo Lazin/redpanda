@@ -8,7 +8,6 @@
 // by the Apache License, Version 2.0
 
 #include "cloud_topics/errc.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/read_request_scheduler/read_request_scheduler.h"

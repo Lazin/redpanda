@@ -11,7 +11,6 @@
 #include "cloud_topics/level_zero/pipeline/write_pipeline.h"
 
 #include "base/units.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_actor.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/pipeline/serializer.h"
@@ -242,8 +241,7 @@ write_pipeline<Clock>::register_write_pipeline_stage() noexcept {
 
 template<class Clock>
 void write_pipeline<Clock>::signal(pipeline_stage stage) {
-    this->do_signal(
-      stage, event_type::new_write_request, stage_bytes(stage), _bytes_total);
+    vlog(cd_log.debug, "signal, stage: {}", stage);
     // Notify the actor registered for this stage
     for (auto* actor : _actors) {
         if (actor->stage().id() == stage) {
@@ -271,16 +269,6 @@ void write_pipeline<Clock>::register_actor(write_pipeline_actor<Clock>* actor) {
       "Registered actor for stage {}, total actors: {}",
       actor->stage().id(),
       _actors.size());
-}
-
-template<class Clock>
-event write_pipeline<Clock>::trigger_event(pipeline_stage stage) {
-    return event{
-      .stage = stage,
-      .type = event_type::new_write_request,
-      .pending_write_bytes = stage_bytes(stage),
-      .total_write_bytes = _bytes_total,
-    };
 }
 
 template<class Clock>

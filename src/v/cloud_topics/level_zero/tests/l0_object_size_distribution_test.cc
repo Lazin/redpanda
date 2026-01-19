@@ -10,7 +10,6 @@
 
 #include "cloud_io/remote_api.h"
 #include "cloud_topics/level_zero/batcher/batcher.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/write_request_scheduler/write_request_scheduler.h"
 #include "config/configuration.h"
 #include "model/fundamental.h"

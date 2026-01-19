@@ -13,7 +13,6 @@
 #include "cloud_topics/level_zero/common/level_zero_probe.h"
 #include "cloud_topics/level_zero/pipeline/base_pipeline.h"
 #include "cloud_topics/level_zero/pipeline/circuit_breaker.h"
-#include "cloud_topics/level_zero/pipeline/event_filter.h"
 #include "cloud_topics/level_zero/pipeline/pipeline_stage.h"
 #include "cloud_topics/level_zero/pipeline/read_request.h"
 #include "model/record_batch_reader.h"
@@ -77,36 +76,12 @@ public:
 
         explicit operator pipeline_stage() const { return _ps; }
 
-        /// Wait until fetch requests are available in the pipeline
-        /// stage and return them (the requests are pulled out of
-        /// the pipeline).
-        ss::future<std::expected<read_requests_list, errc>>
-        pull_fetch_requests(size_t max_bytes) {
-            l0::event_filter<Clock> filter(
-              l0::event_type::new_read_request, _ps);
-            auto event = co_await _parent->subscribe(
-              filter, _parent->get_abort_source());
-            switch (event.type) {
-            case l0::event_type::shutting_down:
-                co_return std::unexpected(errc::shutting_down);
-            case l0::event_type::err_timedout:
-                co_return std::unexpected(errc::timeout);
-            case l0::event_type::new_write_request:
-            case l0::event_type::none:
-                vunreachable("Unexpected event type in the read_pipeline");
-            case l0::event_type::new_read_request:
-                break;
-            }
-            auto list = _parent->get_fetch_requests(max_bytes, _ps);
-            co_return list;
-        }
-
         /// Extract fetch requests out of the pipeline atomically
         /// (non-blocking). The caller is responsible for handling each request.
         /// \param max_bytes Maximum number of bytes to extract
         /// \return List of fetch requests that were extracted
         read_requests_list pull_fetch_requests_nowait(size_t max_bytes) {
-            return _parent->get_fetch_requests(max_bytes, _ps);
+            return _parent->pull_fetch_requests(max_bytes, _ps);
         }
 
         bool stopped() const noexcept { return _parent->stopped(); }
@@ -148,8 +123,6 @@ public:
 
     void signal(pipeline_stage stage);
 
-    event trigger_event(pipeline_stage stage);
-
     /// Return the memory quota capacity for the read pipeline.
     size_t memory_quota_capacity() const noexcept {
         return _mem_quota_capacity;
@@ -165,13 +138,10 @@ public:
     void notify_first_actor();
 
 private:
-    ss::abort_source& get_abort_source() {
-        return this->get_root_rtc().root_abort_source();
-    }
-
-    /// Return list of fetch requests that can be processed immediately
+    /// Pull list of fetch requests that can be processed immediately.
+    /// The method transfers ownership to the caller.
     read_requests_list
-    get_fetch_requests(size_t max_bytes, pipeline_stage stage);
+    pull_fetch_requests(size_t max_bytes, pipeline_stage stage);
 
     /// Register read-path errors
     void register_pipeline_error(errc);
