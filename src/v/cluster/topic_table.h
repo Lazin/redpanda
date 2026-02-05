@@ -582,6 +582,8 @@ public:
       apply(set_topic_partitions_disabled_cmd, model::offset);
     ss::future<std::error_code>
       apply(bulk_force_reconfiguration_cmd, model::offset);
+    ss::future<std::error_code>
+      apply(set_partition_bootstrap_params_cmd, model::offset);
 
     ss::future<> fill_snapshot(controller_snapshot&) const;
     ss::future<>
@@ -867,10 +869,21 @@ public:
         return _topics.get_name(tp_id);
     }
 
-    /// Returns the bootstrap params for a partition if set during creation.
+    /// Returns the bootstrap params for a partition if set.
+    /// First checks the pending bootstrap params (set before topic creation),
+    /// then falls back to partition metadata (for legacy compatibility).
     /// Used for programmatic partition creation with custom start offset/term.
     std::optional<partition_bootstrap_params>
     get_partition_bootstrap_params(const model::ntp& ntp) const;
+
+    /// Storage for bootstrap params that are set before topic creation.
+    /// Keyed by NTP for efficient lookup by controller_backend.
+    using pending_bootstrap_params_t
+      = chunked_hash_map<model::ntp, partition_bootstrap_params>;
+
+    const pending_bootstrap_params_t& get_pending_bootstrap_params() const {
+        return _pending_bootstrap_params;
+    }
 
 private:
     friend topic_table_probe;
@@ -948,6 +961,9 @@ private:
     topic_table_probe _probe;
     force_recoverable_partitions_t _partitions_to_force_reconfigure;
     model::revision_id _partitions_to_force_reconfigure_revision{0};
+    /// Bootstrap params set before topic creation. These are consumed when
+    /// the partition is created and removed from this map.
+    pending_bootstrap_params_t _pending_bootstrap_params;
     data_migrations::migrated_resources& _migrated_resources;
     friend class topic_table_partition_generator;
 };

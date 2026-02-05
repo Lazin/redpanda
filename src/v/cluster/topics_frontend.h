@@ -102,6 +102,14 @@ public:
     ss::future<std::vector<topic_result>> autocreate_topics(
       topic_configuration_vector, model::timeout_clock::duration);
 
+    /// Set bootstrap parameters for partitions in an existing topic.
+    /// Must be called before partitions are materialized by controller_backend.
+    /// Used by cluster recovery to specify known offsets.
+    ss::future<std::error_code> set_bootstrap_params(
+      model::topic_namespace,
+      absl::btree_map<model::partition_id, partition_bootstrap_params>,
+      model::timeout_clock::time_point);
+
     ss::future<std::error_code> move_partition_replicas(
       model::ntp,
       std::vector<model::broker_shard>,

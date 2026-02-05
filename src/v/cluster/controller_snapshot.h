@@ -119,7 +119,7 @@ struct config_t
 
 struct topics_t
   : public serde::
-      envelope<topics_t, serde::version<3>, serde::compat_version<0>> {
+      envelope<topics_t, serde::version<4>, serde::compat_version<0>> {
     // NOTE: layout here is a bit different than in the topic table because it
     // allows more compact storage and more convenient generation of controller
     // backend deltas when applying the snapshot.
@@ -196,6 +196,12 @@ struct topics_t
       lifecycle_markers;
 
     force_recoverable_partitions_t partitions_to_force_recover;
+
+    /// Bootstrap params set before topic creation. These are stored
+    /// independently from topic metadata and consumed when partitions are
+    /// created.
+    chunked_hash_map<model::ntp, partition_bootstrap_params>
+      pending_bootstrap_params;
 
     chunked_hash_map<
       model::topic_namespace,

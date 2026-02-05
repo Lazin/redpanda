@@ -1352,6 +1352,10 @@ topic_table::fill_snapshot(controller_snapshot& controller_snap) const {
     }
 
     snap.partitions_to_force_recover = _partitions_to_force_reconfigure;
+
+    for (const auto& [ntp, params] : _pending_bootstrap_params) {
+        snap.pending_bootstrap_params.emplace(ntp, params);
+    }
 }
 
 // helper class to hold context needed for adding/deleting ntps when applying a
@@ -1728,6 +1732,9 @@ ss::future<> topic_table::apply_snapshot(
     reset_partitions_to_force_reconfigure(
       controller_snap.topics.partitions_to_force_recover);
 
+    _pending_bootstrap_params.replace(
+      controller_snap.topics.pending_bootstrap_params.values().copy());
+
     _iceberg_tombstones.replace(
       controller_snap.topics.iceberg_tombstones.values().copy());
 
@@ -1961,15 +1968,46 @@ topic_table::get_initial_revision(const model::ntp& ntp) const {
 
 std::optional<partition_bootstrap_params>
 topic_table::get_partition_bootstrap_params(const model::ntp& ntp) const {
-    auto it = _topics.find(model::topic_namespace_view(ntp));
-    if (it == _topics.end()) {
+    // First check the pending bootstrap params (set before topic creation)
+    if (auto it = _pending_bootstrap_params.find(ntp);
+        it != _pending_bootstrap_params.end()) {
+        return it->second;
+    }
+
+    // Fall back to partition metadata (for legacy compatibility)
+    auto topic_it = _topics.find(model::topic_namespace_view(ntp));
+    if (topic_it == _topics.end()) {
         return std::nullopt;
     }
-    auto p_it = it->second.partitions.find(ntp.tp.partition());
-    if (p_it == it->second.partitions.end()) {
+    auto p_it = topic_it->second.partitions.find(ntp.tp.partition());
+    if (p_it == topic_it->second.partitions.end()) {
         return std::nullopt;
     }
     return p_it->second.bootstrap_params;
+}
+
+ss::future<std::error_code>
+topic_table::apply(set_partition_bootstrap_params_cmd cmd, model::offset o) {
+    _last_applied_revision_id = model::revision_id(o);
+    const auto& tp_ns = cmd.value.tp_ns;
+
+    // Store bootstrap params in the pending map. These will be consumed
+    // when the partition is created by controller_backend.
+    // Note: This command can be applied BEFORE the topic exists.
+    for (const auto& [partition_id, params] : cmd.value.partition_params) {
+        model::ntp ntp(tp_ns.ns, tp_ns.tp, partition_id);
+        _pending_bootstrap_params[ntp] = params;
+
+        vlog(
+          clusterlog.debug,
+          "Set pending bootstrap params for {}: offset={}, term={}",
+          ntp,
+          params.start_offset,
+          params.initial_term);
+    }
+
+    co_await notify_waiters();
+    co_return errc::success;
 }
 
 std::optional<replicas_t>

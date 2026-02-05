@@ -1235,6 +1235,21 @@ ss::future<std::vector<topic_result>> topics_frontend::autocreate_topics(
       leader.value(), std::move(topics), timeout);
 }
 
+ss::future<std::error_code> topics_frontend::set_bootstrap_params(
+  model::topic_namespace tp_ns,
+  absl::btree_map<model::partition_id, partition_bootstrap_params> params,
+  model::timeout_clock::time_point timeout) {
+    // Note: This command can be applied BEFORE the topic exists.
+    // The bootstrap params are stored in a pending map and will be
+    // consumed when the partition is created by controller_backend.
+    set_partition_bootstrap_params_cmd_data data{
+      .tp_ns = tp_ns, .partition_params = std::move(params)};
+
+    set_partition_bootstrap_params_cmd cmd(tp_ns, std::move(data));
+
+    co_return co_await replicate_and_wait(_stm, _as, std::move(cmd), timeout);
+}
+
 ss::future<std::vector<topic_result>>
 topics_frontend::dispatch_create_to_leader(
   model::node_id leader,

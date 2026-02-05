@@ -111,6 +111,8 @@ private:
       apply(set_topic_partitions_disabled_cmd, model::offset);
     ss::future<std::error_code>
       apply(bulk_force_reconfiguration_cmd, model::offset);
+    ss::future<std::error_code>
+      apply(set_partition_bootstrap_params_cmd, model::offset);
 
     using ntp_leader = std::pair<model::ntp, model::node_id>;
 

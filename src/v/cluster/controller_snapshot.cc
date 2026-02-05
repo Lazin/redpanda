@@ -136,6 +136,7 @@ ss::future<> topics_t::serde_async_write(iobuf& out) {
     co_await write_map_async(out, partitions_to_force_recover);
     co_await write_map_async(out, std::move(iceberg_tombstones));
     co_await write_map_async(out, std::move(cloud_topic_tombstones));
+    co_await write_map_async(out, std::move(pending_bootstrap_params));
 }
 
 ss::future<>
@@ -163,6 +164,12 @@ topics_t::serde_async_read(iobuf_parser& in, const serde::header h) {
     if (h._version >= 3) {
         cloud_topic_tombstones
           = co_await read_map_async_nested<decltype(cloud_topic_tombstones)>(
+            in, h._bytes_left_limit);
+    }
+
+    if (h._version >= 4) {
+        pending_bootstrap_params
+          = co_await read_map_async_nested<decltype(pending_bootstrap_params)>(
             in, h._bytes_left_limit);
     }
 
