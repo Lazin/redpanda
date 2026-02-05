@@ -298,7 +298,9 @@ private:
       replicas_t initial_replicas,
       const replicas_revision_map& replicas_revisions,
       force_reconfiguration is_force_reconfigured,
-      const topic_metadata& topic_md);
+      const topic_metadata& topic_md,
+      std::optional<partition_bootstrap_params> bootstrap_params
+      = std::nullopt);
 
     ss::future<> add_to_shard_table(
       model::ntp,

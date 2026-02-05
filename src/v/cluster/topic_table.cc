@@ -1325,7 +1325,8 @@ topic_table::fill_snapshot(controller_snapshot& controller_snap) const {
                 .replicas = std::move(replicas),
                 .replicas_revisions = p_it->second.replicas_revisions,
                 .last_update_finished_revision
-                = p_it->second.last_update_finished_revision});
+                = p_it->second.last_update_finished_revision,
+                .bootstrap_params = p_it->second.bootstrap_params});
 
             co_await ss::coroutine::maybe_yield();
         }
@@ -1473,6 +1474,7 @@ public:
           .replicas_revisions = partition.replicas_revisions,
           .last_update_finished_revision
           = partition.last_update_finished_revision,
+          .bootstrap_params = partition.bootstrap_params,
         };
 
         if (!prev_assignment) {
@@ -1955,6 +1957,19 @@ topic_table::get_initial_revision(model::topic_namespace_view tp) const {
 std::optional<model::initial_revision_id>
 topic_table::get_initial_revision(const model::ntp& ntp) const {
     return get_initial_revision(model::topic_namespace_view(ntp));
+}
+
+std::optional<partition_bootstrap_params>
+topic_table::get_partition_bootstrap_params(const model::ntp& ntp) const {
+    auto it = _topics.find(model::topic_namespace_view(ntp));
+    if (it == _topics.end()) {
+        return std::nullopt;
+    }
+    auto p_it = it->second.partitions.find(ntp.tp.partition());
+    if (p_it == it->second.partitions.end()) {
+        return std::nullopt;
+    }
+    return p_it->second.bootstrap_params;
 }
 
 std::optional<replicas_t>

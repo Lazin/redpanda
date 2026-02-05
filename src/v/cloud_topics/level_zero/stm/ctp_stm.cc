@@ -19,6 +19,7 @@
 #include "raft/persisted_stm.h"
 #include "ssx/future-util.h"
 #include "ssx/watchdog.h"
+#include "storage/snapshot.h"
 
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/sleep.hh>
@@ -498,4 +499,34 @@ fmt::iterator epoch_window_checker::format_to(fmt::iterator it) const {
     return fmt::format_to(
       it, "window=[{}, {}], offset={}", _min_epoch, _max_epoch, _latest_offset);
 }
+
+ss::future<> create_ctp_stm_bootstrap_snapshot(
+  const std::filesystem::path& work_directory, kafka::offset start_offset) {
+    // Create empty state with the correct start_offset
+    ctp_stm_state state;
+    state.set_start_offset(start_offset);
+
+    // Create empty epoch checker
+    epoch_window_checker checker;
+
+    // Create the snapshot
+    ctp_stm_snapshot snap{.state = state, .checker = checker};
+    auto data = serde::to_iobuf(snap);
+
+    // The snapshot offset should be one before the start_offset since
+    // the snapshot represents state "up to and including" this offset.
+    // For a partition starting at start_offset, the snapshot should be
+    // at prev_offset(start_offset) (converted to model::offset).
+    auto snapshot_offset = model::prev_offset(model::offset(start_offset()));
+    auto stm_snap = raft::stm_snapshot::create(
+      0, snapshot_offset, std::move(data));
+
+    // Persist using the file-backed snapshot manager
+    storage::simple_snapshot_manager snapshot_mgr(
+      work_directory, ss::sstring(ctp_stm::name));
+
+    co_await raft::file_backed_stm_snapshot::persist_local_snapshot(
+      snapshot_mgr, std::move(stm_snap));
+}
+
 }; // namespace cloud_topics

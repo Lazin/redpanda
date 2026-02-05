@@ -445,6 +445,36 @@ struct configuration_update_reply
     auto serde_fields() { return std::tie(success); }
 };
 
+/// Parameters for bootstrapping a partition with custom initial state.
+/// Used for programmatic partition creation with specific offset/term.
+struct partition_bootstrap_params
+  : serde::envelope<
+      partition_bootstrap_params,
+      serde::version<0>,
+      serde::compat_version<0>> {
+    partition_bootstrap_params() noexcept = default;
+
+    partition_bootstrap_params(
+      model::offset start_offset, model::term_id initial_term)
+      : start_offset(start_offset)
+      , initial_term(initial_term) {}
+
+    /// The starting offset for this partition (min offset of the log)
+    model::offset start_offset{0};
+
+    /// The initial term for Raft consensus
+    model::term_id initial_term{0};
+
+    auto serde_fields() { return std::tie(start_offset, initial_term); }
+
+    friend bool operator==(
+      const partition_bootstrap_params&, const partition_bootstrap_params&)
+      = default;
+
+    friend std::ostream&
+    operator<<(std::ostream&, const partition_bootstrap_params&);
+};
+
 /// Partition assignment describes an assignment of all replicas for single NTP.
 /// The replicas are hold in vector of broker_shard.
 struct partition_assignment
