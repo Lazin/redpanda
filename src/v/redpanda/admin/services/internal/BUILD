@@ -1,4 +1,5 @@
 load("//bazel:build.bzl", "redpanda_cc_library")
+load("//bazel:test.bzl", "redpanda_cc_gtest")
 
 package(default_visibility = [
     "//src/v/redpanda:__subpackages__",
@@ -90,5 +91,49 @@ redpanda_cc_library(
         "//src/v/redpanda/admin/proxy:client",
         "//src/v/serde/protobuf:rpc",
         "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "ct_proxy_service",
+    srcs = ["ct_proxy_service.cc"],
+    hdrs = ["ct_proxy_service.h"],
+    implementation_deps = [
+        "//src/v/bytes:iobuf",
+        "//src/v/cloud_topics/level_zero/common:extent_meta",
+        "//src/v/cloud_topics/level_zero/stm:ctp_stm",
+        "//src/v/cloud_topics/level_zero/stm:ctp_stm_api",
+        "//src/v/cloud_topics/level_zero/stm:placeholder",
+        "//src/v/cloud_topics:types",
+        "//src/v/container:chunked_vector",
+        "//src/v/storage",
+        "//src/v/storage:parser_utils",
+    ],
+    deps = [
+        "//proto/redpanda/core/admin/internal/cloud_topics/v1:ct_proxy_redpanda_proto",
+        "//src/v/base",
+        "//src/v/cluster",
+        "//src/v/model",
+        "//src/v/serde/protobuf:rpc",
+        "@fmt",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
+    name = "ct_proxy_service_test",
+    timeout = "short",
+    srcs = ["ct_proxy_service_test.cc"],
+    deps = [
+        ":ct_proxy_service",
+        "//proto/redpanda/core/admin/internal/cloud_topics/v1:ct_proxy_redpanda_proto",
+        "//src/v/bytes:iobuf",
+        "//src/v/cloud_topics/level_zero/common:extent_meta",
+        "//src/v/cloud_topics/level_zero/stm:placeholder",
+        "//src/v/cloud_topics:types",
+        "//src/v/model",
+        "//src/v/serde/protobuf:rpc",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
     ],
 )

@@ -83,6 +83,7 @@ redpanda_cc_library(
         "//src/v/redpanda/admin/services:security",
         "//src/v/redpanda/admin/services/datalake",
         "//src/v/redpanda/admin/services/internal:breakglass",
+        "//src/v/redpanda/admin/services/internal:ct_proxy_service",
         "//src/v/redpanda/admin/services/internal:debug",
         "//src/v/redpanda/admin/services/internal:level_zero_gc",
         "//src/v/redpanda/admin/services/internal:metastore",
