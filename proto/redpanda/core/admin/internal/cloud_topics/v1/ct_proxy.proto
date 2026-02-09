@@ -1,0 +1,272 @@
+// Copyright 2025 Redpanda Data, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package redpanda.core.admin.internal.cloud_topics.v1;
+
+import "proto/redpanda/core/pbgen/options.proto";
+import "proto/redpanda/core/pbgen/rpc.proto";
+import "proto/redpanda/core/common/v1/ntp.proto";
+
+option go_package = "github.com/redpanda-data/redpanda/proto/redpanda/core/admin/internal/cloud_topics/v1";
+option (pbgen.cpp_namespace) = "proto::admin::ct_proxy";
+
+// Admin endpoints to interact with cloud topics for external proxy applications.
+//
+// This service provides APIs that allow external applications (e.g., the ct-proxy
+// Go application) to interact with Redpanda cloud topics by:
+// - Getting the current cluster epoch for object naming
+// - Replicating placeholders after uploading L0 objects to cloud storage
+// - Reading placeholders from partitions for materialization
+// - Listing cloud topic partitions and their metadata
+// - Reading L1 metastore extent metadata for advanced read paths
+//
+// These APIs are designed for external proxy implementations that handle the data
+// plane (uploading/downloading objects to/from cloud storage) while delegating
+// the metadata plane (placeholder replication, epoch tracking) to Redpanda.
+service CtProxyService {
+    // Get the current cluster epoch for a partition. The cluster epoch is used
+    // as part of the L0 object naming convention and for fencing during
+    // placeholder replication.
+    rpc GetClusterEpoch(GetClusterEpochRequest) returns (GetClusterEpochResponse) {
+        option (pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+
+    // Replicate placeholders to a cloud topics partition after uploading L0
+    // objects to cloud storage. This API performs RW-fencing using the expected
+    // cluster epoch to ensure consistency between the data plane (uploaded
+    // objects) and metadata plane (replicated placeholders).
+    rpc ReplicatePlaceholders(ReplicatePlaceholdersRequest) returns (ReplicatePlaceholdersResponse) {
+        option (pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+
+    // Read placeholders from a cloud topics partition within a specified offset
+    // range. This returns the placeholder metadata needed to fetch and
+    // materialize L0 objects from cloud storage.
+    rpc ReadPlaceholders(ReadPlaceholdersRequest) returns (ReadPlaceholdersResponse) {
+        option (pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+
+    // List all cloud topic partitions and their metadata. This is used by proxy
+    // applications to discover available partitions and present themselves as
+    // Kafka brokers.
+    rpc ListCloudTopicPartitions(ListCloudTopicPartitionsRequest) returns (ListCloudTopicPartitionsResponse) {
+        option (pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+
+    // Read L1 metastore extent metadata for a partition within a specified
+    // offset range. This provides access to the metastore layer for advanced
+    // read paths.
+    rpc ReadL1Metadata(ReadL1MetadataRequest) returns (ReadL1MetadataResponse) {
+        option (pbgen.rpc) = {
+            authz: SUPERUSER
+        };
+    }
+}
+
+// Request for getting the current cluster epoch.
+message GetClusterEpochRequest {
+    // The topic partition to get the cluster epoch for.
+    common.v1.TopicPartition partition = 1;
+}
+
+// Response containing the current cluster epoch.
+message GetClusterEpochResponse {
+    // The current cluster epoch for this partition. This value should be used
+    // when creating L0 object names and as the expected_cluster_epoch when
+    // replicating placeholders.
+    int64 cluster_epoch = 1;
+}
+
+// Placeholder data that references an L0 object in cloud storage.
+// This matches the extent_meta structure in C++ and contains all information
+// needed to fetch and materialize data from cloud storage.
+message PlaceholderData {
+    // The UUID portion of the object_id (16 bytes).
+    bytes object_id_uuid = 1;
+
+    // The cluster epoch portion of the object_id.
+    int64 cluster_epoch = 2;
+
+    // The prefix portion of the object_id (0-999 for prefix partitioning).
+    uint32 object_id_prefix = 3;
+
+    // Byte offset within the L0 object where this extent begins.
+    uint64 first_byte_offset = 4;
+
+    // Size in bytes of this extent within the L0 object.
+    uint64 byte_range_size = 5;
+
+    // The first Kafka offset contained in this extent.
+    int64 base_offset = 6;
+
+    // The last Kafka offset contained in this extent (inclusive).
+    int64 last_offset = 7;
+}
+
+// Request for replicating placeholders to a partition.
+message ReplicatePlaceholdersRequest {
+    // The topic partition to replicate placeholders to.
+    common.v1.TopicPartition partition = 1;
+
+    // The placeholders to replicate. Each placeholder references an L0 object
+    // that has been uploaded to cloud storage.
+    repeated PlaceholderData placeholders = 2;
+
+    // The expected cluster epoch for fencing. This should match the cluster
+    // epoch returned by GetClusterEpoch and used in the L0 object names.
+    // If the actual cluster epoch has advanced, replication will fail and the
+    // caller should retry with a fresh epoch.
+    int64 expected_cluster_epoch = 3;
+}
+
+// Response from replicating placeholders.
+message ReplicatePlaceholdersResponse {
+    // The last offset after replication. This is the last Kafka offset of the
+    // replicated placeholder batches.
+    int64 last_offset = 1;
+
+    // The raft term after replication.
+    int64 term = 2;
+}
+
+// A placeholder batch read from the partition log.
+// This includes both the placeholder metadata and the Kafka batch metadata.
+message PlaceholderBatch {
+    // The placeholder data referencing the L0 object.
+    PlaceholderData placeholder = 1;
+
+    // The base offset of this batch in the Kafka log.
+    int64 base_offset = 2;
+
+    // The last offset of this batch in the Kafka log (inclusive).
+    int64 last_offset = 3;
+
+    // The number of records in this batch (may include empty records used to
+    // preserve batch shape).
+    int32 record_count = 4;
+
+    // Producer ID if this batch was produced by an idempotent or transactional
+    // producer.
+    int64 producer_id = 5;
+
+    // Producer epoch if this batch was produced by an idempotent or
+    // transactional producer.
+    int32 producer_epoch = 6;
+
+    // Whether this batch is part of a transaction.
+    bool is_transactional = 7;
+}
+
+// Request for reading placeholders from a partition.
+message ReadPlaceholdersRequest {
+    // The topic partition to read placeholders from.
+    common.v1.TopicPartition partition = 1;
+
+    // The starting Kafka offset (inclusive).
+    int64 start_offset = 2;
+
+    // The ending Kafka offset (exclusive). Use a very large value to read to
+    // the end of the log.
+    int64 max_offset = 3;
+
+    // Optional maximum number of bytes to return. If not specified, all
+    // placeholders in the offset range will be returned.
+    optional uint64 max_bytes = 4;
+}
+
+// Response containing placeholder batches.
+message ReadPlaceholdersResponse {
+    // The placeholder batches within the requested offset range.
+    repeated PlaceholderBatch batches = 1;
+}
+
+// Information about a cloud topic partition.
+message CloudTopicPartitionInfo {
+    // The topic name.
+    string topic = 1;
+
+    // The partition ID.
+    int32 partition = 2;
+
+    // The start offset (earliest available offset).
+    int64 start_offset = 3;
+
+    // The high watermark (last committed offset + 1).
+    int64 high_watermark = 4;
+
+    // The log end offset (last offset in the log + 1).
+    int64 log_end_offset = 5;
+
+    // Whether this partition has data in the L1 metastore.
+    bool has_l1_data = 6;
+}
+
+// Request for listing cloud topic partitions.
+message ListCloudTopicPartitionsRequest {
+    // Optional topic filter as a regex pattern. If not specified, all cloud
+    // topics are returned.
+    optional string topic_filter = 1;
+}
+
+// Response containing cloud topic partition information.
+message ListCloudTopicPartitionsResponse {
+    // List of cloud topic partitions.
+    repeated CloudTopicPartitionInfo partitions = 1;
+}
+
+// L1 extent metadata from the metastore.
+message L1ExtentMetadata {
+    // The UUID portion of the object_id (16 bytes).
+    bytes object_id_uuid = 1;
+
+    // Position of this extent within the L1 object.
+    uint64 position = 2;
+
+    // Size in bytes of this extent.
+    uint64 size = 3;
+
+    // The first Kafka offset contained in this extent.
+    int64 base_offset = 4;
+
+    // The last Kafka offset contained in this extent (inclusive).
+    int64 last_offset = 5;
+}
+
+// Request for reading L1 metastore extent metadata.
+message ReadL1MetadataRequest {
+    // The topic partition to read L1 metadata for.
+    common.v1.TopicPartition partition = 1;
+
+    // The starting Kafka offset (inclusive).
+    int64 start_offset = 2;
+
+    // The ending Kafka offset (exclusive).
+    int64 end_offset = 3;
+}
+
+// Response containing L1 extent metadata.
+message ReadL1MetadataResponse {
+    // List of L1 extent metadata within the requested offset range.
+    repeated L1ExtentMetadata extents = 1;
+}

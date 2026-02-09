@@ -15,6 +15,7 @@
 #include "redpanda/admin/services/cluster.h"
 #include "redpanda/admin/services/datalake/datalake.h"
 #include "redpanda/admin/services/internal/breakglass.h"
+#include "redpanda/admin/services/internal/ct_proxy_service.h"
 #include "redpanda/admin/services/internal/debug.h"
 #include "redpanda/admin/services/internal/level_zero_gc.h"
 #include "redpanda/admin/services/internal/metastore.h"
@@ -108,6 +109,10 @@ void application::configure_admin_server(model::node_id node_id) {
                   create_client(),
                   cloud_topics_app->get_level_zero_gc(),
                   &controller->get_members_table()));
+              s.add_service(
+                std::make_unique<admin::ct_proxy_service_impl>(
+                  &partition_manager,
+                  &controller->get_topics_state()));
           }
           s.add_service(
             std::make_unique<

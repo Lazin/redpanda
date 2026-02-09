@@ -45,7 +45,10 @@ redpanda_cc_library(
         "errc.h",
         "types.h",
     ],
-    visibility = [":__subpackages__"],
+    visibility = [
+        ":__subpackages__",
+        "//src/v/redpanda/admin/services/internal:__pkg__",
+    ],
     deps = [
         "//src/v/random:generators",
         "//src/v/serde",
