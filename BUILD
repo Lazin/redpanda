@@ -46,6 +46,12 @@ alias(
 )
 
 alias(
+    name = "ct-proxy",
+    actual = "//src/go/ct-proxy:ct-proxy",
+    visibility = ["//visibility:public"],
+)
+
+alias(
     name = "cc_gen",
     actual = "//bazel/compilation_database_generator",
 )

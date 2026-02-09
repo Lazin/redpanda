@@ -140,6 +140,7 @@ def _prepare_redpanda_package_content(ctx, dynamic_loader_path):
         hwloc_distrib = hwloc_distrib,
         openssl = openssl,
         rpk_binary = ctx.file.rpk_binary,
+        ct_proxy_binary = ctx.file.ct_proxy_binary,
         shared_libraries = package_binaries.shared_libraries,
     )
 
@@ -195,6 +196,13 @@ def _common_redpanda_package_cfg(ctx, package_content, fips_enabled, base_path =
             "path": _path("bin"),
             "name": "rpk",
             "source": package_content.rpk_binary.path,
+        })
+
+    if package_content.ct_proxy_binary != None:
+        files.append({
+            "path": _path("bin"),
+            "name": "ct-proxy",
+            "source": package_content.ct_proxy_binary.path,
         })
 
     for solib in package_content.shared_libraries:
@@ -276,6 +284,7 @@ def _impl(ctx):
         package_content.hwloc_distrib,
         package_content.openssl,
         package_content.rpk_binary,
+        package_content.ct_proxy_binary,
         ctx.file.default_yaml_config,
     ]
 
@@ -336,6 +345,9 @@ redpanda_package = rule(
             allow_single_file = True,
         ),
         "rpk_binary": attr.label(
+            allow_single_file = True,
+        ),
+        "ct_proxy_binary": attr.label(
             allow_single_file = True,
         ),
         "owner": attr.int(),

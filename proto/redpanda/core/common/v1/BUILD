@@ -1,4 +1,5 @@
 load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
 load("//bazel/pbgen:pbgen.bzl", "redpanda_proto_library")
 
 proto_library(
@@ -25,6 +26,17 @@ redpanda_proto_library(
     name = "ntp_redpanda_proto",
     protos = [":ntp_proto"],
     visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "ntp_go_proto",
+    compilers = ["@rules_go//proto:go_proto"],
+    importpath = "github.com/redpanda-data/redpanda/proto/redpanda/core/common/v1",
+    protos = [":ntp_proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/redpanda/core/pbgen:options_go_proto",
+    ],
 )
 
 proto_library(

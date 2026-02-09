@@ -18,6 +18,7 @@ package redpanda.core.common.v1;
 
 import "proto/redpanda/core/pbgen/options.proto";
 
+option go_package = "github.com/redpanda-data/redpanda/proto/redpanda/core/common/v1";
 option (pbgen.cpp_namespace) = "proto::common";
 
 // A single topic partition within the kafka namespace.

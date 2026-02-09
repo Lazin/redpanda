@@ -69,6 +69,7 @@ go_proto_library(
     protos = [":ct_proxy_proto"],
     visibility = ["//visibility:public"],
     deps = [
+        "//proto/redpanda/core/common/v1:ntp_go_proto",
         "//proto/redpanda/core/pbgen:options_go_proto",
         "//proto/redpanda/core/pbgen:rpc_go_proto",
     ],
