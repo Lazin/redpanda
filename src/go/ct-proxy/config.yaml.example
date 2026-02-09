@@ -1,0 +1,45 @@
+# ct-proxy configuration example
+
+server:
+  # Kafka protocol listener address
+  kafka_listen_address: "0.0.0.0:9092"
+  # Admin API listener address (optional, for metrics/health)
+  admin_listen_address: "0.0.0.0:9644"
+
+redpanda:
+  admin_api:
+    # Redpanda admin API addresses
+    addresses:
+      - "localhost:9644"
+    # TLS configuration for admin API
+    tls:
+      enabled: false
+      ca_file: ""
+      cert_file: ""
+      key_file: ""
+      insecure_skip_verify: false
+
+cloud_storage:
+  # Cloud storage provider: aws, gcp, or azure
+  provider: "aws"
+  # Region for cloud storage
+  region: "us-west-2"
+  # Bucket name for L0 objects
+  bucket: "my-cloud-topics-bucket"
+  # Credentials are typically loaded from environment variables:
+  # AWS: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+  # GCP: GOOGLE_APPLICATION_CREDENTIALS
+  # Azure: AZURE_STORAGE_ACCOUNT, AZURE_STORAGE_KEY
+
+cloud_topics:
+  # List of allowed cloud topic names
+  # Only these topics will be accessible via the proxy
+  allowed_topics:
+    - "my-cloud-topic-1"
+    - "my-cloud-topic-2"
+
+logging:
+  # Log level: debug, info, warn, error
+  level: "info"
+  # Log format: json or text
+  format: "json"
