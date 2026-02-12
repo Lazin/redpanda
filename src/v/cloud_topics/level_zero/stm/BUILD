@@ -20,6 +20,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/level_zero/reader:__pkg__",
         "//src/v/cloud_topics/level_zero/reader/tests:__pkg__",
         "//src/v/redpanda/admin/services/internal:__pkg__",
+        "//src/v/redpanda/admin/tests:__pkg__",
     ],
     deps = [
         "//src/v/cloud_topics:types",

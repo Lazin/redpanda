@@ -48,6 +48,7 @@ redpanda_cc_library(
     visibility = [
         ":__subpackages__",
         "//src/v/redpanda/admin/services/internal:__pkg__",
+        "//src/v/redpanda/admin/tests:__pkg__",
     ],
     deps = [
         "//src/v/random:generators",

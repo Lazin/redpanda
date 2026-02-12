@@ -20,6 +20,7 @@ package(
         "//src/v/cloud_topics/level_zero/write_request_scheduler:__pkg__",
         "//src/v/cloud_topics/level_zero/write_request_scheduler/tests:__pkg__",
         "//src/v/redpanda/admin/services/internal:__pkg__",
+        "//src/v/redpanda/admin/tests:__pkg__",
     ],
 )
 

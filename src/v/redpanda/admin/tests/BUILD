@@ -64,6 +64,35 @@ redpanda_cc_gtest(
     ],
 )
 
+redpanda_cc_gtest(
+    name = "ct_proxy_pipeline_test",
+    timeout = "short",
+    srcs = ["ct_proxy_pipeline_test.cc"],
+    cpu = 1,
+    deps = [
+        "//proto/redpanda/core/admin/internal/cloud_topics/v1:ct_proxy_redpanda_proto",
+        "//src/v/cloud_io/tests:s3_imposter",
+        "//src/v/cloud_storage",
+        "//src/v/cloud_topics/level_zero/common:extent_meta",
+        "//src/v/cloud_topics/level_zero/pipeline:serializer",
+        "//src/v/cloud_topics/level_zero/stm:ctp_stm",
+        "//src/v/cloud_topics/level_zero/stm:placeholder",
+        "//src/v/cloud_topics:types",
+        "//src/v/model",
+        "//src/v/model:batch_builder",
+        "//src/v/redpanda/admin/services/internal:ct_proxy_service",
+        "//src/v/redpanda/tests:fixture",
+        "//src/v/ssx:sformat",
+        "//src/v/storage",
+        "//src/v/test_utils:gtest",
+        "//src/v/test_utils:scoped_config",
+        "//src/v/utils:retry_chain_node",
+        "@googletest//:gtest",
+        "@seastar",
+        "@seastar//:testing",
+    ],
+)
+
 redpanda_cc_bench(
     name = "list_kafka_connections_rpbench",
     timeout = "long",
