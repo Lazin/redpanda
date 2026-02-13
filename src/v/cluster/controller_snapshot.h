@@ -275,7 +275,9 @@ struct cluster_recovery_t
     friend bool operator==(const cluster_recovery_t&, const cluster_recovery_t&)
       = default;
 
-    auto serde_fields() { return std::tie(recovery_states, pending_bootstrap_params); }
+    auto serde_fields() {
+        return std::tie(recovery_states, pending_bootstrap_params);
+    }
 };
 
 struct client_quotas_t
