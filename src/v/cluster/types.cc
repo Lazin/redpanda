@@ -179,6 +179,15 @@ std::ostream& operator<<(std::ostream& o, const configuration_invariants& c) {
     return o;
 }
 
+std::ostream& operator<<(std::ostream& o, const partition_bootstrap_params& p) {
+    fmt::print(
+      o,
+      "{{start_offset: {}, initial_term: {}}}",
+      p.start_offset,
+      p.initial_term);
+    return o;
+}
+
 std::ostream& operator<<(std::ostream& o, const partition_assignment& p_as) {
     fmt::print(
       o,
