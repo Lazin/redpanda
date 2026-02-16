@@ -135,3 +135,59 @@ class CtProxySmokeTest(RedpandaTest):
         assert epoch >= 0, f"Expected non-negative epoch, got {epoch}"
 
         self.logger.info("ct-proxy smoke test passed")
+
+    @cluster(num_nodes=4)  # 3 Redpanda + 1 ct-proxy
+    def test_ct_proxy_list_topics_via_kafka(self):
+        """
+        Test that ct-proxy correctly proxies Kafka metadata requests.
+        This test connects an RPK client to ct-proxy's Kafka port and
+        lists topics to verify the Kafka protocol proxy is working.
+        """
+        # Get cloud storage bucket from settings
+        bucket = self.si_settings.cloud_storage_bucket
+
+        # Start ct-proxy service on an extra node
+        self.ct_proxy = CtProxyService(
+            context=self.test_context,
+            redpanda=self.redpanda,
+            topic=self.CLOUD_TOPIC_NAME,
+            cloud_storage_bucket=bucket,
+            cloud_storage_region=self.si_settings.cloud_storage_region,
+            log_level="debug",
+        )
+
+        self.logger.info("Starting ct-proxy service")
+        try:
+            self.ct_proxy.start()
+        except FileNotFoundError as e:
+            self.logger.error(f"ct-proxy binary not found: {e}")
+            raise RuntimeError(
+                "ct-proxy binary not installed on test nodes. "
+                "Ensure ct-proxy is built and deployed to the test environment. "
+                "Build with: bazel build //:ct-proxy"
+            ) from e
+
+        # Wait for ct-proxy to be ready
+        self.logger.info("Waiting for ct-proxy to become ready")
+        self.ct_proxy.wait_ready(timeout_sec=60)
+
+        self.logger.info(
+            f"ct-proxy is ready at {self.ct_proxy.admin_url()}, "
+            f"Kafka endpoint: {self.ct_proxy.brokers()}"
+        )
+
+        # Create an RPK client that connects to ct-proxy instead of Redpanda
+        rpk_via_proxy = RpkTool(self.ct_proxy)
+
+        # List topics through ct-proxy
+        self.logger.info("Listing topics via ct-proxy Kafka endpoint")
+        topics = rpk_via_proxy.list_topics()
+
+        self.logger.info(f"Topics returned via ct-proxy: {topics}")
+
+        # Verify the cloud topic is visible through ct-proxy
+        assert self.CLOUD_TOPIC_NAME in topics, (
+            f"Expected topic '{self.CLOUD_TOPIC_NAME}' not found in topics: {topics}"
+        )
+
+        self.logger.info("ct-proxy Kafka list topics test passed")

@@ -73,7 +73,6 @@ class CtProxyService(BackgroundThreadService):
         :param cloud_storage_provider: Cloud provider (aws, gcp, azure)
         :param log_level: Log level (debug, info, warn, error)
         """
-        super(CtProxyService, self).__init__(context, num_nodes=1)
         self._redpanda = redpanda
         self._topic = topic
         self._kafka_port = kafka_port
@@ -85,6 +84,7 @@ class CtProxyService(BackgroundThreadService):
         self._stopping = Event()
         self._node = None
         self._admin_address = None
+        super(CtProxyService, self).__init__(context, num_nodes=1)
 
     def _generate_config(self, node) -> dict:
         """Generate ct-proxy configuration."""
@@ -340,3 +340,45 @@ class CtProxyService(BackgroundThreadService):
             backoff_sec=1,
             err_msg=err_msg,
         )
+
+    # Methods to support RpkTool connection to ct-proxy
+    # These methods mirror the RedpandaService interface so RpkTool can connect
+
+    @property
+    def logger(self):
+        """Return the logger (delegated to redpanda service)."""
+        return self._redpanda.logger
+
+    @property
+    def _context(self):
+        """Return the test context (required by RpkTool to find rpk binary)."""
+        return self.context
+
+    def brokers(self) -> str:
+        """
+        Get the ct-proxy Kafka broker address.
+        This allows RpkTool to connect to ct-proxy instead of Redpanda.
+
+        :return: Comma-separated broker addresses (single address for ct-proxy)
+        """
+        if not self._node:
+            raise RuntimeError("ct-proxy is not running")
+        return f"{self._node.account.hostname}:{self._kafka_port}"
+
+    def brokers_list(self) -> list[str]:
+        """
+        Get the ct-proxy Kafka broker address as a list.
+
+        :return: List of broker addresses
+        """
+        return [self.brokers()]
+
+    def kafka_client_security(self):
+        """
+        Get the Kafka client security settings for ct-proxy.
+        Currently ct-proxy does not support authentication.
+
+        :return: Security settings (no authentication)
+        """
+        from rptest.services.redpanda_types import PLAINTEXT_SECURITY
+        return PLAINTEXT_SECURITY
