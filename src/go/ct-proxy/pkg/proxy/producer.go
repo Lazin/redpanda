@@ -50,7 +50,10 @@ func (h *ProducerHandler) HandleProduce(
 	ctx context.Context,
 	req *kmsg.ProduceRequest,
 ) (*kmsg.ProduceResponse, error) {
-	resp := &kmsg.ProduceResponse{}
+	// Set response version to match request for correct serialization
+	resp := &kmsg.ProduceResponse{
+		Version: req.Version,
+	}
 
 	// Check for transactions (not supported)
 	// Note: TransactionalID field checking removed - would need to check batch headers

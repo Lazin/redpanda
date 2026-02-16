@@ -11,6 +11,8 @@ package proxy
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +25,128 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
 )
+
+// kafkaRequestHeader contains the parsed Kafka request header fields.
+type kafkaRequestHeader struct {
+	apiKey        int16
+	apiVersion    int16
+	correlationID int32
+	clientID      string
+	bodyOffset    int // offset where the request body starts
+}
+
+// parseKafkaRequestHeader parses the Kafka request header and returns the header info
+// and the offset where the actual request body starts.
+// The request format is:
+// - API Key (2 bytes)
+// - API Version (2 bytes)
+// - Correlation ID (4 bytes)
+// - Client ID (nullable string: 2-byte length + bytes for non-flexible, varint + bytes for flexible)
+// - [Tagged fields for flexible versions]
+func parseKafkaRequestHeader(data []byte) (*kafkaRequestHeader, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("request too short: need at least 8 bytes, got %d", len(data))
+	}
+
+	header := &kafkaRequestHeader{
+		apiKey:        int16(binary.BigEndian.Uint16(data[0:2])),
+		apiVersion:    int16(binary.BigEndian.Uint16(data[2:4])),
+		correlationID: int32(binary.BigEndian.Uint32(data[4:8])),
+	}
+
+	offset := 8
+
+	// Determine if this is a flexible version request
+	// Flexible requests have a tagged fields section after the client ID (KIP-482)
+	isFlexible := isFlexibleRequest(header.apiKey, header.apiVersion)
+
+	// Parse client ID - ALWAYS uses non-flexible encoding (2-byte nullable string)
+	// even for flexible API versions. The flexible encoding only affects the body
+	// and adds a tagged fields section to the header.
+	if offset+2 > len(data) {
+		return nil, fmt.Errorf("request too short to read client ID length")
+	}
+	clientIDLen := int16(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 2
+	if clientIDLen >= 0 {
+		if offset+int(clientIDLen) > len(data) {
+			return nil, fmt.Errorf("request too short to read client ID string")
+		}
+		header.clientID = string(data[offset : offset+int(clientIDLen)])
+		offset += int(clientIDLen)
+	}
+
+	// For flexible requests, skip the tagged fields section in the header
+	if isFlexible {
+		if offset >= len(data) {
+			return nil, fmt.Errorf("request too short to read tagged fields")
+		}
+		numTags, n := binary.Uvarint(data[offset:])
+		if n <= 0 {
+			return nil, fmt.Errorf("failed to read tagged fields count")
+		}
+		offset += n
+		// Sanity check - shouldn't have too many tags
+		if numTags > 100 {
+			return nil, fmt.Errorf("too many tagged fields: %d", numTags)
+		}
+		// Skip each tagged field
+		for i := uint64(0); i < numTags; i++ {
+			if offset >= len(data) {
+				return nil, fmt.Errorf("request too short for tag %d key", i)
+			}
+			// Tag key (varint)
+			_, n := binary.Uvarint(data[offset:])
+			if n <= 0 {
+				return nil, fmt.Errorf("failed to read tag key")
+			}
+			offset += n
+			if offset >= len(data) {
+				return nil, fmt.Errorf("request too short for tag %d length", i)
+			}
+			// Tag length (varint)
+			tagLen, n := binary.Uvarint(data[offset:])
+			if n <= 0 {
+				return nil, fmt.Errorf("failed to read tag length")
+			}
+			offset += n
+			// Sanity check tag length
+			if offset+int(tagLen) > len(data) {
+				return nil, fmt.Errorf("tag %d data extends beyond request (offset=%d, tagLen=%d, dataLen=%d)", i, offset, tagLen, len(data))
+			}
+			// Skip tag data
+			offset += int(tagLen)
+		}
+	}
+
+	header.bodyOffset = offset
+	return header, nil
+}
+
+// isFlexibleRequest returns true if the given API key and version uses flexible encoding
+// for the REQUEST HEADER.
+// Flexible encoding was introduced in KIP-482 for most APIs starting at specific versions.
+// IMPORTANT: ApiVersions is special - it ALWAYS uses non-flexible request headers
+// because the client doesn't know broker capabilities until after ApiVersions completes.
+func isFlexibleRequest(apiKey, apiVersion int16) bool {
+	// ApiVersions NEVER uses flexible request headers for backward compatibility
+	if apiKey == 18 { // ApiVersions
+		return false
+	}
+
+	// Based on Kafka protocol specification
+	switch apiKey {
+	case 0: // Produce
+		return apiVersion >= 9
+	case 1: // Fetch
+		return apiVersion >= 12
+	case 3: // Metadata
+		return apiVersion >= 9
+	default:
+		// For APIs we don't explicitly handle, assume non-flexible for safety
+		return false
+	}
+}
 
 // Server is the main ct-proxy server that implements the Kafka protocol.
 type Server struct {
@@ -128,24 +252,35 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 	s.logger.Debug("new connection", zap.String("remote", conn.RemoteAddr().String()))
 
 	// Kafka protocol handling loop
+	requestCount := 0
 	for {
 		select {
 		case <-ctx.Done():
+			s.logger.Debug("connection context done", zap.String("remote", conn.RemoteAddr().String()))
 			return
 		default:
 		}
 
-		// Read request header (request size + API key + API version + correlation ID + client ID)
-		header := make([]byte, 4)
-		if _, err := conn.Read(header); err != nil {
+		requestCount++
+		s.logger.Debug("waiting for request",
+			zap.String("remote", conn.RemoteAddr().String()),
+			zap.Int("request_count", requestCount))
+
+		// Read request size (4 bytes)
+		sizeBuf := make([]byte, 4)
+		if _, err := conn.Read(sizeBuf); err != nil {
 			if err != io.EOF {
-				s.logger.Error("failed to read request header", zap.Error(err))
+				s.logger.Error("failed to read request size", zap.Error(err))
+			} else {
+				s.logger.Debug("connection closed by client (EOF)",
+					zap.String("remote", conn.RemoteAddr().String()),
+					zap.Int("requests_handled", requestCount-1))
 			}
 			return
 		}
 
 		// Parse request size (first 4 bytes, big endian)
-		requestSize := int32(header[0])<<24 | int32(header[1])<<16 | int32(header[2])<<8 | int32(header[3])
+		requestSize := int32(binary.BigEndian.Uint32(sizeBuf))
 
 		// Read the rest of the request
 		requestBody := make([]byte, requestSize)
@@ -154,61 +289,144 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		// Parse API key (next 2 bytes)
-		apiKey := int16(requestBody[0])<<8 | int16(requestBody[1])
+		// Parse Kafka request header
+		header, err := parseKafkaRequestHeader(requestBody)
+		if err != nil {
+			s.logger.Error("failed to parse request header",
+				zap.Error(err),
+				zap.Int("request_size", len(requestBody)),
+				zap.Binary("first_bytes", requestBody[:min(len(requestBody), 32)]))
+			return
+		}
 
 		s.logger.Debug("received request",
-			zap.Int16("api_key", apiKey),
+			zap.Int16("api_key", header.apiKey),
+			zap.Int16("api_version", header.apiVersion),
+			zap.Int32("correlation_id", header.correlationID),
+			zap.String("client_id", header.clientID),
 			zap.Int32("size", requestSize))
 
 		// Dispatch to appropriate handler
-		// Note: This is a simplified implementation
-		// Full implementation would use franz-go's kmsg package to parse requests
-		switch apiKey {
+		switch header.apiKey {
 		case 18: // ApiVersions
-			s.handleApiVersions(ctx, conn, requestBody)
+			s.handleApiVersions(ctx, conn, requestBody, header)
 		case 3: // Metadata
-			s.handleMetadataRequest(ctx, conn, requestBody)
+			s.handleMetadataRequest(ctx, conn, requestBody, header)
 		case 0: // Produce
-			s.handleProduceRequest(ctx, conn, requestBody)
+			s.handleProduceRequest(ctx, conn, requestBody, header)
 		case 1: // Fetch
-			s.handleFetchRequest(ctx, conn, requestBody)
+			s.handleFetchRequest(ctx, conn, requestBody, header)
 		default:
-			s.logger.Warn("unsupported API key", zap.Int16("api_key", apiKey))
+			s.logger.Warn("unsupported API key", zap.Int16("api_key", header.apiKey))
 			// Send error response
 		}
 	}
 }
 
-// handleApiVersions handles ApiVersions requests.
-func (s *Server) handleApiVersions(ctx context.Context, conn net.Conn, requestBody []byte) {
-	s.logger.Debug("handling ApiVersions request")
+// writeKafkaResponse writes a Kafka protocol response with the correlation ID.
+// For flexible API versions (v9+ for most APIs), the response header includes
+// a TAG_BUFFER after the correlation ID.
+func (s *Server) writeKafkaResponse(conn net.Conn, header *kafkaRequestHeader, respBodyBytes []byte) error {
+	// Check if this is a flexible response (needs TAG_BUFFER in header)
+	isFlexible := isFlexibleRequest(header.apiKey, header.apiVersion)
 
-	// Parse request
-	req := &kmsg.ApiVersionsRequest{}
-	if err := req.ReadFrom(requestBody); err != nil {
-		s.logger.Error("failed to parse ApiVersions request", zap.Error(err))
-		return
+	var respBytes []byte
+	if isFlexible {
+		// Flexible response format: Size (4) + Correlation ID (4) + TAG_BUFFER (1+) + Response Body
+		// TAG_BUFFER = 0 for no tags
+		responseSize := int32(4 + 1 + len(respBodyBytes)) // correlation ID + tag buffer + body
+
+		respBytes = make([]byte, 4+4+1+len(respBodyBytes))
+		// Size (4 bytes, big endian)
+		binary.BigEndian.PutUint32(respBytes[0:4], uint32(responseSize))
+		// Correlation ID (4 bytes)
+		binary.BigEndian.PutUint32(respBytes[4:8], uint32(header.correlationID))
+		// TAG_BUFFER = 0 (no tags)
+		respBytes[8] = 0
+		// Response body
+		copy(respBytes[9:], respBodyBytes)
+
+		s.logger.Debug("writing flexible response",
+			zap.Int16("api_key", header.apiKey),
+			zap.Int16("api_version", header.apiVersion),
+			zap.Int32("correlation_id", header.correlationID),
+			zap.Int("body_len", len(respBodyBytes)),
+			zap.Int32("size_field", responseSize),
+			zap.Int("total_bytes", len(respBytes)))
+	} else {
+		// Non-flexible response format: Size (4) + Correlation ID (4) + Response Body
+		responseSize := int32(4 + len(respBodyBytes)) // correlation ID + body
+
+		respBytes = make([]byte, 4+4+len(respBodyBytes))
+		// Size (4 bytes, big endian)
+		binary.BigEndian.PutUint32(respBytes[0:4], uint32(responseSize))
+		// Correlation ID (4 bytes)
+		binary.BigEndian.PutUint32(respBytes[4:8], uint32(header.correlationID))
+		// Response body
+		copy(respBytes[8:], respBodyBytes)
+
+		s.logger.Debug("writing non-flexible response",
+			zap.Int16("api_key", header.apiKey),
+			zap.Int16("api_version", header.apiVersion),
+			zap.Int32("correlation_id", header.correlationID),
+			zap.Int("body_len", len(respBodyBytes)),
+			zap.Int32("size_field", responseSize),
+			zap.Int("total_bytes", len(respBytes)))
+	}
+
+	// Write response
+	_, err := conn.Write(respBytes)
+	return err
+}
+
+// handleApiVersions handles ApiVersions requests.
+func (s *Server) handleApiVersions(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
+	s.logger.Debug("handling ApiVersions request",
+		zap.Int16("request_version", header.apiVersion),
+		zap.String("client_id", header.clientID))
+
+	// Parse request - set version first, then parse body only
+	req := &kmsg.ApiVersionsRequest{
+		Version: header.apiVersion,
+	}
+	// ApiVersions request body is typically empty or contains ClientSoftwareName/Version for v3+
+	bodySlice := requestBody[header.bodyOffset:]
+	s.logger.Debug("ApiVersions request body",
+		zap.Int("body_offset", header.bodyOffset),
+		zap.Int("body_len", len(bodySlice)),
+		zap.Binary("body_bytes", bodySlice))
+
+	if len(bodySlice) > 0 {
+		if err := req.ReadFrom(bodySlice); err != nil {
+			s.logger.Error("failed to parse ApiVersions request",
+				zap.Error(err),
+				zap.Int16("version", header.apiVersion),
+				zap.Int("body_len", len(bodySlice)))
+			// Don't return - ApiVersions can work without parsing the body
+		}
 	}
 
 	// Create response with supported API versions
-	resp := &kmsg.ApiVersionsResponse{}
+	// IMPORTANT: Set Version to match the request version for correct serialization
+	resp := &kmsg.ApiVersionsResponse{
+		Version: header.apiVersion,
+	}
 	resp.ErrorCode = 0 // No error
 
 	// Add minimal set of supported APIs
 	resp.ApiKeys = []kmsg.ApiVersionsResponseApiKey{
 		{
-			ApiKey:     0,  // Produce
+			ApiKey:     0, // Produce
 			MinVersion: 0,
 			MaxVersion: 9,
 		},
 		{
-			ApiKey:     1,  // Fetch
+			ApiKey:     1, // Fetch
 			MinVersion: 0,
 			MaxVersion: 12,
 		},
 		{
-			ApiKey:     3,  // Metadata
+			ApiKey:     3, // Metadata
 			MinVersion: 0,
 			MaxVersion: 12,
 		},
@@ -219,23 +437,15 @@ func (s *Server) handleApiVersions(ctx context.Context, conn net.Conn, requestBo
 		},
 	}
 
-	// Encode response
-	respBytes := resp.AppendTo(nil)
+	// Encode response and write with correlation ID
+	respBodyBytes := resp.AppendTo(nil)
 
-	// Send response size (4 bytes, big endian)
-	sizeBytes := make([]byte, 4)
-	responseSize := int32(len(respBytes))
-	sizeBytes[0] = byte(responseSize >> 24)
-	sizeBytes[1] = byte(responseSize >> 16)
-	sizeBytes[2] = byte(responseSize >> 8)
-	sizeBytes[3] = byte(responseSize)
+	s.logger.Debug("ApiVersions response encoded",
+		zap.Int16("version", header.apiVersion),
+		zap.Int("api_keys_count", len(resp.ApiKeys)),
+		zap.Int("response_body_size", len(respBodyBytes)))
 
-	// Write size + response
-	if _, err := conn.Write(sizeBytes); err != nil {
-		s.logger.Error("failed to write response size", zap.Error(err))
-		return
-	}
-	if _, err := conn.Write(respBytes); err != nil {
+	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
@@ -244,12 +454,25 @@ func (s *Server) handleApiVersions(ctx context.Context, conn net.Conn, requestBo
 }
 
 // handleMetadataRequest handles Metadata requests.
-func (s *Server) handleMetadataRequest(ctx context.Context, conn net.Conn, requestBody []byte) {
-	// Parse request
-	req := &kmsg.MetadataRequest{}
-	if err := req.ReadFrom(requestBody); err != nil {
-		s.logger.Error("failed to parse Metadata request", zap.Error(err))
-		return
+func (s *Server) handleMetadataRequest(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
+	s.logger.Debug("handling Metadata request",
+		zap.Int16("request_version", header.apiVersion),
+		zap.String("client_id", header.clientID),
+		zap.Int("body_offset", header.bodyOffset),
+		zap.Int("total_len", len(requestBody)))
+
+	// Parse request - set version first, then parse body only
+	req := &kmsg.MetadataRequest{
+		Version: header.apiVersion,
+	}
+	if header.bodyOffset < len(requestBody) {
+		if err := req.ReadFrom(requestBody[header.bodyOffset:]); err != nil {
+			s.logger.Error("failed to parse Metadata request",
+				zap.Error(err),
+				zap.Int("body_offset", header.bodyOffset),
+				zap.Int("body_len", len(requestBody)-header.bodyOffset))
+			return
+		}
 	}
 
 	// Handle via metadata handler
@@ -259,23 +482,16 @@ func (s *Server) handleMetadataRequest(ctx context.Context, conn net.Conn, reque
 		return
 	}
 
-	// Encode response
-	respBytes := resp.AppendTo(nil)
-
-	// Send response size (4 bytes, big endian)
-	sizeBytes := make([]byte, 4)
-	responseSize := int32(len(respBytes))
-	sizeBytes[0] = byte(responseSize >> 24)
-	sizeBytes[1] = byte(responseSize >> 16)
-	sizeBytes[2] = byte(responseSize >> 8)
-	sizeBytes[3] = byte(responseSize)
-
-	// Write size + response
-	if _, err := conn.Write(sizeBytes); err != nil {
-		s.logger.Error("failed to write response size", zap.Error(err))
-		return
-	}
-	if _, err := conn.Write(respBytes); err != nil {
+	// Encode response and write with correlation ID
+	respBodyBytes := resp.AppendTo(nil)
+	s.logger.Debug("Metadata response encoded",
+		zap.Int16("version", resp.Version),
+		zap.Int("num_brokers", len(resp.Brokers)),
+		zap.Int("num_topics", len(resp.Topics)),
+		zap.Int32("controller_id", resp.ControllerID),
+		zap.Int("response_body_size", len(respBodyBytes)),
+		zap.String("body_hex", hex.EncodeToString(respBodyBytes)))
+	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
@@ -284,12 +500,19 @@ func (s *Server) handleMetadataRequest(ctx context.Context, conn net.Conn, reque
 }
 
 // handleProduceRequest handles Produce requests.
-func (s *Server) handleProduceRequest(ctx context.Context, conn net.Conn, requestBody []byte) {
-	// Parse request
-	req := &kmsg.ProduceRequest{}
-	if err := req.ReadFrom(requestBody); err != nil {
-		s.logger.Error("failed to parse Produce request", zap.Error(err))
-		return
+func (s *Server) handleProduceRequest(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
+	s.logger.Debug("handling Produce request",
+		zap.Int16("request_version", header.apiVersion))
+
+	// Parse request - set version first, then parse body only
+	req := &kmsg.ProduceRequest{
+		Version: header.apiVersion,
+	}
+	if header.bodyOffset < len(requestBody) {
+		if err := req.ReadFrom(requestBody[header.bodyOffset:]); err != nil {
+			s.logger.Error("failed to parse Produce request", zap.Error(err))
+			return
+		}
 	}
 
 	// Handle via producer handler
@@ -299,23 +522,9 @@ func (s *Server) handleProduceRequest(ctx context.Context, conn net.Conn, reques
 		return
 	}
 
-	// Encode response
-	respBytes := resp.AppendTo(nil)
-
-	// Send response size (4 bytes, big endian)
-	sizeBytes := make([]byte, 4)
-	responseSize := int32(len(respBytes))
-	sizeBytes[0] = byte(responseSize >> 24)
-	sizeBytes[1] = byte(responseSize >> 16)
-	sizeBytes[2] = byte(responseSize >> 8)
-	sizeBytes[3] = byte(responseSize)
-
-	// Write size + response
-	if _, err := conn.Write(sizeBytes); err != nil {
-		s.logger.Error("failed to write response size", zap.Error(err))
-		return
-	}
-	if _, err := conn.Write(respBytes); err != nil {
+	// Encode response and write with correlation ID
+	respBodyBytes := resp.AppendTo(nil)
+	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
@@ -324,12 +533,19 @@ func (s *Server) handleProduceRequest(ctx context.Context, conn net.Conn, reques
 }
 
 // handleFetchRequest handles Fetch requests.
-func (s *Server) handleFetchRequest(ctx context.Context, conn net.Conn, requestBody []byte) {
-	// Parse request
-	req := &kmsg.FetchRequest{}
-	if err := req.ReadFrom(requestBody); err != nil {
-		s.logger.Error("failed to parse Fetch request", zap.Error(err))
-		return
+func (s *Server) handleFetchRequest(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
+	s.logger.Debug("handling Fetch request",
+		zap.Int16("request_version", header.apiVersion))
+
+	// Parse request - set version first, then parse body only
+	req := &kmsg.FetchRequest{
+		Version: header.apiVersion,
+	}
+	if header.bodyOffset < len(requestBody) {
+		if err := req.ReadFrom(requestBody[header.bodyOffset:]); err != nil {
+			s.logger.Error("failed to parse Fetch request", zap.Error(err))
+			return
+		}
 	}
 
 	// Handle via consumer handler
@@ -339,23 +555,9 @@ func (s *Server) handleFetchRequest(ctx context.Context, conn net.Conn, requestB
 		return
 	}
 
-	// Encode response
-	respBytes := resp.AppendTo(nil)
-
-	// Send response size (4 bytes, big endian)
-	sizeBytes := make([]byte, 4)
-	responseSize := int32(len(respBytes))
-	sizeBytes[0] = byte(responseSize >> 24)
-	sizeBytes[1] = byte(responseSize >> 16)
-	sizeBytes[2] = byte(responseSize >> 8)
-	sizeBytes[3] = byte(responseSize)
-
-	// Write size + response
-	if _, err := conn.Write(sizeBytes); err != nil {
-		s.logger.Error("failed to write response size", zap.Error(err))
-		return
-	}
-	if _, err := conn.Write(respBytes); err != nil {
+	// Encode response and write with correlation ID
+	respBodyBytes := resp.AppendTo(nil)
+	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
 		return
 	}

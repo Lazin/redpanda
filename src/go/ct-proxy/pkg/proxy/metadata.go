@@ -56,11 +56,20 @@ func (h *MetadataHandler) HandleMetadata(
 	ctx context.Context,
 	req *kmsg.MetadataRequest,
 ) (*kmsg.MetadataResponse, error) {
+	h.logger.Debug("HandleMetadata called",
+		zap.Int16("request_version", req.Version))
+
 	// Get list of cloud topic partitions from admin API
 	partitions, err := h.adminClient.ListCloudTopicPartitions(ctx, "")
 	if err != nil {
-		h.logger.Error("failed to list cloud topic partitions", zap.Error(err))
-		return h.errorResponse(), nil
+		h.logger.Error("failed to list cloud topic partitions", zap.Error(err),
+			zap.Int16("request_version", req.Version))
+		resp := h.errorResponse(req.Version)
+		h.logger.Debug("returning error response",
+			zap.Int16("response_version", resp.Version),
+			zap.Int("num_brokers", len(resp.Brokers)),
+			zap.Int("num_topics", len(resp.Topics)))
+		return resp, nil
 	}
 
 	// Filter by allowed topics
@@ -68,10 +77,13 @@ func (h *MetadataHandler) HandleMetadata(
 
 	h.logger.Debug("listing cloud topic partitions",
 		zap.Int("total", len(partitions)),
-		zap.Int("allowed", len(allowedPartitions)))
+		zap.Int("allowed", len(allowedPartitions)),
+		zap.Int16("request_version", req.Version))
 
-	// Build response
+	// Build response with matching version for correct serialization
 	resp := &kmsg.MetadataResponse{
+		Version:      req.Version,
+		ThrottleMillis: 0,
 		Brokers: []kmsg.MetadataResponseBroker{
 			{
 				NodeID: h.serverID,
@@ -79,6 +91,8 @@ func (h *MetadataHandler) HandleMetadata(
 				Port:   h.serverPort,
 			},
 		},
+		ClusterID:    nil, // No cluster ID
+		ControllerID: 0,   // This broker (node 0) is the controller
 	}
 
 	// Group partitions by topic
@@ -131,8 +145,10 @@ func (h *MetadataHandler) filterAllowed(partitions []*admin.PartitionInfo) []*ad
 }
 
 // errorResponse creates a generic error response.
-func (h *MetadataHandler) errorResponse() *kmsg.MetadataResponse {
+func (h *MetadataHandler) errorResponse(version int16) *kmsg.MetadataResponse {
 	return &kmsg.MetadataResponse{
+		Version:      version,
+		ThrottleMillis: 0,
 		Brokers: []kmsg.MetadataResponseBroker{
 			{
 				NodeID: h.serverID,
@@ -140,6 +156,8 @@ func (h *MetadataHandler) errorResponse() *kmsg.MetadataResponse {
 				Port:   h.serverPort,
 			},
 		},
-		Topics: []kmsg.MetadataResponseTopic{},
+		ClusterID:    nil,    // No cluster ID
+		ControllerID: -1,     // -1 indicates no controller
+		Topics:       []kmsg.MetadataResponseTopic{},
 	}
 }

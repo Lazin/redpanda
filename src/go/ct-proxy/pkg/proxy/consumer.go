@@ -48,7 +48,10 @@ func (h *ConsumerHandler) HandleFetch(
 	ctx context.Context,
 	req *kmsg.FetchRequest,
 ) (*kmsg.FetchResponse, error) {
-	resp := &kmsg.FetchResponse{}
+	// Set response version to match request for correct serialization
+	resp := &kmsg.FetchResponse{
+		Version: req.Version,
+	}
 
 	// Process each topic
 	for _, topicReq := range req.Topics {

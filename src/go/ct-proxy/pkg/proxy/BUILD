@@ -24,6 +24,7 @@ go_library(
 go_test(
     name = "proxy_test",
     srcs = [
+        "metadata_test.go",
         "producer_test.go",
         "server_test.go",
     ],
