@@ -11,6 +11,7 @@
 #pragma once
 
 #include "cluster/partition_manager.h"
+#include "cluster/shard_table.h"
 #include "cluster/topic_table.h"
 #include "proto/redpanda/core/admin/internal/cloud_topics/v1/ct_proxy.proto.h"
 
@@ -23,9 +24,11 @@ class ct_proxy_service_impl
 public:
     explicit ct_proxy_service_impl(
       ss::sharded<cluster::partition_manager>* pm,
-      ss::sharded<cluster::topic_table>* tt)
+      ss::sharded<cluster::topic_table>* tt,
+      ss::sharded<cluster::shard_table>* st)
       : _partition_manager(pm)
-      , _topic_table(tt) {}
+      , _topic_table(tt)
+      , _shard_table(st) {}
 
     seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
     get_cluster_epoch(
@@ -54,10 +57,12 @@ public:
       proto::admin::ct_proxy::read_l1_metadata_request) override;
 
 private:
-    ss::lw_shared_ptr<cluster::partition> get_partition(const model::ntp& ntp);
+    ss::future<ss::lw_shared_ptr<cluster::partition>>
+    get_partition(const model::ntp& ntp);
 
     ss::sharded<cluster::partition_manager>* _partition_manager;
     ss::sharded<cluster::topic_table>* _topic_table;
+    ss::sharded<cluster::shard_table>* _shard_table;
 };
 
 } // namespace admin

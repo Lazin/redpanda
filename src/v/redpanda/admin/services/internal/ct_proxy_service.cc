@@ -10,6 +10,7 @@
 
 #include "redpanda/admin/services/internal/ct_proxy_service.h"
 
+#include "base/vlog.h"
 #include "bytes/iobuf.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
 #include "cloud_topics/level_zero/stm/ctp_stm.h"
@@ -25,7 +26,13 @@
 #include "storage/parser_utils.h"
 
 #include <seastar/core/coroutine.hh>
+#include <seastar/util/log.hh>
+
 #include <regex>
+
+namespace {
+static ss::logger ctplog("ct_proxy_service");
+}
 
 namespace admin {
 
@@ -75,34 +82,64 @@ cloud_topics::extent_meta proto_to_extent_meta(
 
 } // namespace
 
-ss::lw_shared_ptr<cluster::partition>
+ss::future<ss::lw_shared_ptr<cluster::partition>>
 ct_proxy_service_impl::get_partition(const model::ntp& ntp) {
-    // TODO: Cross-shard partition access not yet supported.
-    // For now, only access partitions on the current shard.
-    auto partition = _partition_manager->local().get(ntp);
-    if (!partition) {
+    vlog(ctplog.debug, "get_partition: looking up ntp={}", ntp);
+
+    // Look up which shard owns this partition
+    auto shard = _shard_table->local().shard_for(ntp);
+    if (!shard) {
+        vlog(ctplog.warn, "get_partition: ntp={} not found in shard table", ntp);
         throw serde::pb::rpc::not_found_exception(
-          "partition not found or on different shard");
+          "partition not found in shard table");
     }
 
-    return partition;
+    vlog(ctplog.debug, "get_partition: ntp={} is on shard {}", ntp, *shard);
+
+    // Get the partition from the correct shard
+    auto partition = co_await _partition_manager->invoke_on(
+      *shard, [ntp](cluster::partition_manager& pm) {
+          return pm.get(ntp);
+      });
+
+    if (!partition) {
+        vlog(ctplog.warn, "get_partition: ntp={} not found on shard {}", ntp, *shard);
+        throw serde::pb::rpc::not_found_exception("partition not found");
+    }
+
+    vlog(ctplog.debug, "get_partition: found ntp={}", ntp);
+    co_return partition;
 }
 
 seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
 ct_proxy_service_impl::get_cluster_epoch(
   serde::pb::rpc::context,
   proto::admin::ct_proxy::get_cluster_epoch_request req) {
+    vlog(
+      ctplog.info,
+      "get_cluster_epoch: topic={}, partition={}",
+      req.get_partition().get_topic(),
+      req.get_partition().get_partition());
+
     // Get topic_id from topic_table
     const auto& topic_metadata = _topic_table->local().get_topic_metadata_ref(
       model::topic_namespace{
         model::kafka_namespace, model::topic{req.get_partition().get_topic()}});
 
     if (!topic_metadata) {
+        vlog(
+          ctplog.warn,
+          "get_cluster_epoch: topic {} not found",
+          req.get_partition().get_topic());
         throw serde::pb::rpc::not_found_exception("topic not found");
     }
 
     auto topic_id = topic_metadata->get().get_configuration().tp_id;
     if (!topic_id) {
+        vlog(
+          ctplog.warn,
+          "get_cluster_epoch: topic {} missing id",
+          req.get_partition().get_topic());
         throw serde::pb::rpc::not_found_exception("topic missing id");
     }
 
@@ -112,10 +149,17 @@ ct_proxy_service_impl::get_cluster_epoch(
       model::topic{req.get_partition().get_topic()},
       model::partition_id{req.get_partition().get_partition()}};
 
-    auto partition = get_partition(ntp);
+    auto partition = co_await get_partition(ntp);
 
     // Get cluster epoch from topic revision ID
     auto epoch = partition->get_topic_revision_id();
+
+    vlog(
+      ctplog.info,
+      "get_cluster_epoch: topic={}, partition={}, epoch={}",
+      req.get_partition().get_topic(),
+      req.get_partition().get_partition(),
+      epoch());
 
     proto::admin::ct_proxy::get_cluster_epoch_response response;
     response.set_cluster_epoch(epoch());
@@ -140,7 +184,7 @@ ct_proxy_service_impl::replicate_placeholders(
       model::topic{req.get_partition().get_topic()},
       model::partition_id{req.get_partition().get_partition()}};
 
-    auto partition = get_partition(ntp);
+    auto partition = co_await get_partition(ntp);
 
     // Get ctp_stm_api for fencing
     auto ctp_api = make_ctp_stm_api(partition);
@@ -203,7 +247,7 @@ ct_proxy_service_impl::read_placeholders(
       model::topic{req.get_partition().get_topic()},
       model::partition_id{req.get_partition().get_partition()}};
 
-    auto partition = get_partition(ntp);
+    auto partition = co_await get_partition(ntp);
 
     // Create log reader config
     size_t max_bytes = req.get_max_bytes() > 0
@@ -290,6 +334,10 @@ seastar::future<proto::admin::ct_proxy::list_cloud_topic_partitions_response>
 ct_proxy_service_impl::list_cloud_topic_partitions(
   serde::pb::rpc::context,
   proto::admin::ct_proxy::list_cloud_topic_partitions_request req) {
+    vlog(
+      ctplog.info,
+      "list_cloud_topic_partitions: has_filter={}",
+      req.has_topic_filter());
     proto::admin::ct_proxy::list_cloud_topic_partitions_response response;
 
     // Get all topic namespaces
@@ -312,21 +360,33 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
 
         // Check if this is a cloud topic
         if (!metadata.get_configuration().properties.cloud_topic_enabled) {
+            vlog(
+              ctplog.debug,
+              "list_cloud_topic_partitions: topic {} is not a cloud topic",
+              tp_ns.tp);
             continue;
         }
 
+        vlog(
+          ctplog.info,
+          "list_cloud_topic_partitions: found cloud topic {}, partitions={}",
+          tp_ns.tp,
+          metadata.get_configuration().partition_count);
+
         // Apply topic filter if specified
-        const auto& topic_filter = req.get_topic_filter();
-        if (!topic_filter.empty()) {
-            try {
-                std::string filter_str{topic_filter};
-                std::regex filter_regex{filter_str};
-                std::string topic_str{tp_ns.tp()};
-                if (!std::regex_match(topic_str, filter_regex)) {
-                    continue;
+        if (req.has_topic_filter()) {
+            const auto& topic_filter = req.get_topic_filter();
+            if (!topic_filter.empty()) {
+                try {
+                    std::string filter_str{topic_filter};
+                    std::regex filter_regex{filter_str};
+                    std::string topic_str{tp_ns.tp()};
+                    if (!std::regex_match(topic_str, filter_regex)) {
+                        continue;
+                    }
+                } catch (...) {
+                    // Invalid regex, skip filtering
                 }
-            } catch (...) {
-                // Invalid regex, skip filtering
             }
         }
 
@@ -335,42 +395,95 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
             model::partition_id partition_id(i);
             model::ntp ntp{model::kafka_namespace, tp_ns.tp, partition_id};
 
-            // Get partition if it's on this shard
-            // TODO: Support cross-shard calls
-            auto partition = _partition_manager->local().get(ntp);
-            if (!partition) {
+            // Look up which shard owns this partition
+            auto shard = _shard_table->local().shard_for(ntp);
+            if (!shard) {
+                vlog(
+                  ctplog.debug,
+                  "list_cloud_topic_partitions: ntp={} not in shard table",
+                  ntp);
                 continue;
             }
 
-            proto::admin::ct_proxy::cloud_topic_partition_info part_info;
-            part_info.set_topic(ss::sstring(tp_ns.tp()));
-            part_info.set_partition(partition_id());
-
-            // Get offsets from partition
+            // Get partition info from the correct shard
+            // Capture topic name by value for cross-shard safety
+            ss::sstring topic_name(tp_ns.tp());
             try {
-                auto ctp_api = make_ctp_stm_api(partition);
-                part_info.set_start_offset(ctp_api->get_start_offset()());
+                auto part_info_opt = co_await _partition_manager->invoke_on(
+                  *shard,
+                  [ntp, topic_name = std::move(topic_name), partition_id](
+                    cluster::partition_manager& pm) mutable {
+                      auto partition = pm.get(ntp);
+                      if (!partition) {
+                          return std::optional<
+                            proto::admin::ct_proxy::cloud_topic_partition_info>{
+                            std::nullopt};
+                      }
 
-                // High watermark and log end offset
-                auto committed_kafka = model::offset_cast(partition->committed_offset());
-                part_info.set_high_watermark(committed_kafka() + 1);
+                      proto::admin::ct_proxy::cloud_topic_partition_info
+                        part_info;
+                      part_info.set_topic(std::move(topic_name));
+                      part_info.set_partition(partition_id());
 
-                auto dirty_kafka = model::offset_cast(partition->dirty_offset());
-                part_info.set_log_end_offset(dirty_kafka() + 1);
+                      // Get offsets from partition
+                      try {
+                          auto stm = partition->raft()
+                                       ->stm_manager()
+                                       ->get<cloud_topics::ctp_stm>();
+                          if (!stm) {
+                              return std::optional<proto::admin::ct_proxy::
+                                                     cloud_topic_partition_info>{
+                                std::nullopt};
+                          }
+                          auto ctp_api
+                            = ss::make_lw_shared<cloud_topics::ctp_stm_api>(
+                              stm);
+                          part_info.set_start_offset(
+                            ctp_api->get_start_offset()());
 
-                // Check if L1 data exists (LRO > min means L1 has data)
-                auto lro = ctp_api->get_last_reconciled_offset();
-                part_info.set_has_l1_data(lro > kafka::offset::min());
+                          // High watermark and log end offset
+                          auto committed_kafka = model::offset_cast(
+                            partition->committed_offset());
+                          part_info.set_high_watermark(committed_kafka() + 1);
 
-                // Add to response
-                response.get_partitions().push_back(std::move(part_info));
+                          auto dirty_kafka = model::offset_cast(
+                            partition->dirty_offset());
+                          part_info.set_log_end_offset(dirty_kafka() + 1);
+
+                          // Check if L1 data exists (LRO > min means L1 has
+                          // data)
+                          auto lro = ctp_api->get_last_reconciled_offset();
+                          part_info.set_has_l1_data(lro > kafka::offset::min());
+
+                          return std::optional<proto::admin::ct_proxy::
+                                                 cloud_topic_partition_info>{
+                            std::move(part_info)};
+                      } catch (...) {
+                          return std::optional<proto::admin::ct_proxy::
+                                                 cloud_topic_partition_info>{
+                            std::nullopt};
+                      }
+                  });
+
+                if (part_info_opt) {
+                    response.get_partitions().push_back(
+                      std::move(*part_info_opt));
+                }
             } catch (...) {
                 // If we can't get metadata, skip this partition
+                vlog(
+                  ctplog.debug,
+                  "list_cloud_topic_partitions: failed to get info for ntp={}",
+                  ntp);
                 continue;
             }
         }
     }
 
+    vlog(
+      ctplog.info,
+      "list_cloud_topic_partitions: returning {} partitions",
+      response.get_partitions().size());
     co_return response;
 }
 
