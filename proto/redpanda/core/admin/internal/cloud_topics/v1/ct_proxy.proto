@@ -23,24 +23,27 @@ import "proto/redpanda/core/common/v1/ntp.proto";
 option go_package = "github.com/redpanda-data/redpanda/proto/redpanda/core/admin/internal/cloud_topics/v1";
 option (pbgen.cpp_namespace) = "proto::admin::ct_proxy";
 
-// Admin endpoints to interact with cloud topics for external proxy applications.
+// Admin endpoints to interact with cloud topics for external proxy
+// applications.
 //
-// This service provides APIs that allow external applications (e.g., the ct-proxy
-// Go application) to interact with Redpanda cloud topics by:
+// This service provides APIs that allow external applications (e.g., the
+// ct-proxy Go application) to interact with Redpanda cloud topics by:
 // - Getting the current cluster epoch for object naming
 // - Replicating placeholders after uploading L0 objects to cloud storage
 // - Reading placeholders from partitions for materialization
 // - Listing cloud topic partitions and their metadata
 // - Reading L1 metastore extent metadata for advanced read paths
 //
-// These APIs are designed for external proxy implementations that handle the data
-// plane (uploading/downloading objects to/from cloud storage) while delegating
-// the metadata plane (placeholder replication, epoch tracking) to Redpanda.
+// These APIs are designed for external proxy implementations that handle the
+// data plane (uploading/downloading objects to/from cloud storage) while
+// delegating the metadata plane (placeholder replication, epoch tracking) to
+// Redpanda.
 service CtProxyService {
-    // Get the current cluster epoch. The cluster epoch is a global monotonically
-    // increasing value used as part of the L0 object naming convention and for
-    // fencing during placeholder replication.
-    rpc GetClusterEpoch(GetClusterEpochRequest) returns (GetClusterEpochResponse) {
+    // Get the current cluster epoch. The cluster epoch is a global
+    // monotonically increasing value used as part of the L0 object naming
+    // convention and for fencing during placeholder replication.
+    rpc GetClusterEpoch(GetClusterEpochRequest)
+        returns (GetClusterEpochResponse) {
         option (pbgen.rpc) = {
             authz: SUPERUSER
         };
@@ -50,7 +53,8 @@ service CtProxyService {
     // objects to cloud storage. This API performs RW-fencing using the expected
     // cluster epoch to ensure consistency between the data plane (uploaded
     // objects) and metadata plane (replicated placeholders).
-    rpc ReplicatePlaceholders(ReplicatePlaceholdersRequest) returns (ReplicatePlaceholdersResponse) {
+    rpc ReplicatePlaceholders(ReplicatePlaceholdersRequest)
+        returns (ReplicatePlaceholdersResponse) {
         option (pbgen.rpc) = {
             authz: SUPERUSER
         };
@@ -59,7 +63,8 @@ service CtProxyService {
     // Read placeholders from a cloud topics partition within a specified offset
     // range. This returns the placeholder metadata needed to fetch and
     // materialize L0 objects from cloud storage.
-    rpc ReadPlaceholders(ReadPlaceholdersRequest) returns (ReadPlaceholdersResponse) {
+    rpc ReadPlaceholders(ReadPlaceholdersRequest)
+        returns (ReadPlaceholdersResponse) {
         option (pbgen.rpc) = {
             authz: SUPERUSER
         };
@@ -68,7 +73,8 @@ service CtProxyService {
     // List all cloud topic partitions and their metadata. This is used by proxy
     // applications to discover available partitions and present themselves as
     // Kafka brokers.
-    rpc ListCloudTopicPartitions(ListCloudTopicPartitionsRequest) returns (ListCloudTopicPartitionsResponse) {
+    rpc ListCloudTopicPartitions(ListCloudTopicPartitionsRequest)
+        returns (ListCloudTopicPartitionsResponse) {
         option (pbgen.rpc) = {
             authz: SUPERUSER
         };
@@ -85,7 +91,8 @@ service CtProxyService {
 }
 
 // Request for getting the current cluster epoch.
-// The cluster epoch is a global value for the entire cluster, not per-partition.
+// The cluster epoch is a global value for the entire cluster, not
+// per-partition.
 message GetClusterEpochRequest {
     // Empty request - the cluster epoch is global.
 }
