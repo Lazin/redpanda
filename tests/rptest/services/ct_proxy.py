@@ -245,12 +245,21 @@ class CtProxyService(BackgroundThreadService):
             return f"http://{self._admin_address}"
         return None
 
-    def get_epoch(self, topic: str, partition: int = 0, timeout: float = 10.0) -> int:
+    def get_epoch(
+        self,
+        topic: str | None = None,
+        partition: int = 0,
+        timeout: float = 10.0,
+    ) -> int:
         """
-        Get the cluster epoch for a topic partition via the HTTP API.
+        Get the current cluster epoch via the HTTP API.
 
-        :param topic: The topic name
-        :param partition: The partition number
+        The cluster epoch is a global value for the entire cluster.
+        The topic and partition parameters are kept for backward compatibility
+        but are ignored by the server.
+
+        :param topic: (deprecated) The topic name - ignored
+        :param partition: (deprecated) The partition number - ignored
         :param timeout: Request timeout in seconds
         :return: The cluster epoch
         :raises: requests.RequestException on failure
@@ -259,9 +268,8 @@ class CtProxyService(BackgroundThreadService):
             raise RuntimeError("ct-proxy is not running")
 
         url = f"http://{self._admin_address}/api/epoch"
-        params = {"topic": topic, "partition": str(partition)}
 
-        response = requests.get(url, params=params, timeout=timeout)
+        response = requests.get(url, timeout=timeout)
         response.raise_for_status()
 
         data = response.json()
