@@ -110,7 +110,7 @@ func (h *ProducerHandler) handlePartitionProduce(
 	}
 
 	// 1. Get cluster epoch from admin API
-	epoch, err := h.adminClient.GetClusterEpoch(ctx, topic, req.Partition)
+	epoch, err := h.adminClient.GetClusterEpoch(ctx)
 	if err != nil {
 		logger.Error("failed to get cluster epoch", zap.Error(err))
 		return h.partitionError(req.Partition, 6) // NOT_LEADER_FOR_PARTITION

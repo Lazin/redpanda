@@ -733,9 +733,7 @@ func (s *Server) handleConsumeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // EpochResponse is the response for the GET /api/epoch endpoint.
 type EpochResponse struct {
-	Topic        string `json:"topic"`
-	Partition    int32  `json:"partition"`
-	ClusterEpoch int64  `json:"cluster_epoch"`
+	ClusterEpoch int64 `json:"cluster_epoch"`
 }
 
 func (s *Server) handleGetEpoch(w http.ResponseWriter, r *http.Request) {
@@ -744,28 +742,11 @@ func (s *Server) handleGetEpoch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topic := r.URL.Query().Get("topic")
-	if topic == "" {
-		http.Error(w, "topic query parameter is required", http.StatusBadRequest)
-		return
-	}
+	// Topic and partition parameters are ignored - cluster epoch is global.
+	// Parameters kept for backward compatibility with existing clients.
+	s.logger.Info("getting cluster epoch via HTTP")
 
-	partitionStr := r.URL.Query().Get("partition")
-	var partition int32 = 0
-	if partitionStr != "" {
-		p, err := parsePartition(partitionStr)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Invalid partition: %v", err), http.StatusBadRequest)
-			return
-		}
-		partition = p
-	}
-
-	s.logger.Info("getting cluster epoch via HTTP",
-		zap.String("topic", topic),
-		zap.Int32("partition", partition))
-
-	epoch, err := s.adminClient.GetClusterEpoch(r.Context(), topic, partition)
+	epoch, err := s.adminClient.GetClusterEpoch(r.Context())
 	if err != nil {
 		s.logger.Error("failed to get cluster epoch", zap.Error(err))
 		http.Error(w, fmt.Sprintf("Failed to get cluster epoch: %v", err), http.StatusInternalServerError)
@@ -773,8 +754,6 @@ func (s *Server) handleGetEpoch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := EpochResponse{
-		Topic:        topic,
-		Partition:    partition,
 		ClusterEpoch: epoch,
 	}
 

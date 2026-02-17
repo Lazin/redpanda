@@ -157,14 +157,10 @@ func (c *Client) callRPC(ctx context.Context, method string, req proto.Message, 
 	return fmt.Errorf("all admin API endpoints failed, last error: %w", lastErr)
 }
 
-// GetClusterEpoch gets the current cluster epoch for a partition.
-func (c *Client) GetClusterEpoch(ctx context.Context, topic string, partition int32) (int64, error) {
-	req := &pb.GetClusterEpochRequest{
-		Partition: &pbcommon.TopicPartition{
-			Topic:     topic,
-			Partition: partition,
-		},
-	}
+// GetClusterEpoch gets the current cluster epoch.
+// The cluster epoch is a global value for the entire cluster.
+func (c *Client) GetClusterEpoch(ctx context.Context) (int64, error) {
+	req := &pb.GetClusterEpochRequest{}
 	resp := &pb.GetClusterEpochResponse{}
 
 	if err := c.callRPC(ctx, "GetClusterEpoch", req, resp); err != nil {
