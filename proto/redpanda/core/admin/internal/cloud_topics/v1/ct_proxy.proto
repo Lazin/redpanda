@@ -37,9 +37,9 @@ option (pbgen.cpp_namespace) = "proto::admin::ct_proxy";
 // plane (uploading/downloading objects to/from cloud storage) while delegating
 // the metadata plane (placeholder replication, epoch tracking) to Redpanda.
 service CtProxyService {
-    // Get the current cluster epoch for a partition. The cluster epoch is used
-    // as part of the L0 object naming convention and for fencing during
-    // placeholder replication.
+    // Get the current cluster epoch. The cluster epoch is a global monotonically
+    // increasing value used as part of the L0 object naming convention and for
+    // fencing during placeholder replication.
     rpc GetClusterEpoch(GetClusterEpochRequest) returns (GetClusterEpochResponse) {
         option (pbgen.rpc) = {
             authz: SUPERUSER
@@ -85,16 +85,16 @@ service CtProxyService {
 }
 
 // Request for getting the current cluster epoch.
+// The cluster epoch is a global value for the entire cluster, not per-partition.
 message GetClusterEpochRequest {
-    // The topic partition to get the cluster epoch for.
-    common.v1.TopicPartition partition = 1;
+    // Empty request - the cluster epoch is global.
 }
 
 // Response containing the current cluster epoch.
 message GetClusterEpochResponse {
-    // The current cluster epoch for this partition. This value should be used
-    // when creating L0 object names and as the expected_cluster_epoch when
-    // replicating placeholders.
+    // The current cluster epoch. This value should be used when creating L0
+    // object names and as the expected_cluster_epoch when replicating
+    // placeholders.
     int64 cluster_epoch = 1;
 }
 

@@ -114,55 +114,27 @@ ct_proxy_service_impl::get_partition(const model::ntp& ntp) {
 seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
 ct_proxy_service_impl::get_cluster_epoch(
   serde::pb::rpc::context,
-  proto::admin::ct_proxy::get_cluster_epoch_request req) {
-    vlog(
-      ctplog.info,
-      "get_cluster_epoch: topic={}, partition={}",
-      req.get_partition().get_topic(),
-      req.get_partition().get_partition());
+  proto::admin::ct_proxy::get_cluster_epoch_request) {
+    vlog(ctplog.info, "get_cluster_epoch");
 
-    // Get topic_id from topic_table
-    const auto& topic_metadata = _topic_table->local().get_topic_metadata_ref(
-      model::topic_namespace{
-        model::kafka_namespace, model::topic{req.get_partition().get_topic()}});
+    // Get the current cluster epoch from the epoch service
+    ss::abort_source as;
+    auto epoch_result = co_await _epoch_service->local().get_cached_epoch(&as);
 
-    if (!topic_metadata) {
+    if (!epoch_result) {
         vlog(
           ctplog.warn,
-          "get_cluster_epoch: topic {} not found",
-          req.get_partition().get_topic());
-        throw serde::pb::rpc::not_found_exception("topic not found");
+          "get_cluster_epoch: failed to get epoch: {}",
+          epoch_result.error().message());
+        throw serde::pb::rpc::unavailable_exception(
+          "failed to get cluster epoch");
     }
 
-    auto topic_id = topic_metadata->get().get_configuration().tp_id;
-    if (!topic_id) {
-        vlog(
-          ctplog.warn,
-          "get_cluster_epoch: topic {} missing id",
-          req.get_partition().get_topic());
-        throw serde::pb::rpc::not_found_exception("topic missing id");
-    }
-
-    // Build NTP and get partition
-    model::ntp ntp{
-      model::kafka_namespace,
-      model::topic{req.get_partition().get_topic()},
-      model::partition_id{req.get_partition().get_partition()}};
-
-    auto partition = co_await get_partition(ntp);
-
-    // Get cluster epoch from topic revision ID
-    auto epoch = partition->get_topic_revision_id();
-
-    vlog(
-      ctplog.info,
-      "get_cluster_epoch: topic={}, partition={}, epoch={}",
-      req.get_partition().get_topic(),
-      req.get_partition().get_partition(),
-      epoch());
+    auto epoch = epoch_result.value();
+    vlog(ctplog.info, "get_cluster_epoch: epoch={}", epoch);
 
     proto::admin::ct_proxy::get_cluster_epoch_response response;
-    response.set_cluster_epoch(epoch());
+    response.set_cluster_epoch(epoch);
     co_return response;
 }
 

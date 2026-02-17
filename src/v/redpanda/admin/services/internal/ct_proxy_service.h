@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include "cluster/cluster_epoch_service.h"
 #include "cluster/partition_manager.h"
 #include "cluster/shard_table.h"
 #include "cluster/topic_table.h"
@@ -25,10 +26,12 @@ public:
     explicit ct_proxy_service_impl(
       ss::sharded<cluster::partition_manager>* pm,
       ss::sharded<cluster::topic_table>* tt,
-      ss::sharded<cluster::shard_table>* st)
+      ss::sharded<cluster::shard_table>* st,
+      ss::sharded<cluster::cluster_epoch_service<>>* epoch_service)
       : _partition_manager(pm)
       , _topic_table(tt)
-      , _shard_table(st) {}
+      , _shard_table(st)
+      , _epoch_service(epoch_service) {}
 
     seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
     get_cluster_epoch(
@@ -63,6 +66,7 @@ private:
     ss::sharded<cluster::partition_manager>* _partition_manager;
     ss::sharded<cluster::topic_table>* _topic_table;
     ss::sharded<cluster::shard_table>* _shard_table;
+    ss::sharded<cluster::cluster_epoch_service<>>* _epoch_service;
 };
 
 } // namespace admin

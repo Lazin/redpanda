@@ -113,7 +113,8 @@ void application::configure_admin_server(model::node_id node_id) {
                 std::make_unique<admin::ct_proxy_service_impl>(
                   &partition_manager,
                   &controller->get_topics_state(),
-                  &shard_table));
+                  &shard_table,
+                  &controller->get_cluster_epoch_generator()));
           }
           s.add_service(
             std::make_unique<
