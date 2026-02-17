@@ -11,6 +11,9 @@ package proxy
 
 import (
 	"context"
+	"net"
+	"os"
+	"strconv"
 
 	"github.com/redpanda-data/redpanda/src/go/ct-proxy/pkg/admin"
 	"github.com/redpanda-data/redpanda/src/go/ct-proxy/pkg/config"
@@ -34,12 +37,7 @@ func NewMetadataHandler(
 	cfg *config.Config,
 	logger *zap.Logger,
 ) *MetadataHandler {
-	// Parse host and port from kafka_listen_address
-	// For simplicity, assume format "host:port"
-	host := "localhost"
-	port := int32(9092)
-
-	// TODO: Parse actual host and port from cfg.Server.KafkaListenAddress
+	host, port := parseAdvertisedAddress(cfg, logger)
 
 	return &MetadataHandler{
 		adminClient: adminClient,
@@ -49,6 +47,52 @@ func NewMetadataHandler(
 		serverHost:  host,
 		serverPort:  port,
 	}
+}
+
+// parseAdvertisedAddress determines the host and port to advertise to clients.
+// It uses the advertised address if configured, otherwise falls back to
+// the hostname and listen port.
+func parseAdvertisedAddress(cfg *config.Config, logger *zap.Logger) (string, int32) {
+	// First try the explicit advertised address
+	if cfg.Server.KafkaAdvertisedAddress != "" {
+		host, portStr, err := net.SplitHostPort(cfg.Server.KafkaAdvertisedAddress)
+		if err == nil {
+			port, err := strconv.Atoi(portStr)
+			if err == nil {
+				logger.Info("using configured advertised address",
+					zap.String("host", host),
+					zap.Int("port", port))
+				return host, int32(port)
+			}
+		}
+		logger.Warn("failed to parse kafka_advertised_address, falling back",
+			zap.String("address", cfg.Server.KafkaAdvertisedAddress),
+			zap.Error(err))
+	}
+
+	// Fall back to hostname + listen port
+	host := "localhost"
+	port := int32(9092)
+
+	// Try to get the hostname
+	if hostname, err := os.Hostname(); err == nil {
+		host = hostname
+	}
+
+	// Parse the port from the listen address
+	if cfg.Server.KafkaListenAddress != "" {
+		_, portStr, err := net.SplitHostPort(cfg.Server.KafkaListenAddress)
+		if err == nil {
+			if p, err := strconv.Atoi(portStr); err == nil {
+				port = int32(p)
+			}
+		}
+	}
+
+	logger.Info("using derived advertised address",
+		zap.String("host", host),
+		zap.Int32("port", port))
+	return host, port
 }
 
 // HandleMetadata handles a Kafka metadata request.

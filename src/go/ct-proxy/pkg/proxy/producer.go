@@ -91,11 +91,16 @@ func (h *ProducerHandler) handlePartitionProduce(
 		zap.String("topic", topic),
 		zap.Int32("partition", req.Partition))
 
+	logger.Info("produce request received",
+		zap.Int("records_bytes_len", len(req.Records)))
+
 	// Parse records from the request
 	records, err := h.parseRecords(req.Records)
 	if err != nil {
-		logger.Error("failed to parse records", zap.Error(err))
-		return h.partitionError(req.Partition, 1) // OFFSET_OUT_OF_RANGE
+		logger.Error("failed to parse records",
+			zap.Error(err),
+			zap.Int("records_bytes_len", len(req.Records)))
+		return h.partitionError(req.Partition, 87) // INVALID_RECORD - parse error
 	}
 
 	if len(records) == 0 {
@@ -103,10 +108,12 @@ func (h *ProducerHandler) handlePartitionProduce(
 		return h.partitionError(req.Partition, 0)
 	}
 
+	logger.Info("parsed records", zap.Int("count", len(records)))
+
 	// Check for idempotent producer (not supported without aggregation)
 	if h.hasProducerID(records) {
 		logger.Warn("rejecting idempotent producer request")
-		return h.partitionError(req.Partition, 1)
+		return h.partitionError(req.Partition, 22) // UNSUPPORTED_FOR_MESSAGE_FORMAT
 	}
 
 	// 1. Get cluster epoch from admin API
@@ -116,7 +123,7 @@ func (h *ProducerHandler) handlePartitionProduce(
 		return h.partitionError(req.Partition, 6) // NOT_LEADER_FOR_PARTITION
 	}
 
-	logger.Debug("got cluster epoch", zap.Int64("epoch", epoch))
+	logger.Info("got cluster epoch", zap.Int64("epoch", epoch))
 
 	// 2. Generate object ID with epoch
 	objectID := l0.GenerateObjectID(epoch)
@@ -125,22 +132,22 @@ func (h *ProducerHandler) handlePartitionProduce(
 	objectData, extent, err := l0.CreateL0Object(records)
 	if err != nil {
 		logger.Error("failed to create L0 object", zap.Error(err))
-		return h.partitionError(req.Partition, 1)
+		return h.partitionError(req.Partition, 87) // INVALID_RECORD - create error
 	}
 	extent.ID = objectID
 
-	logger.Debug("created L0 object",
+	logger.Info("created L0 object",
 		zap.String("object_id", objectID.Name.String()),
 		zap.Int("size_bytes", len(objectData)))
 
 	// 4. Upload to S3
 	objectPath := l0.GetObjectPath(objectID)
 	if err := h.s3Client.Upload(ctx, objectPath, objectData); err != nil {
-		logger.Error("failed to upload to S3", zap.Error(err))
-		return h.partitionError(req.Partition, 1)
+		logger.Error("failed to upload to S3", zap.Error(err), zap.String("path", objectPath))
+		return h.partitionError(req.Partition, 58) // NOT_ENOUGH_REPLICAS - S3 upload failed
 	}
 
-	logger.Debug("uploaded to S3", zap.String("path", objectPath))
+	logger.Info("uploaded to S3", zap.String("path", objectPath))
 
 	// 5. Replicate placeholder via admin API
 	placeholder := admin.ExtentMetaToPlaceholderData(extent)
@@ -153,7 +160,7 @@ func (h *ProducerHandler) handlePartitionProduce(
 	)
 	if err != nil {
 		logger.Error("failed to replicate placeholder", zap.Error(err))
-		return h.partitionError(req.Partition, 1)
+		return h.partitionError(req.Partition, 59) // NOT_ENOUGH_REPLICAS_AFTER_APPEND - replication failed
 	}
 
 	logger.Info("replicated placeholder",
@@ -172,8 +179,13 @@ func (h *ProducerHandler) handlePartitionProduce(
 // parseRecords parses records from the Kafka batch format.
 func (h *ProducerHandler) parseRecords(recordsBytes []byte) ([]*kgo.Record, error) {
 	if len(recordsBytes) == 0 {
+		h.logger.Debug("parseRecords: empty records bytes")
 		return nil, nil
 	}
+
+	h.logger.Debug("parseRecords: attempting to parse",
+		zap.Int("bytes_len", len(recordsBytes)),
+		zap.Binary("first_bytes", recordsBytes[:min(len(recordsBytes), 32)]))
 
 	// The recordsBytes contain one or more record batches in Kafka wire format.
 	// We'll use l0.DeserializeL0Object to parse them since it handles the same format.
@@ -185,9 +197,13 @@ func (h *ProducerHandler) parseRecords(recordsBytes []byte) ([]*kgo.Record, erro
 
 	records, err := l0.DeserializeL0Object(recordsBytes, placeholder)
 	if err != nil {
+		h.logger.Error("parseRecords: failed to deserialize",
+			zap.Error(err),
+			zap.Int("bytes_len", len(recordsBytes)))
 		return nil, fmt.Errorf("failed to parse record batches: %w", err)
 	}
 
+	h.logger.Debug("parseRecords: successfully parsed", zap.Int("record_count", len(records)))
 	return records, nil
 }
 

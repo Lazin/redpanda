@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//src/go/ct-proxy/pkg/config",
         "@com_github_aws_aws_sdk_go//aws",
+        "@com_github_aws_aws_sdk_go//aws/credentials",
         "@com_github_aws_aws_sdk_go//aws/session",
         "@com_github_aws_aws_sdk_go//service/s3",
     ],

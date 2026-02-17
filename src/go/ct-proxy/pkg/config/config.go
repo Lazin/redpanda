@@ -27,8 +27,9 @@ type Config struct {
 
 // ServerConfig configures the ct-proxy server listeners.
 type ServerConfig struct {
-	KafkaListenAddress string `yaml:"kafka_listen_address"`
-	AdminListenAddress string `yaml:"admin_listen_address"`
+	KafkaListenAddress     string `yaml:"kafka_listen_address"`
+	KafkaAdvertisedAddress string `yaml:"kafka_advertised_address"`
+	AdminListenAddress     string `yaml:"admin_listen_address"`
 }
 
 // RedpandaConfig configures connection to Redpanda admin API.
@@ -53,9 +54,14 @@ type TLSConfig struct {
 
 // CloudStorageConfig configures cloud storage access.
 type CloudStorageConfig struct {
-	Provider string `yaml:"provider"` // aws, gcp, azure
-	Region   string `yaml:"region"`
-	Bucket   string `yaml:"bucket"`
+	Provider       string `yaml:"provider"`        // aws, gcp, azure
+	Region         string `yaml:"region"`
+	Bucket         string `yaml:"bucket"`
+	Endpoint       string `yaml:"endpoint"`        // Custom endpoint URL (for testing)
+	DisableSSL     bool   `yaml:"disable_ssl"`     // Disable SSL for endpoint (for testing)
+	ForcePathStyle bool   `yaml:"force_path_style"` // Use path-style URLs (for S3-compatible stores)
+	AccessKey      string `yaml:"access_key"`
+	SecretKey      string `yaml:"secret_key"`
 }
 
 // CloudTopicsConfig configures cloud topics behavior.

@@ -16,6 +16,7 @@ import (
 	"io"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/redpanda-data/redpanda/src/go/ct-proxy/pkg/config"
@@ -30,10 +31,31 @@ type S3Client struct {
 
 // NewS3Client creates a new S3 client.
 func NewS3Client(cfg *config.CloudStorageConfig) (*S3Client, error) {
-	// Create AWS session
-	sess, err := session.NewSession(&aws.Config{
+	// Build AWS config
+	awsCfg := &aws.Config{
 		Region: aws.String(cfg.Region),
-	})
+	}
+
+	// Support custom endpoint (e.g., for local S3 imposter or MinIO)
+	if cfg.Endpoint != "" {
+		awsCfg.Endpoint = aws.String(cfg.Endpoint)
+		awsCfg.S3ForcePathStyle = aws.Bool(true)
+	}
+	if cfg.ForcePathStyle {
+		awsCfg.S3ForcePathStyle = aws.Bool(true)
+	}
+	if cfg.DisableSSL {
+		awsCfg.DisableSSL = aws.Bool(true)
+	}
+
+	// Support explicit credentials (for testing)
+	if cfg.AccessKey != "" && cfg.SecretKey != "" {
+		awsCfg.Credentials = credentials.NewStaticCredentials(
+			cfg.AccessKey, cfg.SecretKey, "")
+	}
+
+	// Create AWS session
+	sess, err := session.NewSession(awsCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create AWS session: %w", err)
 	}

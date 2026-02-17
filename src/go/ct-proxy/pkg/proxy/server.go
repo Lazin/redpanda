@@ -140,6 +140,8 @@ func isFlexibleRequest(apiKey, apiVersion int16) bool {
 		return apiVersion >= 9
 	case 1: // Fetch
 		return apiVersion >= 12
+	case 2: // ListOffsets
+		return apiVersion >= 6
 	case 3: // Metadata
 		return apiVersion >= 9
 	default:
@@ -316,6 +318,8 @@ func (s *Server) handleConnection(ctx context.Context, conn net.Conn) {
 			s.handleProduceRequest(ctx, conn, requestBody, header)
 		case 1: // Fetch
 			s.handleFetchRequest(ctx, conn, requestBody, header)
+		case 2: // ListOffsets
+			s.handleListOffsetsRequest(ctx, conn, requestBody, header)
 		default:
 			s.logger.Warn("unsupported API key", zap.Int16("api_key", header.apiKey))
 			// Send error response
@@ -426,6 +430,11 @@ func (s *Server) handleApiVersions(ctx context.Context, conn net.Conn, requestBo
 			MaxVersion: 12,
 		},
 		{
+			ApiKey:     2, // ListOffsets
+			MinVersion: 0,
+			MaxVersion: 7,
+		},
+		{
 			ApiKey:     3, // Metadata
 			MinVersion: 0,
 			MaxVersion: 12,
@@ -501,35 +510,82 @@ func (s *Server) handleMetadataRequest(ctx context.Context, conn net.Conn, reque
 
 // handleProduceRequest handles Produce requests.
 func (s *Server) handleProduceRequest(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
-	s.logger.Debug("handling Produce request",
-		zap.Int16("request_version", header.apiVersion))
+	s.logger.Info("handling Produce request",
+		zap.Int16("request_version", header.apiVersion),
+		zap.Int32("correlation_id", header.correlationID),
+		zap.Int("body_size", len(requestBody)),
+		zap.Int("body_offset", header.bodyOffset))
+
+	// Recover from panics
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in produce handler", zap.Any("panic", r))
+			// Send error response even on panic
+			errorResp := &kmsg.ProduceResponse{Version: header.apiVersion}
+			respBodyBytes := errorResp.AppendTo(nil)
+			s.writeKafkaResponse(conn, header, respBodyBytes)
+		}
+	}()
 
 	// Parse request - set version first, then parse body only
 	req := &kmsg.ProduceRequest{
 		Version: header.apiVersion,
 	}
 	if header.bodyOffset < len(requestBody) {
-		if err := req.ReadFrom(requestBody[header.bodyOffset:]); err != nil {
-			s.logger.Error("failed to parse Produce request", zap.Error(err))
+		bodyBytes := requestBody[header.bodyOffset:]
+		s.logger.Info("parsing Produce request body",
+			zap.Int("body_offset", header.bodyOffset),
+			zap.Int("body_len", len(bodyBytes)),
+			zap.Binary("first_bytes", bodyBytes[:min(len(bodyBytes), 64)]))
+		if err := req.ReadFrom(bodyBytes); err != nil {
+			s.logger.Error("failed to parse Produce request",
+				zap.Error(err),
+				zap.Int("body_len", len(bodyBytes)))
+			// Send error response - CORRUPT_MESSAGE
+			errorResp := &kmsg.ProduceResponse{Version: header.apiVersion}
+			respBodyBytes := errorResp.AppendTo(nil)
+			s.writeKafkaResponse(conn, header, respBodyBytes)
 			return
 		}
 	}
 
+	s.logger.Info("parsed Produce request",
+		zap.Int("num_topics", len(req.Topics)))
+
+	// Log the topics and partitions in the request
+	for _, t := range req.Topics {
+		for _, p := range t.Partitions {
+			s.logger.Info("produce request partition",
+				zap.String("topic", t.Topic),
+				zap.Int32("partition", p.Partition),
+				zap.Int("records_len", len(p.Records)))
+		}
+	}
+
 	// Handle via producer handler
+	s.logger.Info("calling producer handler")
 	resp, err := s.producerHandler.HandleProduce(ctx, req)
 	if err != nil {
 		s.logger.Error("failed to handle produce request", zap.Error(err))
+		// Send error response
+		errorResp := &kmsg.ProduceResponse{Version: header.apiVersion}
+		respBodyBytes := errorResp.AppendTo(nil)
+		s.writeKafkaResponse(conn, header, respBodyBytes)
 		return
 	}
 
+	s.logger.Info("produce handler completed", zap.Int("num_topics", len(resp.Topics)))
+
 	// Encode response and write with correlation ID
 	respBodyBytes := resp.AppendTo(nil)
+	s.logger.Info("Produce response encoded",
+		zap.Int("response_body_size", len(respBodyBytes)))
 	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
 		return
 	}
 
-	s.logger.Debug("sent Produce response")
+	s.logger.Info("sent Produce response successfully")
 }
 
 // handleFetchRequest handles Fetch requests.
@@ -563,6 +619,81 @@ func (s *Server) handleFetchRequest(ctx context.Context, conn net.Conn, requestB
 	}
 
 	s.logger.Debug("sent Fetch response")
+}
+
+// handleListOffsetsRequest handles ListOffsets requests.
+func (s *Server) handleListOffsetsRequest(ctx context.Context, conn net.Conn, requestBody []byte, header *kafkaRequestHeader) {
+	s.logger.Debug("handling ListOffsets request",
+		zap.Int16("request_version", header.apiVersion))
+
+	// Parse request - set version first, then parse body only
+	req := &kmsg.ListOffsetsRequest{
+		Version: header.apiVersion,
+	}
+	if header.bodyOffset < len(requestBody) {
+		if err := req.ReadFrom(requestBody[header.bodyOffset:]); err != nil {
+			s.logger.Error("failed to parse ListOffsets request", zap.Error(err))
+			return
+		}
+	}
+
+	// Build response
+	resp := &kmsg.ListOffsetsResponse{
+		Version: header.apiVersion,
+	}
+
+	// Process each topic in the request
+	for _, topicReq := range req.Topics {
+		topicResp := kmsg.ListOffsetsResponseTopic{
+			Topic: topicReq.Topic,
+		}
+
+		// Process each partition
+		for _, partReq := range topicReq.Partitions {
+			var offset int64
+			var timestamp int64 = -1
+
+			// Determine the offset based on timestamp
+			// -1 = latest, -2 = earliest
+			switch partReq.Timestamp {
+			case -2: // Earliest offset
+				offset = 0
+			case -1: // Latest offset
+				// For now, return 0 as we don't have offset tracking yet
+				// In a real implementation, this should query the actual end offset
+				offset = 0
+			default:
+				// Offset for specific timestamp - not supported yet
+				offset = 0
+			}
+
+			partResp := kmsg.ListOffsetsResponseTopicPartition{
+				Partition:   partReq.Partition,
+				ErrorCode:   0,
+				Timestamp:   timestamp,
+				Offset:      offset,
+				LeaderEpoch: 0,
+			}
+			topicResp.Partitions = append(topicResp.Partitions, partResp)
+
+			s.logger.Debug("ListOffsets partition response",
+				zap.String("topic", topicReq.Topic),
+				zap.Int32("partition", partReq.Partition),
+				zap.Int64("requested_timestamp", partReq.Timestamp),
+				zap.Int64("returned_offset", offset))
+		}
+
+		resp.Topics = append(resp.Topics, topicResp)
+	}
+
+	// Encode response and write with correlation ID
+	respBodyBytes := resp.AppendTo(nil)
+	if err := s.writeKafkaResponse(conn, header, respBodyBytes); err != nil {
+		s.logger.Error("failed to write response", zap.Error(err))
+		return
+	}
+
+	s.logger.Debug("sent ListOffsets response")
 }
 
 // Close closes the server and cleans up resources.
@@ -773,3 +904,4 @@ func parsePartition(s string) (int32, error) {
 	}
 	return int32(partition), nil
 }
+// rebuild trigger
