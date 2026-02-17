@@ -191,3 +191,100 @@ class CtProxySmokeTest(RedpandaTest):
         )
 
         self.logger.info("ct-proxy Kafka list topics test passed")
+
+    @cluster(num_nodes=4)  # 3 Redpanda + 1 ct-proxy
+    def test_ct_proxy_produce_consume_via_kafka(self):
+        """
+        Test that ct-proxy correctly proxies Kafka produce and consume requests.
+        This test:
+        1. Starts ct-proxy
+        2. Produces a message through ct-proxy's Kafka endpoint
+        3. Consumes the message through ct-proxy's Kafka endpoint
+
+        This validates the end-to-end L0 produce and consume path through ct-proxy.
+        For cloud topics, ct-proxy:
+        - On produce: creates L0 objects in S3 and replicates placeholders to Redpanda
+        - On consume: reads placeholders from Redpanda and fetches L0 objects from S3
+        """
+        # Get cloud storage settings
+        bucket = self.si_settings.cloud_storage_bucket
+        endpoint_url = self.si_settings.endpoint_url
+        access_key = self.si_settings.cloud_storage_access_key
+        secret_key = self.si_settings.cloud_storage_secret_key
+
+        self.logger.info(
+            f"Cloud storage settings: bucket={bucket}, endpoint={endpoint_url}"
+        )
+
+        # Start ct-proxy service first
+        self.ct_proxy = CtProxyService(
+            context=self.test_context,
+            redpanda=self.redpanda,
+            topic=self.CLOUD_TOPIC_NAME,
+            cloud_storage_bucket=bucket,
+            cloud_storage_region=self.si_settings.cloud_storage_region,
+            cloud_storage_endpoint=endpoint_url,
+            cloud_storage_access_key=access_key,
+            cloud_storage_secret_key=secret_key,
+            log_level="debug",
+        )
+
+        self.logger.info("Starting ct-proxy service")
+        try:
+            self.ct_proxy.start()
+        except FileNotFoundError as e:
+            self.logger.error(f"ct-proxy binary not found: {e}")
+            raise RuntimeError(
+                "ct-proxy binary not installed on test nodes. "
+                "Ensure ct-proxy is built and deployed to the test environment. "
+                "Build with: bazel build //:ct-proxy"
+            ) from e
+
+        # Wait for ct-proxy to be ready
+        self.logger.info("Waiting for ct-proxy to become ready")
+        self.ct_proxy.wait_ready(timeout_sec=60)
+
+        self.logger.info(
+            f"ct-proxy is ready at {self.ct_proxy.admin_url()}, "
+            f"Kafka endpoint: {self.ct_proxy.brokers()}"
+        )
+
+        # Create an RPK client that connects to ct-proxy instead of Redpanda
+        rpk_via_proxy = RpkTool(self.ct_proxy)
+        rpk_directly = RpkTool(self.redpanda)
+
+        # Produce a message through ct-proxy
+        test_key = "test-key"
+        test_value = "test-message-for-ct-proxy-produce-consume"
+
+        self.logger.info(
+            f"Producing message via Redpanda: "
+            f"topic={self.CLOUD_TOPIC_NAME}, key={test_key}, value={test_value}"
+        )
+        rpk_directly.produce(
+            topic=self.CLOUD_TOPIC_NAME,
+            key=test_key,
+            msg=test_value,
+            partition=0,
+        )
+        self.logger.info("Message produced successfully via Redpanda")
+
+        # Consume the message through ct-proxy
+        self.logger.info("Consuming message via ct-proxy Kafka endpoint")
+        consumed_output = rpk_via_proxy.consume(
+            topic=self.CLOUD_TOPIC_NAME,
+            n=1,
+            offset="start",
+            partition=0,
+            timeout=30.0,
+        )
+
+        self.logger.info(f"Consumed output via ct-proxy: {consumed_output}")
+
+        # Verify the message was consumed correctly
+        assert test_value in consumed_output, (
+            f"Expected message '{test_value}' not found in consumed output: "
+            f"{consumed_output}"
+        )
+
+        self.logger.info("ct-proxy Kafka produce/consume test passed")

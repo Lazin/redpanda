@@ -58,6 +58,9 @@ class CtProxyService(BackgroundThreadService):
         cloud_storage_bucket: str = "test-bucket",
         cloud_storage_region: str = "us-east-1",
         cloud_storage_provider: str = "aws",
+        cloud_storage_endpoint: str | None = None,
+        cloud_storage_access_key: str | None = None,
+        cloud_storage_secret_key: str | None = None,
         log_level: str = "info",
     ):
         """
@@ -71,6 +74,9 @@ class CtProxyService(BackgroundThreadService):
         :param cloud_storage_bucket: S3 bucket name
         :param cloud_storage_region: S3 region
         :param cloud_storage_provider: Cloud provider (aws, gcp, azure)
+        :param cloud_storage_endpoint: Custom S3 endpoint URL (for testing)
+        :param cloud_storage_access_key: S3 access key
+        :param cloud_storage_secret_key: S3 secret key
         :param log_level: Log level (debug, info, warn, error)
         """
         self._redpanda = redpanda
@@ -80,6 +86,9 @@ class CtProxyService(BackgroundThreadService):
         self._cloud_storage_bucket = cloud_storage_bucket
         self._cloud_storage_region = cloud_storage_region
         self._cloud_storage_provider = cloud_storage_provider
+        self._cloud_storage_endpoint = cloud_storage_endpoint
+        self._cloud_storage_access_key = cloud_storage_access_key
+        self._cloud_storage_secret_key = cloud_storage_secret_key
         self._log_level = log_level
         self._stopping = Event()
         self._node = None
@@ -99,6 +108,7 @@ class CtProxyService(BackgroundThreadService):
         return {
             "server": {
                 "kafka_listen_address": f"0.0.0.0:{self._kafka_port}",
+                "kafka_advertised_address": f"{node.account.hostname}:{self._kafka_port}",
                 "admin_listen_address": f"0.0.0.0:{self._admin_port}",
             },
             "redpanda": {
@@ -113,6 +123,11 @@ class CtProxyService(BackgroundThreadService):
                 "provider": self._cloud_storage_provider,
                 "region": self._cloud_storage_region,
                 "bucket": self._cloud_storage_bucket,
+                "endpoint": self._cloud_storage_endpoint or "",
+                "disable_ssl": bool(self._cloud_storage_endpoint),
+                "force_path_style": bool(self._cloud_storage_endpoint),
+                "access_key": self._cloud_storage_access_key or "",
+                "secret_key": self._cloud_storage_secret_key or "",
             },
             "cloud_topics": {
                 "allowed_topics": [self._topic],
@@ -188,18 +203,18 @@ class CtProxyService(BackgroundThreadService):
         # Check common locations
         candidates = []
 
-        rp_install_path_root = self.context.globals.get(
-            "rp_install_path_root", None
-        )
+        rp_install_path_root = self.context.globals.get("rp_install_path_root", None)
         if rp_install_path_root:
             candidates.append(f"{rp_install_path_root}/bin/ct-proxy")
 
         # Add fallback locations
-        candidates.extend([
-            "/opt/redpanda/bin/ct-proxy",
-            "/usr/bin/ct-proxy",
-            "/usr/local/bin/ct-proxy",
-        ])
+        candidates.extend(
+            [
+                "/opt/redpanda/bin/ct-proxy",
+                "/usr/bin/ct-proxy",
+                "/usr/local/bin/ct-proxy",
+            ]
+        )
 
         # Check which binary exists on the node
         for path in candidates:
@@ -389,4 +404,5 @@ class CtProxyService(BackgroundThreadService):
         :return: Security settings (no authentication)
         """
         from rptest.services.redpanda_types import PLAINTEXT_SECURITY
+
         return PLAINTEXT_SECURITY
