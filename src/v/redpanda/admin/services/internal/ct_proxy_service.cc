@@ -38,20 +38,9 @@ namespace admin {
 
 namespace {
 
-// Helper to get ctp_stm_api from a partition
-ss::lw_shared_ptr<cloud_topics::ctp_stm_api>
-make_ctp_stm_api(ss::lw_shared_ptr<cluster::partition> p) {
-    auto stm = p->raft()->stm_manager()->get<cloud_topics::ctp_stm>();
-    if (!stm) {
-        throw serde::pb::rpc::invalid_argument_exception(
-          "partition is not a cloud topic");
-    }
-    return ss::make_lw_shared<cloud_topics::ctp_stm_api>(stm);
-}
-
 // Helper to convert proto PlaceholderData to extent_meta
-cloud_topics::extent_meta proto_to_extent_meta(
-  const proto::admin::ct_proxy::placeholder_data& proto_ph) {
+cloud_topics::extent_meta
+proto_to_extent_meta(const proto::admin::ct_proxy::placeholder_data& proto_ph) {
     cloud_topics::extent_meta meta;
 
     // Convert object_id from proto
@@ -82,39 +71,30 @@ cloud_topics::extent_meta proto_to_extent_meta(
 
 } // namespace
 
-ss::future<ss::lw_shared_ptr<cluster::partition>>
-ct_proxy_service_impl::get_partition(const model::ntp& ntp) {
-    vlog(ctplog.debug, "get_partition: looking up ntp={}", ntp);
+std::optional<ss::shard_id>
+ct_proxy_service_impl::get_partition_shard(const model::ntp& ntp) {
+    vlog(ctplog.debug, "get_partition_shard: looking up ntp={}", ntp);
 
     // Look up which shard owns this partition
     auto shard = _shard_table->local().shard_for(ntp);
     if (!shard) {
-        vlog(ctplog.warn, "get_partition: ntp={} not found in shard table", ntp);
-        throw serde::pb::rpc::not_found_exception(
-          "partition not found in shard table");
+        vlog(
+          ctplog.warn,
+          "get_partition_shard: ntp={} not found in shard table",
+          ntp);
+    } else {
+        vlog(
+          ctplog.debug,
+          "get_partition_shard: ntp={} is on shard {}",
+          ntp,
+          *shard);
     }
-
-    vlog(ctplog.debug, "get_partition: ntp={} is on shard {}", ntp, *shard);
-
-    // Get the partition from the correct shard
-    auto partition = co_await _partition_manager->invoke_on(
-      *shard, [ntp](cluster::partition_manager& pm) {
-          return pm.get(ntp);
-      });
-
-    if (!partition) {
-        vlog(ctplog.warn, "get_partition: ntp={} not found on shard {}", ntp, *shard);
-        throw serde::pb::rpc::not_found_exception("partition not found");
-    }
-
-    vlog(ctplog.debug, "get_partition: found ntp={}", ntp);
-    co_return partition;
+    return shard;
 }
 
 seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
 ct_proxy_service_impl::get_cluster_epoch(
-  serde::pb::rpc::context,
-  proto::admin::ct_proxy::get_cluster_epoch_request) {
+  serde::pb::rpc::context, proto::admin::ct_proxy::get_cluster_epoch_request) {
     vlog(ctplog.info, "get_cluster_epoch");
 
     // Get the current cluster epoch from the epoch service
@@ -156,56 +136,138 @@ ct_proxy_service_impl::replicate_placeholders(
       model::topic{req.get_partition().get_topic()},
       model::partition_id{req.get_partition().get_partition()}};
 
-    auto partition = co_await get_partition(ntp);
-
-    // Get ctp_stm_api for fencing
-    auto ctp_api = make_ctp_stm_api(partition);
-
-    // Perform RW-fence with expected cluster epoch
-    auto fence_result = co_await ctp_api->fence_epoch(
-      cloud_topics::cluster_epoch(req.get_expected_cluster_epoch()));
-
-    if (!fence_result) {
-        throw serde::pb::rpc::invalid_argument_exception(
-          "fencing failed - cluster epoch mismatch");
+    auto shard = get_partition_shard(ntp);
+    if (!shard) {
+        throw serde::pb::rpc::not_found_exception(
+          "partition not found in shard table");
     }
 
-    // Extract term from fence before moving
-    auto term = fence_result.value().term;
-
-    // Convert proto placeholders to extent_meta and encode as batches
-    chunked_vector<model::record_batch> batches;
-
+    // Convert proto placeholders to extent_meta before crossing shard boundary
+    chunked_vector<cloud_topics::extent_meta> extents;
     for (const auto& proto_ph : req.get_placeholders()) {
-        auto extent = proto_to_extent_meta(proto_ph);
-
-        // Create minimal batch header - encode_placeholder_batch will fill in the rest
-        model::record_batch_header header{
-          .base_offset = model::offset(extent.base_offset()),
-          .type = model::record_batch_type::ctp_placeholder,
-          .last_offset_delta = static_cast<int32_t>(
-            extent.last_offset() - extent.base_offset()),
-          .record_count = 1,
-        };
-
-        // Encode placeholder batch
-        auto batch = cloud_topics::encode_placeholder_batch(header, extent);
-        batches.push_back(std::move(batch));
+        extents.push_back(proto_to_extent_meta(proto_ph));
     }
 
-    // Replicate batches directly
-    auto result = co_await partition->replicate(
-      std::move(batches),
-      raft::replicate_options{raft::consistency_level::quorum_ack});
+    auto expected_epoch = cloud_topics::cluster_epoch(
+      req.get_expected_cluster_epoch());
 
-    if (!result) {
-        throw serde::pb::rpc::unavailable_exception(
-          "replication failed");
+    // Result type for cross-shard invocation
+    struct replicate_result {
+        kafka::offset last_offset;
+        model::term_id term;
+        bool success{false};
+        ss::sstring error_msg;
+    };
+
+    // Do all partition work on the correct shard
+    auto result = co_await _partition_manager->invoke_on(
+      *shard,
+      [ntp, extents = std::move(extents), expected_epoch](
+        cluster::partition_manager& pm) mutable
+        -> ss::future<replicate_result> {
+          auto partition = pm.get(ntp);
+          if (!partition) {
+              co_return replicate_result{
+                .success = false, .error_msg = "partition not found"};
+          }
+
+          // Get ctp_stm_api for fencing
+          auto stm
+            = partition->raft()->stm_manager()->get<cloud_topics::ctp_stm>();
+          if (!stm) {
+              co_return replicate_result{
+                .success = false,
+                .error_msg = "partition is not a cloud topic"};
+          }
+          auto ctp_api = ss::make_lw_shared<cloud_topics::ctp_stm_api>(stm);
+
+          // Perform RW-fence with expected cluster epoch
+          auto fence_result = co_await ctp_api->fence_epoch(expected_epoch);
+
+          if (!fence_result) {
+              co_return replicate_result{
+                .success = false,
+                .error_msg = "fencing failed - cluster epoch mismatch"};
+          }
+
+          // Extract term from fence
+          auto term = fence_result.value().term;
+
+          // Convert extents to batches
+          chunked_vector<model::record_batch> batches;
+          for (const auto& extent : extents) {
+              // Create a properly initialized header
+              auto now = model::timestamp::now();
+              auto record_count = static_cast<int32_t>(
+                extent.last_offset() - extent.base_offset() + 1);
+
+              vlog(
+                ctplog.info,
+                "Creating placeholder batch: base_offset={}, last_offset={}, "
+                "record_count={}",
+                extent.base_offset(),
+                extent.last_offset(),
+                record_count);
+
+              model::record_batch_header header{
+                .header_crc = 0,
+                .size_bytes = 0, // Will be set by reset_size_checksum_metadata
+                .base_offset = model::offset(extent.base_offset()),
+                .type = model::record_batch_type::ctp_placeholder,
+                .crc = 0,
+                .attrs = model::record_batch_attributes{},
+                .last_offset_delta = record_count - 1,
+                .first_timestamp = now,
+                .max_timestamp = now,
+                .producer_id = model::producer_id{-1},
+                .producer_epoch = int16_t{-1},
+                .base_sequence = int32_t{-1},
+                .record_count = record_count,
+              };
+              auto batch = cloud_topics::encode_placeholder_batch(
+                header, extent);
+
+              vlog(
+                ctplog.info,
+                "Encoded placeholder batch: size_bytes={}, data_size={}",
+                batch.header().size_bytes,
+                batch.data().size_bytes());
+
+              batches.push_back(std::move(batch));
+          }
+
+          // Replicate batches
+          auto repl_result = co_await partition->replicate(
+            std::move(batches),
+            raft::replicate_options{raft::consistency_level::quorum_ack});
+
+          if (!repl_result) {
+              co_return replicate_result{
+                .success = false, .error_msg = "replication failed"};
+          }
+
+          co_return replicate_result{
+            .last_offset = repl_result.value().last_offset,
+            .term = term,
+            .success = true};
+      });
+
+    if (!result.success) {
+        if (
+          result.error_msg == "partition not found"
+          || result.error_msg == "partition is not a cloud topic") {
+            throw serde::pb::rpc::not_found_exception(result.error_msg);
+        } else if (
+          result.error_msg == "fencing failed - cluster epoch mismatch") {
+            throw serde::pb::rpc::invalid_argument_exception(result.error_msg);
+        } else {
+            throw serde::pb::rpc::unavailable_exception(result.error_msg);
+        }
     }
 
     proto::admin::ct_proxy::replicate_placeholders_response response;
-    response.set_last_offset(result.value().last_offset());
-    response.set_term(term());
+    response.set_last_offset(result.last_offset());
+    response.set_term(result.term());
     co_return response;
 }
 
@@ -219,85 +281,108 @@ ct_proxy_service_impl::read_placeholders(
       model::topic{req.get_partition().get_topic()},
       model::partition_id{req.get_partition().get_partition()}};
 
-    auto partition = co_await get_partition(ntp);
+    auto shard = get_partition_shard(ntp);
+    if (!shard) {
+        throw serde::pb::rpc::not_found_exception(
+          "partition not found in shard table");
+    }
 
     // Create log reader config
     size_t max_bytes = req.get_max_bytes() > 0
-      ? req.get_max_bytes()
-      : std::numeric_limits<size_t>::max();
+                         ? req.get_max_bytes()
+                         : std::numeric_limits<size_t>::max();
 
-    storage::local_log_reader_config reader_cfg(
-      model::offset(req.get_start_offset()),
-      model::offset(req.get_max_offset()),
-      max_bytes,
-      model::record_batch_type::ctp_placeholder,
-      std::nullopt, // time
-      std::nullopt  // abort_source
-    );
+    auto start_offset = model::offset(req.get_start_offset());
+    auto max_offset = model::offset(req.get_max_offset());
 
-    // Create reader
-    auto reader = co_await partition->log()->make_reader(reader_cfg);
+    // Do all partition work on the correct shard
+    auto response = co_await _partition_manager->invoke_on(
+      *shard,
+      [ntp, start_offset, max_offset, max_bytes](cluster::partition_manager& pm)
+        -> ss::future<proto::admin::ct_proxy::read_placeholders_response> {
+          auto partition = pm.get(ntp);
+          if (!partition) {
+              throw serde::pb::rpc::not_found_exception("partition not found");
+          }
 
-    proto::admin::ct_proxy::read_placeholders_response response;
+          storage::local_log_reader_config reader_cfg(
+            start_offset,
+            max_offset,
+            max_bytes,
+            model::record_batch_type::ctp_placeholder,
+            std::nullopt, // time
+            std::nullopt  // abort_source
+          );
 
-    // Read batches
-    model::record_batch_reader::storage_t batches_storage = co_await
-      model::consume_reader_to_memory(
-        std::move(reader),
-        model::no_timeout);
+          // Create reader
+          auto reader = co_await partition->log()->make_reader(reader_cfg);
 
-    // Extract data_t from variant
-    auto& batches = std::get<model::record_batch_reader::data_t>(batches_storage);
+          proto::admin::ct_proxy::read_placeholders_response response;
 
-    // Parse each batch and convert to proto
-    for (auto& batch : batches) {
-        if (batch.header().type != model::record_batch_type::ctp_placeholder) {
-            continue;
-        }
+          // Read batches
+          model::record_batch_reader::storage_t batches_storage
+            = co_await model::consume_reader_to_memory(
+              std::move(reader), model::no_timeout);
 
-        // Parse placeholder from batch
-        auto placeholder = cloud_topics::parse_placeholder_batch(std::move(batch));
+          // Extract data_t from variant
+          auto& batches = std::get<model::record_batch_reader::data_t>(
+            batches_storage);
 
-        // Create proto placeholder batch
-        proto::admin::ct_proxy::placeholder_batch proto_batch;
+          // Parse each batch and convert to proto
+          for (auto& batch : batches) {
+              if (
+                batch.header().type
+                != model::record_batch_type::ctp_placeholder) {
+                  continue;
+              }
 
-        // Set placeholder data
-        auto& proto_ph = proto_batch.get_placeholder();
+              // Parse placeholder from batch
+              auto placeholder = cloud_topics::parse_placeholder_batch(
+                std::move(batch));
 
-        // Convert object_id - uuid_t to iobuf
-        iobuf uuid_buf;
-        const auto& uuid_data = placeholder.id.name.uuid();
-        uuid_buf.append(
-          reinterpret_cast<const uint8_t*>(uuid_data.data),
-          uuid_t::length);
-        proto_ph.set_object_id_uuid(std::move(uuid_buf));
+              // Create proto placeholder batch
+              proto::admin::ct_proxy::placeholder_batch proto_batch;
 
-        proto_ph.set_cluster_epoch(placeholder.id.epoch());
-        proto_ph.set_object_id_prefix(placeholder.id.prefix);
-        proto_ph.set_first_byte_offset(placeholder.offset());
-        proto_ph.set_byte_range_size(placeholder.size_bytes());
+              // Set placeholder data
+              auto& proto_ph = proto_batch.get_placeholder();
 
-        // Calculate base/last offsets from batch header
-        auto base_offset = batch.base_offset();
-        auto last_offset = batch.last_offset();
-        proto_ph.set_base_offset(model::offset_cast(base_offset)());
-        proto_ph.set_last_offset(model::offset_cast(last_offset)());
+              // Convert object_id - uuid_t to iobuf
+              iobuf uuid_buf;
+              const auto& uuid_data = placeholder.id.name.uuid();
+              uuid_buf.append(
+                reinterpret_cast<const uint8_t*>(uuid_data.data),
+                uuid_t::length);
+              proto_ph.set_object_id_uuid(std::move(uuid_buf));
 
-        // Set batch metadata
-        proto_batch.set_base_offset(model::offset_cast(base_offset)());
-        proto_batch.set_last_offset(model::offset_cast(last_offset)());
-        proto_batch.set_record_count(batch.record_count());
+              proto_ph.set_cluster_epoch(placeholder.id.epoch());
+              proto_ph.set_object_id_prefix(placeholder.id.prefix);
+              proto_ph.set_first_byte_offset(placeholder.offset());
+              proto_ph.set_byte_range_size(placeholder.size_bytes());
 
-        // Producer metadata
-        if (batch.header().attrs.is_transactional()) {
-            proto_batch.set_is_transactional(true);
-            proto_batch.set_producer_id(batch.header().producer_id);
-            proto_batch.set_producer_epoch(batch.header().producer_epoch);
-        }
+              // Calculate base/last offsets from batch header
+              auto base_offset = batch.base_offset();
+              auto last_offset = batch.last_offset();
+              proto_ph.set_base_offset(model::offset_cast(base_offset)());
+              proto_ph.set_last_offset(model::offset_cast(last_offset)());
 
-        // Add to response
-        response.get_batches().push_back(std::move(proto_batch));
-    }
+              // Set batch metadata
+              proto_batch.set_base_offset(model::offset_cast(base_offset)());
+              proto_batch.set_last_offset(model::offset_cast(last_offset)());
+              proto_batch.set_record_count(batch.record_count());
+
+              // Producer metadata
+              if (batch.header().attrs.is_transactional()) {
+                  proto_batch.set_is_transactional(true);
+                  proto_batch.set_producer_id(batch.header().producer_id);
+                  proto_batch.set_producer_epoch(batch.header().producer_epoch);
+              }
+
+              // Add to response
+              response.get_batches().push_back(std::move(proto_batch));
+          }
+
+          co_return response;
+      });
 
     co_return response;
 }
@@ -323,7 +408,8 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
         }
 
         // Get topic metadata
-        const auto& metadata_opt = _topic_table->local().get_topic_metadata_ref(tp_ns);
+        const auto& metadata_opt = _topic_table->local().get_topic_metadata_ref(
+          tp_ns);
         if (!metadata_opt) {
             continue;
         }
@@ -403,9 +489,9 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
                                        ->stm_manager()
                                        ->get<cloud_topics::ctp_stm>();
                           if (!stm) {
-                              return std::optional<proto::admin::ct_proxy::
-                                                     cloud_topic_partition_info>{
-                                std::nullopt};
+                              return std::optional<
+                                proto::admin::ct_proxy::
+                                  cloud_topic_partition_info>{std::nullopt};
                           }
                           auto ctp_api
                             = ss::make_lw_shared<cloud_topics::ctp_stm_api>(
@@ -427,12 +513,12 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
                           auto lro = ctp_api->get_last_reconciled_offset();
                           part_info.set_has_l1_data(lro > kafka::offset::min());
 
-                          return std::optional<proto::admin::ct_proxy::
-                                                 cloud_topic_partition_info>{
+                          return std::optional<
+                            proto::admin::ct_proxy::cloud_topic_partition_info>{
                             std::move(part_info)};
                       } catch (...) {
-                          return std::optional<proto::admin::ct_proxy::
-                                                 cloud_topic_partition_info>{
+                          return std::optional<
+                            proto::admin::ct_proxy::cloud_topic_partition_info>{
                             std::nullopt};
                       }
                   });
@@ -466,7 +552,8 @@ ct_proxy_service_impl::read_l1_metadata(
     // TODO: This requires access to the L1 metastore, which is not currently
     // injected into this service. For now, return an unimplemented error.
     // To implement this, we would need to:
-    // 1. Inject ss::sharded<cloud_topics::l1::replicated_metastore>* into the constructor
+    // 1. Inject ss::sharded<cloud_topics::l1::replicated_metastore>* into the
+    // constructor
     // 2. Query the metastore for extent metadata in the offset range
     // 3. Convert L1 extent metadata to proto format
 

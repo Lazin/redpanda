@@ -8,14 +8,15 @@
  * https://github.com/redpanda-data/redpanda/blob/master/licenses/rcl.md
  */
 
-#include "redpanda/admin/services/internal/ct_proxy_service.h"
-
 #include "bytes/iobuf.h"
+#include "bytes/iobuf_parser.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
 #include "cloud_topics/types.h"
+#include "model/adl_serde.h"
 #include "model/fundamental.h"
 #include "proto/redpanda/core/admin/internal/cloud_topics/v1/ct_proxy.proto.h"
+#include "redpanda/admin/services/internal/ct_proxy_service.h"
 #include "serde/protobuf/rpc.h"
 
 #include <gtest/gtest.h>
@@ -76,7 +77,7 @@ TEST(CtProxyServiceTest, PlaceholderDataValidation) {
 
     // This should throw when trying to convert
     // (Test would need access to proto_to_extent_meta helper)
-    EXPECT_EQ(proto_ph.get_object_id_uuid().size_bytes(), 9);  // too short
+    EXPECT_EQ(proto_ph.get_object_id_uuid().size_bytes(), 9); // too short
 }
 
 // Test object path format
@@ -90,7 +91,8 @@ TEST(CtProxyServiceTest, ObjectPathFormat) {
     id.prefix = 42;
 
     // The object path would be constructed as:
-    // fmt::format("level_zero/data/{:03}/{:018}/{}", id.prefix(), id.epoch(), id.name)
+    // fmt::format("level_zero/data/{:03}/{:018}/{}", id.prefix(), id.epoch(),
+    // id.name)
 
     // Verify format constraints
     EXPECT_GE(id.prefix, 0);
@@ -117,7 +119,7 @@ TEST(CtProxyServiceTest, PlaceholderBatchEncoding) {
       .crc = 0,
       .last_offset_delta = static_cast<int32_t>(
         meta.last_offset() - meta.base_offset()),
-      .record_count = 101,  // Number of records in the batch (100-200 inclusive)
+      .record_count = 101, // Number of records in the batch (100-200 inclusive)
     };
     header.ctx.term = model::term_id(1);
 
@@ -128,6 +130,13 @@ TEST(CtProxyServiceTest, PlaceholderBatchEncoding) {
     EXPECT_EQ(batch.header().type, model::record_batch_type::ctp_placeholder);
     EXPECT_EQ(batch.base_offset(), model::offset(100));
     EXPECT_EQ(batch.last_offset(), model::offset(200));
+
+    // Verify size_bytes is properly set (not zero!)
+    EXPECT_GT(batch.header().size_bytes, 0);
+    // size_bytes should be header size (49 bytes) + record data size
+    auto expected_size = model::packed_record_batch_header_size
+                         + batch.data().size_bytes();
+    EXPECT_EQ(batch.header().size_bytes, expected_size);
 
     // Parse placeholder back
     auto parsed = cloud_topics::parse_placeholder_batch(std::move(batch));
@@ -140,14 +149,12 @@ TEST(CtProxyServiceTest, PlaceholderBatchEncoding) {
     EXPECT_EQ(parsed.size_bytes, meta.byte_range_size);
 }
 
-// Test request validation
+// Test request validation - GetClusterEpochRequest is an empty message since
+// epoch is global
 TEST(CtProxyServiceTest, GetClusterEpochRequest) {
     proto::admin::ct_proxy::get_cluster_epoch_request req;
-    req.get_partition().set_topic("test-topic");
-    req.get_partition().set_partition(0);
-
-    EXPECT_EQ(req.get_partition().get_topic(), "test-topic");
-    EXPECT_EQ(req.get_partition().get_partition(), 0);
+    // Empty request - no fields to validate
+    (void)req;
 }
 
 TEST(CtProxyServiceTest, ReplicatePlaceholdersRequest) {
@@ -161,8 +168,7 @@ TEST(CtProxyServiceTest, ReplicatePlaceholdersRequest) {
     uuid_t test_uuid = uuid_t::create();
     iobuf uuid_buf;
     uuid_buf.append(
-      reinterpret_cast<const uint8_t*>(test_uuid.uuid().data),
-      uuid_t::length);
+      reinterpret_cast<const uint8_t*>(test_uuid.uuid().data), uuid_t::length);
     ph.set_object_id_uuid(std::move(uuid_buf));
     ph.set_cluster_epoch(12345);
     ph.set_object_id_prefix(42);
@@ -182,7 +188,7 @@ TEST(CtProxyServiceTest, ReadPlaceholdersRequest) {
     req.get_partition().set_partition(0);
     req.set_start_offset(100);
     req.set_max_offset(200);
-    req.set_max_bytes(1024 * 1024);  // 1 MB
+    req.set_max_bytes(1024 * 1024); // 1 MB
 
     EXPECT_EQ(req.get_start_offset(), 100);
     EXPECT_EQ(req.get_max_offset(), 200);
@@ -194,6 +200,74 @@ TEST(CtProxyServiceTest, ListCloudTopicPartitionsRequest) {
     req.set_topic_filter("test-.*");
 
     EXPECT_EQ(req.get_topic_filter(), "test-.*");
+}
+
+// Test that placeholder batch survives ADL serialization/deserialization
+// This mimics what happens during raft replication
+TEST(CtProxyServiceTest, PlaceholderBatchADLRoundTrip) {
+    // Create extent_meta for a placeholder
+    cloud_topics::extent_meta meta;
+    meta.id.epoch = cloud_topics::cluster_epoch(12345);
+    meta.id.name = uuid_t::create();
+    meta.id.prefix = 42;
+    meta.first_byte_offset = cloud_topics::first_byte_offset_t(1024);
+    meta.byte_range_size = cloud_topics::byte_range_size_t(2048);
+    meta.base_offset = kafka::offset(100);
+    meta.last_offset = kafka::offset(200);
+
+    // Create batch header with proper initialization
+    auto now = model::timestamp::now();
+    auto record_count = static_cast<int32_t>(
+      meta.last_offset() - meta.base_offset() + 1);
+
+    model::record_batch_header header{
+      .header_crc = 0,
+      .size_bytes = 0, // Will be set by encode_placeholder_batch
+      .base_offset = model::offset(meta.base_offset()),
+      .type = model::record_batch_type::ctp_placeholder,
+      .crc = 0,
+      .attrs = model::record_batch_attributes{},
+      .last_offset_delta = record_count - 1,
+      .first_timestamp = now,
+      .max_timestamp = now,
+      .producer_id = model::producer_id{-1},
+      .producer_epoch = int16_t{-1},
+      .base_sequence = int32_t{-1},
+      .record_count = record_count,
+    };
+    header.ctx.term = model::term_id(1);
+
+    // Encode placeholder batch
+    auto batch = cloud_topics::encode_placeholder_batch(header, meta);
+
+    // Verify original batch has correct size_bytes
+    EXPECT_GT(batch.header().size_bytes, 0);
+    auto original_size_bytes = batch.header().size_bytes;
+    auto original_data_size = batch.data().size_bytes();
+
+    // Serialize the batch using ADL (same as raft replication)
+    iobuf serialized;
+    reflection::adl<model::record_batch>{}.to(serialized, std::move(batch));
+
+    // Deserialize the batch using ADL
+    iobuf_parser parser(std::move(serialized));
+    auto deserialized = reflection::adl<model::record_batch>{}.from(parser);
+
+    // Verify deserialized batch has correct size_bytes
+    EXPECT_EQ(deserialized.header().size_bytes, original_size_bytes)
+      << "size_bytes changed after ADL round-trip: expected "
+      << original_size_bytes << ", got " << deserialized.header().size_bytes;
+
+    // Verify other header fields
+    EXPECT_EQ(
+      deserialized.header().type, model::record_batch_type::ctp_placeholder);
+    EXPECT_EQ(deserialized.base_offset(), model::offset(100));
+    EXPECT_EQ(deserialized.last_offset(), model::offset(200));
+
+    // Verify data size matches
+    EXPECT_EQ(deserialized.data().size_bytes(), original_data_size)
+      << "data size changed after ADL round-trip: expected "
+      << original_data_size << ", got " << deserialized.data().size_bytes();
 }
 
 } // namespace admin

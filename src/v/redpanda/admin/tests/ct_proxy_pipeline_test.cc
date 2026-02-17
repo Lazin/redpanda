@@ -15,7 +15,6 @@
 #include "cloud_topics/level_zero/stm/ctp_stm.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
 #include "cloud_topics/types.h"
-#include "cloud_topics/types.h"
 #include "model/batch_builder.h"
 #include "model/fundamental.h"
 #include "model/metadata.h"
@@ -60,7 +59,8 @@ public:
         partition = app.partition_manager.local().get(ntp);
         ASSERT_TRUE(partition != nullptr);
 
-        auto stm = partition->raft()->stm_manager()->get<cloud_topics::ctp_stm>();
+        auto stm
+          = partition->raft()->stm_manager()->get<cloud_topics::ctp_stm>();
         ASSERT_TRUE(stm != nullptr);
 
         // Create ct_proxy service for admin API access
@@ -83,13 +83,14 @@ public:
             auto key = ssx::sformat("{}key{}", prefix, i);
             auto val = ssx::sformat("{}val{}", prefix, i);
 
-            builder.add_record(model::record(
-              /*attributes=*/{},
-              /*timestamp_delta=*/0,
-              /*offset_delta=*/static_cast<int32_t>(i),
-              /*key=*/iobuf::from(key),
-              /*value=*/iobuf::from(val),
-              /*hdrs=*/{}));
+            builder.add_record(
+              model::record(
+                /*attributes=*/{},
+                /*timestamp_delta=*/0,
+                /*offset_delta=*/static_cast<int32_t>(i),
+                /*key=*/iobuf::from(key),
+                /*value=*/iobuf::from(val),
+                /*hdrs=*/{}));
         }
 
         builder.set_batch_timestamp(
@@ -121,9 +122,7 @@ public:
 
         cloud_storage::upload_request req{
           .transfer_details
-          = {.bucket = cloud_storage_clients::bucket_name("test-bucket"),
-             .key = object_key,
-             .parent_rtc = root_rtc},
+          = {.bucket = cloud_storage_clients::bucket_name("test-bucket"), .key = object_key, .parent_rtc = root_rtc},
           .type = cloud_storage::upload_type::object,
           .payload = chunk.payload.copy()};
 
@@ -164,8 +163,7 @@ public:
             iobuf uuid_buf;
             const auto& uuid_data = extent.id.name.uuid();
             uuid_buf.append(
-              reinterpret_cast<const uint8_t*>(uuid_data.data),
-              uuid_t::length);
+              reinterpret_cast<const uint8_t*>(uuid_data.data), uuid_t::length);
             ph_data.set_object_id_uuid(std::move(uuid_buf));
 
             ph_data.set_cluster_epoch(extent.id.epoch());
@@ -191,8 +189,7 @@ public:
     }
 
     /// Reads placeholders using ct_proxy admin API
-    ss::future<
-      chunked_vector<proto::admin::ct_proxy::placeholder_batch>>
+    ss::future<chunked_vector<proto::admin::ct_proxy::placeholder_batch>>
     read_placeholders_via_admin_api(
       kafka::offset start_offset, kafka::offset max_offset) {
         // Build request
@@ -277,9 +274,8 @@ TEST_F(ct_proxy_pipeline_fixture, test_write_replicate_read_download_flow) {
     // Step 2: Serialize batches using write_pipeline serializer
     vlog(ct_proxy_test_log.info, "Step 2: Serializing batches");
 
-    auto serialized_chunk = cloud_topics::l0::serialize_batches(
-                              std::move(batches))
-                              .get();
+    auto serialized_chunk
+      = cloud_topics::l0::serialize_batches(std::move(batches)).get();
 
     ASSERT_GT(serialized_chunk.payload.size_bytes(), 0);
     // Serializer creates one extent per batch
@@ -308,22 +304,19 @@ TEST_F(ct_proxy_pipeline_fixture, test_write_replicate_read_download_flow) {
 
     // Step 4: Replicate placeholders via ct_proxy admin API
     vlog(
-      ct_proxy_test_log.info,
-      "Step 4: Replicating placeholders via admin API");
+      ct_proxy_test_log.info, "Step 4: Replicating placeholders via admin API");
 
     chunked_vector<cloud_topics::extent_meta> extents_to_replicate;
     extents_to_replicate.push_back(extent);
 
-    replicate_placeholders_via_admin_api(
-      extents_to_replicate, cluster_epoch)
+    replicate_placeholders_via_admin_api(extents_to_replicate, cluster_epoch)
       .get();
 
     // Step 5: Read placeholders back via ct_proxy admin API
-    vlog(
-      ct_proxy_test_log.info,
-      "Step 5: Reading placeholders via admin API");
+    vlog(ct_proxy_test_log.info, "Step 5: Reading placeholders via admin API");
 
-    // Note: ct_proxy replicates a fence batch first, so placeholders start at offset 1
+    // Note: ct_proxy replicates a fence batch first, so placeholders start at
+    // offset 1
     auto placeholder_batches = read_placeholders_via_admin_api(
                                  kafka::offset(0), kafka::offset(100))
                                  .get();
@@ -349,9 +342,7 @@ TEST_F(ct_proxy_pipeline_fixture, test_write_replicate_read_download_flow) {
       ph_data.get_byte_range_size());
 
     // Step 6: Validate placeholder metadata matches uploaded extent
-    vlog(
-      ct_proxy_test_log.info,
-      "Step 6: Validating placeholder metadata");
+    vlog(ct_proxy_test_log.info, "Step 6: Validating placeholder metadata");
 
     validate_placeholder_metadata(ph_data, extent);
 
@@ -372,9 +363,8 @@ TEST_F(ct_proxy_pipeline_fixture, test_multiple_batches) {
     batches.push_back(make_test_batch(kafka::offset(3), 4, "batch1-"));
     batches.push_back(make_test_batch(kafka::offset(7), 2, "batch2-"));
 
-    auto serialized_chunk = cloud_topics::l0::serialize_batches(
-                              std::move(batches))
-                              .get();
+    auto serialized_chunk
+      = cloud_topics::l0::serialize_batches(std::move(batches)).get();
 
     ASSERT_EQ(serialized_chunk.extents.size(), 3);
 
@@ -400,13 +390,23 @@ TEST_F(ct_proxy_pipeline_fixture, test_multiple_batches) {
 
     // Verify each placeholder - offsets start at 1 (after fence at 0)
     EXPECT_GE(placeholder_batches[0].get_base_offset(), 0);
-    EXPECT_GE(placeholder_batches[0].get_last_offset(), placeholder_batches[0].get_base_offset());
+    EXPECT_GE(
+      placeholder_batches[0].get_last_offset(),
+      placeholder_batches[0].get_base_offset());
 
-    EXPECT_GE(placeholder_batches[1].get_base_offset(), placeholder_batches[0].get_last_offset());
-    EXPECT_GE(placeholder_batches[1].get_last_offset(), placeholder_batches[1].get_base_offset());
+    EXPECT_GE(
+      placeholder_batches[1].get_base_offset(),
+      placeholder_batches[0].get_last_offset());
+    EXPECT_GE(
+      placeholder_batches[1].get_last_offset(),
+      placeholder_batches[1].get_base_offset());
 
-    EXPECT_GE(placeholder_batches[2].get_base_offset(), placeholder_batches[1].get_last_offset());
-    EXPECT_GE(placeholder_batches[2].get_last_offset(), placeholder_batches[2].get_base_offset());
+    EXPECT_GE(
+      placeholder_batches[2].get_base_offset(),
+      placeholder_batches[1].get_last_offset());
+    EXPECT_GE(
+      placeholder_batches[2].get_last_offset(),
+      placeholder_batches[2].get_base_offset());
 
     vlog(
       ct_proxy_test_log.info,

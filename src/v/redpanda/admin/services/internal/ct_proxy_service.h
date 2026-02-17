@@ -20,8 +20,7 @@
 
 namespace admin {
 
-class ct_proxy_service_impl
-  : public proto::admin::ct_proxy::ct_proxy_service {
+class ct_proxy_service_impl : public proto::admin::ct_proxy::ct_proxy_service {
 public:
     explicit ct_proxy_service_impl(
       ss::sharded<cluster::partition_manager>* pm,
@@ -34,34 +33,33 @@ public:
       , _epoch_service(epoch_service) {}
 
     seastar::future<proto::admin::ct_proxy::get_cluster_epoch_response>
-    get_cluster_epoch(
-      serde::pb::rpc::context,
-      proto::admin::ct_proxy::get_cluster_epoch_request) override;
+      get_cluster_epoch(
+        serde::pb::rpc::context,
+        proto::admin::ct_proxy::get_cluster_epoch_request) override;
 
     seastar::future<proto::admin::ct_proxy::replicate_placeholders_response>
-    replicate_placeholders(
-      serde::pb::rpc::context,
-      proto::admin::ct_proxy::replicate_placeholders_request) override;
+      replicate_placeholders(
+        serde::pb::rpc::context,
+        proto::admin::ct_proxy::replicate_placeholders_request) override;
 
     seastar::future<proto::admin::ct_proxy::read_placeholders_response>
-    read_placeholders(
-      serde::pb::rpc::context,
-      proto::admin::ct_proxy::read_placeholders_request) override;
+      read_placeholders(
+        serde::pb::rpc::context,
+        proto::admin::ct_proxy::read_placeholders_request) override;
 
     seastar::future<
       proto::admin::ct_proxy::list_cloud_topic_partitions_response>
-    list_cloud_topic_partitions(
-      serde::pb::rpc::context,
-      proto::admin::ct_proxy::list_cloud_topic_partitions_request) override;
+      list_cloud_topic_partitions(
+        serde::pb::rpc::context,
+        proto::admin::ct_proxy::list_cloud_topic_partitions_request) override;
 
     seastar::future<proto::admin::ct_proxy::read_l1_metadata_response>
-    read_l1_metadata(
-      serde::pb::rpc::context,
-      proto::admin::ct_proxy::read_l1_metadata_request) override;
+      read_l1_metadata(
+        serde::pb::rpc::context,
+        proto::admin::ct_proxy::read_l1_metadata_request) override;
 
 private:
-    ss::future<ss::lw_shared_ptr<cluster::partition>>
-    get_partition(const model::ntp& ntp);
+    std::optional<ss::shard_id> get_partition_shard(const model::ntp& ntp);
 
     ss::sharded<cluster::partition_manager>* _partition_manager;
     ss::sharded<cluster::topic_table>* _topic_table;
