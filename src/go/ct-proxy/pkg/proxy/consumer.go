@@ -106,11 +106,13 @@ func (h *ConsumerHandler) handlePartitionFetch(
 
 	if len(placeholders) == 0 {
 		// No data available at this offset
-		return kmsg.FetchResponseTopicPartition{
-			Partition:     req.Partition,
-			ErrorCode:     0,
-			HighWatermark: req.FetchOffset,
-		}
+		emptyResp := kmsg.NewFetchResponseTopicPartition()
+		emptyResp.Partition = req.Partition
+		emptyResp.ErrorCode = 0
+		emptyResp.HighWatermark = req.FetchOffset
+		emptyResp.LastStableOffset = req.FetchOffset
+		emptyResp.LogStartOffset = 0
+		return emptyResp
 	}
 
 	// 2. Fetch L0 objects from S3 and materialize records
@@ -150,9 +152,8 @@ func (h *ConsumerHandler) handlePartitionFetch(
 
 		logger.Debug("deserialized records", zap.Int("count", len(records)))
 
-		// Encode records back to Kafka wire format
-		// Re-encode the records as a batch
-		batchBytes, _, err := l0.CreateL0Object(records)
+		// Encode records as Kafka v2 wire format for the fetch response
+		batchBytes, err := l0.EncodeAsKafkaBatch(records)
 		if err != nil {
 			logger.Error("failed to encode records", zap.Error(err))
 			continue
@@ -162,15 +163,21 @@ func (h *ConsumerHandler) handlePartitionFetch(
 	}
 
 	// 3. Build fetch response
-	// Get high watermark (would need admin API call or cache)
-	highWatermark := req.FetchOffset + int64(len(placeholders))
-
-	return kmsg.FetchResponseTopicPartition{
-		Partition:     req.Partition,
-		ErrorCode:     0,
-		HighWatermark: highWatermark,
-		RecordBatches: allRecordsBytes,
+	// High watermark should be last_offset + 1 (exclusive upper bound)
+	highWatermark := req.FetchOffset
+	if len(placeholders) > 0 {
+		lastPH := placeholders[len(placeholders)-1]
+		highWatermark = lastPH.LastOffset + 1
 	}
+
+	partResp := kmsg.NewFetchResponseTopicPartition()
+	partResp.Partition = req.Partition
+	partResp.ErrorCode = 0
+	partResp.HighWatermark = highWatermark
+	partResp.LastStableOffset = highWatermark
+	partResp.LogStartOffset = 0
+	partResp.RecordBatches = allRecordsBytes
+	return partResp
 }
 
 // placeholderToObjectID converts a placeholder to an object ID.
@@ -197,9 +204,11 @@ func (h *ConsumerHandler) partitionError(
 	partition int32,
 	errorCode int16,
 ) kmsg.FetchResponseTopicPartition {
-	return kmsg.FetchResponseTopicPartition{
-		Partition:     partition,
-		ErrorCode:     errorCode,
-		HighWatermark: -1,
-	}
+	errResp := kmsg.NewFetchResponseTopicPartition()
+	errResp.Partition = partition
+	errResp.ErrorCode = errorCode
+	errResp.HighWatermark = -1
+	errResp.LastStableOffset = -1
+	errResp.LogStartOffset = -1
+	return errResp
 }

@@ -19,9 +19,21 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// Redpanda record batch header constants.
+// Redpanda stores batches with a 61-byte header in little-endian format,
+// which differs from the Kafka v2 wire format (big-endian, different field order).
+const (
+	// redpandaHeaderSize is the size of a Redpanda record batch header on disk.
+	redpandaHeaderSize = 61
+
+	// batchTypeRaftData is the Redpanda record_batch_type for user data.
+	batchTypeRaftData = 1
+)
+
 // CreateL0Object creates an L0 object from Kafka records.
 // Returns the serialized object bytes and extent metadata.
-// The output format matches Redpanda's L0 format: raw Kafka record batches in wire format.
+// The output format matches Redpanda's L0 format: 61-byte little-endian header
+// followed by Kafka v2 varint-encoded record data.
 func CreateL0Object(records []*kgo.Record) ([]byte, *ExtentMeta, error) {
 	if len(records) == 0 {
 		return nil, nil, ErrInvalidPlaceholder
@@ -36,7 +48,7 @@ func CreateL0Object(records []*kgo.Record) ([]byte, *ExtentMeta, error) {
 	//                  offsetDelta(varint) + keyLen(varint) + key + valueLen(varint) + value +
 	//                  headersCount(varint) + headers
 	var recordsData bytes.Buffer
-	for i, record := range records {
+	for _, record := range records {
 		offsetDelta := int32(record.Offset - baseOffset)
 		timestampDelta := record.Timestamp.UnixMilli() - records[0].Timestamp.UnixMilli()
 
@@ -87,66 +99,36 @@ func CreateL0Object(records []*kgo.Record) ([]byte, *ExtentMeta, error) {
 		recordBytes := recordBuf.Bytes()
 		writeVarint(&recordsData, int64(len(recordBytes)))
 		recordsData.Write(recordBytes)
-
-		_ = i // offsetDelta is computed above
 	}
 
-	// Build batch header (61 bytes fixed size)
-	var headerBuf bytes.Buffer
+	recordsBytes := recordsData.Bytes()
 
-	// baseOffset (int64)
-	writeInt64(&headerBuf, baseOffset)
+	// Build Redpanda batch header (61 bytes, little-endian)
+	// Format: header_crc(4) + size_bytes(4) + base_offset(8) + type(1) + crc(4) +
+	//         attrs(2) + last_offset_delta(4) + first_timestamp(8) + max_timestamp(8) +
+	//         producer_id(8) + producer_epoch(2) + base_sequence(4) + record_count(4) = 61
+	header := make([]byte, redpandaHeaderSize)
 
-	// batchLength (int32) - will be updated after we know the size
-	batchLengthPos := headerBuf.Len()
-	writeInt32(&headerBuf, 0) // placeholder
+	// size_bytes includes header size + records data
+	sizeBytes := int32(redpandaHeaderSize + len(recordsBytes))
+	binary.LittleEndian.PutUint32(header[0:4], 0)                                                    // header_crc (placeholder)
+	binary.LittleEndian.PutUint32(header[4:8], uint32(sizeBytes))                                    // size_bytes
+	binary.LittleEndian.PutUint64(header[8:16], uint64(baseOffset))                                  // base_offset
+	header[16] = batchTypeRaftData                                                                    // type
+	binary.LittleEndian.PutUint32(header[17:21], 0)                                                  // crc (placeholder)
+	binary.LittleEndian.PutUint16(header[21:23], 0)                                                  // attrs (no compression)
+	binary.LittleEndian.PutUint32(header[23:27], uint32(int32(lastOffset-baseOffset)))                // last_offset_delta
+	binary.LittleEndian.PutUint64(header[27:35], uint64(records[0].Timestamp.UnixMilli()))            // first_timestamp
+	binary.LittleEndian.PutUint64(header[35:43], uint64(records[len(records)-1].Timestamp.UnixMilli())) // max_timestamp
+	binary.LittleEndian.PutUint64(header[43:51], ^uint64(0))                                         // producer_id (-1)
+	binary.LittleEndian.PutUint16(header[51:53], ^uint16(0))                                         // producer_epoch (-1)
+	binary.LittleEndian.PutUint32(header[53:57], ^uint32(0))                                         // base_sequence (-1)
+	binary.LittleEndian.PutUint32(header[57:61], uint32(len(records)))                               // record_count
 
-	// partitionLeaderEpoch (int32)
-	writeInt32(&headerBuf, -1)
-
-	// magic (int8)
-	headerBuf.WriteByte(2) // Kafka v2 format
-
-	// crc (int32) - will be calculated over attributes through records
-	crcPos := headerBuf.Len()
-	writeInt32(&headerBuf, 0) // placeholder
-
-	// attributes (int16) - bit 0-2: compression (0=none), bit 3: timestampType (0=createTime)
-	writeInt16(&headerBuf, 0)
-
-	// lastOffsetDelta (int32)
-	writeInt32(&headerBuf, int32(lastOffset-baseOffset))
-
-	// firstTimestamp (int64)
-	writeInt64(&headerBuf, records[0].Timestamp.UnixMilli())
-
-	// maxTimestamp (int64)
-	writeInt64(&headerBuf, records[len(records)-1].Timestamp.UnixMilli())
-
-	// producerId (int64)
-	writeInt64(&headerBuf, -1)
-
-	// producerEpoch (int16)
-	writeInt16(&headerBuf, -1)
-
-	// baseSequence (int32)
-	writeInt32(&headerBuf, -1)
-
-	// recordCount (int32)
-	writeInt32(&headerBuf, int32(len(records)))
-
-	// Append records data
-	headerBuf.Write(recordsData.Bytes())
-
-	// Update batchLength (everything after baseOffset field)
-	batchBytes := headerBuf.Bytes()
-	batchLength := len(batchBytes) - 12 // excluding baseOffset (8 bytes) and batchLength (4 bytes)
-	binary.BigEndian.PutUint32(batchBytes[batchLengthPos:], uint32(batchLength))
-
-	// Calculate CRC32-C over attributes through records (everything after CRC field)
-	crcData := batchBytes[crcPos+4:]
-	crc := crc32.Checksum(crcData, crc32.MakeTable(crc32.Castagnoli))
-	binary.BigEndian.PutUint32(batchBytes[crcPos:], crc)
+	// Combine header + records
+	batchBytes := make([]byte, 0, redpandaHeaderSize+len(recordsBytes))
+	batchBytes = append(batchBytes, header...)
+	batchBytes = append(batchBytes, recordsBytes...)
 
 	meta := &ExtentMeta{
 		FirstByteOffset: 0,
@@ -158,7 +140,9 @@ func CreateL0Object(records []*kgo.Record) ([]byte, *ExtentMeta, error) {
 	return batchBytes, meta, nil
 }
 
-// DeserializeL0Object deserializes an L0 object back to Kafka records.
+// DeserializeL0Object deserializes an L0 object written by Redpanda back to Kafka records.
+// Redpanda stores L0 objects with its native record batch header format (61 bytes, little-endian),
+// followed by Kafka v2 record data (varint-encoded).
 func DeserializeL0Object(objectBytes []byte, placeholder *PlaceholderSerde) ([]*kgo.Record, error) {
 	// Extract the byte range specified by the placeholder
 	start := placeholder.Offset
@@ -170,39 +154,28 @@ func DeserializeL0Object(objectBytes []byte, placeholder *PlaceholderSerde) ([]*
 
 	batchBytes := objectBytes[start:end]
 
-	// Parse batch header (61 bytes)
-	if len(batchBytes) < 61 {
+	// Parse Redpanda batch header (61 bytes, little-endian)
+	if len(batchBytes) < redpandaHeaderSize {
 		return nil, fmt.Errorf("batch too small: %d bytes", len(batchBytes))
 	}
 
-	buf := bytes.NewReader(batchBytes)
-
-	// Read header fields
-	baseOffset, _ := readInt64(buf)
-	batchLength, _ := readInt32(buf)
-	partitionLeaderEpoch, _ := readInt32(buf)
-	magic, _ := buf.ReadByte()
-	crc, _ := readInt32(buf)
-	attributes, _ := readInt16(buf)
-	lastOffsetDelta, _ := readInt32(buf)
-	firstTimestamp, _ := readInt64(buf)
-	maxTimestamp, _ := readInt64(buf)
-	producerId, _ := readInt64(buf)
-	producerEpoch, _ := readInt16(buf)
-	baseSequence, _ := readInt32(buf)
-	recordCount, _ := readInt32(buf)
-
-	_ = batchLength
-	_ = partitionLeaderEpoch
-	_ = crc
-	_ = maxTimestamp
-	_ = producerId
-	_ = producerEpoch
-	_ = baseSequence
-
-	if magic != 2 {
-		return nil, fmt.Errorf("unsupported magic byte: %d", magic)
-	}
+	// Read Redpanda header fields in little-endian order:
+	// header_crc(4) + size_bytes(4) + base_offset(8) + type(1) + crc(4) +
+	// attrs(2) + last_offset_delta(4) + first_timestamp(8) + max_timestamp(8) +
+	// producer_id(8) + producer_epoch(2) + base_sequence(4) + record_count(4) = 61
+	_ = binary.LittleEndian.Uint32(batchBytes[0:4])   // header_crc
+	_ = int32(binary.LittleEndian.Uint32(batchBytes[4:8]))   // size_bytes
+	baseOffset := int64(binary.LittleEndian.Uint64(batchBytes[8:16]))
+	_ = batchBytes[16]                                        // type (1 = raft_data)
+	_ = binary.LittleEndian.Uint32(batchBytes[17:21])         // crc
+	attributes := int16(binary.LittleEndian.Uint16(batchBytes[21:23]))
+	_ = int32(binary.LittleEndian.Uint32(batchBytes[23:27]))  // last_offset_delta
+	firstTimestamp := int64(binary.LittleEndian.Uint64(batchBytes[27:35]))
+	_ = int64(binary.LittleEndian.Uint64(batchBytes[35:43]))  // max_timestamp
+	_ = int64(binary.LittleEndian.Uint64(batchBytes[43:51]))  // producer_id
+	_ = int16(binary.LittleEndian.Uint16(batchBytes[51:53]))  // producer_epoch
+	_ = int32(binary.LittleEndian.Uint32(batchBytes[53:57]))  // base_sequence
+	recordCount := int32(binary.LittleEndian.Uint32(batchBytes[57:61]))
 
 	// Check for compression
 	compressionType := attributes & 0x07
@@ -210,7 +183,10 @@ func DeserializeL0Object(objectBytes []byte, placeholder *PlaceholderSerde) ([]*
 		return nil, fmt.Errorf("compressed batches not yet supported: type=%d", compressionType)
 	}
 
-	// Parse records
+	// Record data starts after the 61-byte header
+	buf := bytes.NewReader(batchBytes[redpandaHeaderSize:])
+
+	// Parse records (Kafka v2 varint format)
 	records := make([]*kgo.Record, 0, recordCount)
 	for i := int32(0); i < recordCount; i++ {
 		// Read record length
@@ -308,24 +284,111 @@ func DeserializeL0Object(objectBytes []byte, placeholder *PlaceholderSerde) ([]*
 		}
 	}
 
-	_ = lastOffsetDelta // used for validation above
-
 	return records, nil
 }
 
+// EncodeAsKafkaBatch encodes records as a Kafka v2 record batch in wire format (big-endian).
+// This is used when sending records back to Kafka clients in fetch responses.
+func EncodeAsKafkaBatch(records []*kgo.Record) ([]byte, error) {
+	if len(records) == 0 {
+		return nil, ErrInvalidPlaceholder
+	}
+
+	baseOffset := records[0].Offset
+	lastOffset := records[len(records)-1].Offset
+	firstTimestamp := records[0].Timestamp.UnixMilli()
+	maxTimestamp := records[len(records)-1].Timestamp.UnixMilli()
+
+	// Build record data (varint-encoded, same as Kafka v2)
+	var recordsData bytes.Buffer
+	for _, record := range records {
+		offsetDelta := int32(record.Offset - baseOffset)
+		timestampDelta := record.Timestamp.UnixMilli() - firstTimestamp
+
+		var recordBuf bytes.Buffer
+		recordBuf.WriteByte(0) // attributes
+		writeVarint(&recordBuf, timestampDelta)
+		writeVarint(&recordBuf, int64(offsetDelta))
+
+		if record.Key == nil {
+			writeVarint(&recordBuf, -1)
+		} else {
+			writeVarint(&recordBuf, int64(len(record.Key)))
+			recordBuf.Write(record.Key)
+		}
+
+		if record.Value == nil {
+			writeVarint(&recordBuf, -1)
+		} else {
+			writeVarint(&recordBuf, int64(len(record.Value)))
+			recordBuf.Write(record.Value)
+		}
+
+		writeVarint(&recordBuf, int64(len(record.Headers)))
+		for _, header := range record.Headers {
+			writeVarint(&recordBuf, int64(len(header.Key)))
+			recordBuf.WriteString(header.Key)
+			if header.Value == nil {
+				writeVarint(&recordBuf, -1)
+			} else {
+				writeVarint(&recordBuf, int64(len(header.Value)))
+				recordBuf.Write(header.Value)
+			}
+		}
+
+		recordBytes := recordBuf.Bytes()
+		writeVarint(&recordsData, int64(len(recordBytes)))
+		recordsData.Write(recordBytes)
+	}
+
+	recordsBytes := recordsData.Bytes()
+
+	// Kafka v2 batch header (big-endian):
+	// baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1) + crc(4) +
+	// attributes(2) + lastOffsetDelta(4) + firstTimestamp(8) + maxTimestamp(8) +
+	// producerId(8) + producerEpoch(2) + baseSequence(4) + recordCount(4) = 61
+
+	// Build header + records
+	totalSize := 61 + len(recordsBytes)
+	buf := make([]byte, totalSize)
+
+	// baseOffset (int64 BE)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(baseOffset))
+	// batchLength (int32 BE) = total - baseOffset(8) - batchLength(4) = total - 12
+	binary.BigEndian.PutUint32(buf[8:12], uint32(totalSize-12))
+	// partitionLeaderEpoch (int32 BE)
+	binary.BigEndian.PutUint32(buf[12:16], 0xFFFFFFFF) // -1
+	// magic (int8)
+	buf[16] = 2 // Kafka v2
+	// crc placeholder - will be computed below
+	// attributes (int16 BE)
+	binary.BigEndian.PutUint16(buf[21:23], 0)
+	// lastOffsetDelta (int32 BE)
+	binary.BigEndian.PutUint32(buf[23:27], uint32(int32(lastOffset-baseOffset)))
+	// firstTimestamp (int64 BE)
+	binary.BigEndian.PutUint64(buf[27:35], uint64(firstTimestamp))
+	// maxTimestamp (int64 BE)
+	binary.BigEndian.PutUint64(buf[35:43], uint64(maxTimestamp))
+	// producerId (int64 BE)
+	binary.BigEndian.PutUint64(buf[43:51], 0xFFFFFFFFFFFFFFFF) // -1
+	// producerEpoch (int16 BE)
+	binary.BigEndian.PutUint16(buf[51:53], 0xFFFF) // -1
+	// baseSequence (int32 BE)
+	binary.BigEndian.PutUint32(buf[53:57], 0xFFFFFFFF) // -1
+	// recordCount (int32 BE)
+	binary.BigEndian.PutUint32(buf[57:61], uint32(len(records)))
+
+	// Copy records data
+	copy(buf[61:], recordsBytes)
+
+	// Compute CRC32-C over everything from attributes through end (offset 21 to end)
+	crc := crc32.Checksum(buf[21:], crc32.MakeTable(crc32.Castagnoli))
+	binary.BigEndian.PutUint32(buf[17:21], crc)
+
+	return buf, nil
+}
+
 // Helper functions for encoding
-
-func writeInt64(buf *bytes.Buffer, val int64) {
-	binary.Write(buf, binary.BigEndian, val)
-}
-
-func writeInt32(buf *bytes.Buffer, val int32) {
-	binary.Write(buf, binary.BigEndian, val)
-}
-
-func writeInt16(buf *bytes.Buffer, val int16) {
-	binary.Write(buf, binary.BigEndian, val)
-}
 
 func writeVarint(buf *bytes.Buffer, val int64) {
 	// ZigZag encoding for signed integers
@@ -338,24 +401,6 @@ func writeVarint(buf *bytes.Buffer, val int64) {
 }
 
 // Helper functions for decoding
-
-func readInt64(buf *bytes.Reader) (int64, error) {
-	var val int64
-	err := binary.Read(buf, binary.BigEndian, &val)
-	return val, err
-}
-
-func readInt32(buf *bytes.Reader) (int32, error) {
-	var val int32
-	err := binary.Read(buf, binary.BigEndian, &val)
-	return val, err
-}
-
-func readInt16(buf *bytes.Reader) (int16, error) {
-	var val int16
-	err := binary.Read(buf, binary.BigEndian, &val)
-	return val, err
-}
 
 func readVarint(buf *bytes.Reader) (int64, error) {
 	var uval uint64
