@@ -406,3 +406,15 @@ class CtProxyService(BackgroundThreadService):
         from rptest.services.redpanda_types import PLAINTEXT_SECURITY
 
         return PLAINTEXT_SECURITY
+
+    def wait_until(self, fn, timeout_sec, backoff_sec, err_msg="",
+                   retry_on_exc=False):
+        """Wrapper around ducktape wait_until for RedpandaServiceForClients compatibility."""
+        from ducktape.utils.util import wait_until as du_wait_until
+        du_wait_until(
+            fn,
+            timeout_sec=timeout_sec,
+            backoff_sec=backoff_sec,
+            err_msg=err_msg,
+            retry_on_exc=retry_on_exc,
+        )

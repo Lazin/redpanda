@@ -13,6 +13,10 @@ from rptest.clients.rpk import RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
 from rptest.services.ct_proxy import CtProxyService
+from rptest.services.kgo_verifier_services import (
+    KgoVerifierProducer,
+    KgoVerifierSeqConsumer,
+)
 from rptest.services.redpanda import (
     CLOUD_TOPICS_CONFIG_STR,
     SISettings,
@@ -389,4 +393,107 @@ class CtProxySmokeTest(RedpandaTest):
         self.logger.info(
             "ct-proxy write path test passed: "
             "produce via ct-proxy, consume via Redpanda"
+        )
+
+    @cluster(num_nodes=6)  # 3 Redpanda + 1 ct-proxy + 1 producer + 1 consumer
+    def test_ct_proxy_produce_consume_kgo_verifier(self):
+        """
+        Test ct-proxy produce and consume using KgoVerifier.
+
+        Uses KgoVerifier to produce and consume multiple messages through
+        ct-proxy's Kafka endpoint. This validates that ct-proxy correctly
+        handles batched produce requests and sequential consumption with
+        data integrity verification.
+        """
+        # Get cloud storage settings
+        bucket = self.si_settings.cloud_storage_bucket
+        endpoint_url = self.si_settings.endpoint_url
+        access_key = self.si_settings.cloud_storage_access_key
+        secret_key = self.si_settings.cloud_storage_secret_key
+
+        # Start ct-proxy service
+        self.ct_proxy = CtProxyService(
+            context=self.test_context,
+            redpanda=self.redpanda,
+            topic=self.CLOUD_TOPIC_NAME,
+            cloud_storage_bucket=bucket,
+            cloud_storage_region=self.si_settings.cloud_storage_region,
+            cloud_storage_endpoint=endpoint_url,
+            cloud_storage_access_key=access_key,
+            cloud_storage_secret_key=secret_key,
+            log_level="debug",
+        )
+
+        self.logger.info("Starting ct-proxy service")
+        try:
+            self.ct_proxy.start()
+        except FileNotFoundError as e:
+            self.logger.error(f"ct-proxy binary not found: {e}")
+            raise RuntimeError(
+                "ct-proxy binary not installed on test nodes. "
+                "Ensure ct-proxy is built and deployed to the test environment. "
+                "Build with: bazel build //:ct-proxy"
+            ) from e
+
+        self.ct_proxy.wait_ready(timeout_sec=60)
+        self.logger.info(
+            f"ct-proxy is ready, Kafka endpoint: {self.ct_proxy.brokers()}"
+        )
+
+        msg_size = 1024
+        msg_count = 100
+
+        # Produce messages through ct-proxy using KgoVerifier
+        producer = KgoVerifierProducer(
+            self.test_context,
+            self.ct_proxy,
+            self.CLOUD_TOPIC_NAME,
+            msg_size,
+            msg_count,
+        )
+        producer.start()
+        producer.wait(timeout_sec=60)
+        producer.stop()
+
+        self.logger.info(
+            f"KgoVerifier producer finished: "
+            f"sent={producer.produce_status.sent}, "
+            f"acked={producer.produce_status.acked}, "
+            f"bad_offsets={producer.produce_status.bad_offsets}"
+        )
+
+        assert producer.produce_status.acked == msg_count, (
+            f"Expected {msg_count} acked, got {producer.produce_status.acked}"
+        )
+
+        # Consume messages through ct-proxy using KgoVerifier
+        consumer = KgoVerifierSeqConsumer(
+            self.test_context,
+            self.ct_proxy,
+            self.CLOUD_TOPIC_NAME,
+            msg_size,
+            max_msgs=msg_count,
+            loop=False,
+        )
+        consumer.start(clean=True)
+        consumer.wait(timeout_sec=60)
+        consumer.stop()
+
+        self.logger.info(
+            f"KgoVerifier consumer finished: "
+            f"valid_reads={consumer.consumer_status.validator.valid_reads}, "
+            f"invalid_reads={consumer.consumer_status.validator.invalid_reads}"
+        )
+
+        assert consumer.consumer_status.validator.valid_reads >= msg_count, (
+            f"Expected at least {msg_count} valid reads, "
+            f"got {consumer.consumer_status.validator.valid_reads}"
+        )
+        assert consumer.consumer_status.validator.invalid_reads == 0, (
+            f"Expected 0 invalid reads, "
+            f"got {consumer.consumer_status.validator.invalid_reads}"
+        )
+
+        self.logger.info(
+            "ct-proxy KgoVerifier produce/consume test passed"
         )
