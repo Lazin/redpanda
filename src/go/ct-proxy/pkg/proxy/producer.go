@@ -168,10 +168,15 @@ func (h *ProducerHandler) handlePartitionProduce(
 		zap.Int64("term", term))
 
 	// 6. Return success response
+	// BaseOffset is the Kafka offset of the first record in the batch.
+	// ReplicatePlaceholders returns the last offset, so compute base as:
+	// base = last - (record_count - 1)
+	baseOffset := lastOffset - int64(len(records)) + 1
+
 	return kmsg.ProduceResponseTopicPartition{
 		Partition:     req.Partition,
 		ErrorCode:     0,
-		BaseOffset:    lastOffset,
+		BaseOffset:    baseOffset,
 		LogAppendTime: -1, // Not used
 	}
 }

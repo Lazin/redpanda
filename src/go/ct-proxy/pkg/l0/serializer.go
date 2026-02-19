@@ -481,8 +481,8 @@ func EncodeAsKafkaBatch(records []*kgo.Record) ([]byte, error) {
 	binary.BigEndian.PutUint64(buf[0:8], uint64(baseOffset))
 	// batchLength (int32 BE) = total - baseOffset(8) - batchLength(4) = total - 12
 	binary.BigEndian.PutUint32(buf[8:12], uint32(totalSize-12))
-	// partitionLeaderEpoch (int32 BE)
-	binary.BigEndian.PutUint32(buf[12:16], 0xFFFFFFFF) // -1
+	// partitionLeaderEpoch (int32 BE) - use 0 (valid epoch)
+	binary.BigEndian.PutUint32(buf[12:16], 0)
 	// magic (int8)
 	buf[16] = 2 // Kafka v2
 	// crc placeholder - will be computed below
