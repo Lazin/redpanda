@@ -287,6 +287,131 @@ func DeserializeL0Object(objectBytes []byte, placeholder *PlaceholderSerde) ([]*
 	return records, nil
 }
 
+// DeserializeKafkaBatch deserializes a Kafka v2 record batch (big-endian) to records.
+// This is used when parsing incoming produce requests from Kafka clients.
+func DeserializeKafkaBatch(batchBytes []byte) ([]*kgo.Record, error) {
+	if len(batchBytes) < 61 {
+		return nil, fmt.Errorf("batch too small: %d bytes", len(batchBytes))
+	}
+
+	// Kafka v2 header (big-endian):
+	// baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1) + crc(4) +
+	// attributes(2) + lastOffsetDelta(4) + firstTimestamp(8) + maxTimestamp(8) +
+	// producerId(8) + producerEpoch(2) + baseSequence(4) + recordCount(4) = 61
+	baseOffset := int64(binary.BigEndian.Uint64(batchBytes[0:8]))
+	// batchLength at [8:12]
+	// partitionLeaderEpoch at [12:16]
+	magic := batchBytes[16]
+	// crc at [17:21]
+	attributes := int16(binary.BigEndian.Uint16(batchBytes[21:23]))
+	// lastOffsetDelta at [23:27]
+	firstTimestamp := int64(binary.BigEndian.Uint64(batchBytes[27:35]))
+	// maxTimestamp at [35:43]
+	// producerId at [43:51]
+	// producerEpoch at [51:53]
+	// baseSequence at [53:57]
+	recordCount := int32(binary.BigEndian.Uint32(batchBytes[57:61]))
+
+	if magic != 2 {
+		return nil, fmt.Errorf("unsupported magic byte: %d (expected Kafka v2)", magic)
+	}
+
+	compressionType := attributes & 0x07
+	if compressionType != 0 {
+		return nil, fmt.Errorf("compressed batches not yet supported: type=%d", compressionType)
+	}
+
+	buf := bytes.NewReader(batchBytes[61:])
+
+	records := make([]*kgo.Record, 0, recordCount)
+	for i := int32(0); i < recordCount; i++ {
+		recordLen, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read record length: %w", err)
+		}
+
+		recordStart := buf.Len()
+
+		_, _ = buf.ReadByte() // attributes
+
+		timestampDelta, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read timestampDelta: %w", err)
+		}
+
+		offsetDelta, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read offsetDelta: %w", err)
+		}
+
+		keyLen, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read keyLen: %w", err)
+		}
+		var key []byte
+		if keyLen >= 0 {
+			key = make([]byte, keyLen)
+			buf.Read(key)
+		}
+
+		valueLen, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read valueLen: %w", err)
+		}
+		var value []byte
+		if valueLen >= 0 {
+			value = make([]byte, valueLen)
+			buf.Read(value)
+		}
+
+		headersCount, err := readVarint(buf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read headersCount: %w", err)
+		}
+		var headers []kgo.RecordHeader
+		for j := int64(0); j < headersCount; j++ {
+			headerKeyLen, err := readVarint(buf)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read headerKeyLen: %w", err)
+			}
+			headerKey := make([]byte, headerKeyLen)
+			buf.Read(headerKey)
+
+			headerValueLen, err := readVarint(buf)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read headerValueLen: %w", err)
+			}
+			var headerValue []byte
+			if headerValueLen >= 0 {
+				headerValue = make([]byte, headerValueLen)
+				buf.Read(headerValue)
+			}
+
+			headers = append(headers, kgo.RecordHeader{
+				Key:   string(headerKey),
+				Value: headerValue,
+			})
+		}
+
+		record := &kgo.Record{
+			Key:       key,
+			Value:     value,
+			Headers:   headers,
+			Offset:    baseOffset + offsetDelta,
+			Timestamp: time.UnixMilli(firstTimestamp + timestampDelta),
+		}
+		records = append(records, record)
+
+		recordEnd := buf.Len()
+		consumed := recordStart - recordEnd
+		if int64(consumed) != recordLen {
+			return nil, fmt.Errorf("record length mismatch: expected %d, got %d", recordLen, consumed)
+		}
+	}
+
+	return records, nil
+}
+
 // EncodeAsKafkaBatch encodes records as a Kafka v2 record batch in wire format (big-endian).
 // This is used when sending records back to Kafka clients in fetch responses.
 func EncodeAsKafkaBatch(records []*kgo.Record) ([]byte, error) {

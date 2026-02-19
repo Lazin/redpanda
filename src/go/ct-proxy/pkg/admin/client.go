@@ -135,8 +135,11 @@ func (c *Client) callRPC(ctx context.Context, method string, req proto.Message, 
 			continue
 		}
 
-		// Check for errors - retry on 404 (partition on different shard)
-		if httpResp.StatusCode == http.StatusNotFound {
+		// Check for errors - retry on 404 (partition on different node),
+		// 500 (internal error, e.g. not leader), 503 (unavailable/not leader)
+		if httpResp.StatusCode == http.StatusNotFound ||
+			httpResp.StatusCode == http.StatusInternalServerError ||
+			httpResp.StatusCode == http.StatusServiceUnavailable {
 			lastErr = fmt.Errorf("RPC to %s failed with status %d: %s", baseURL, httpResp.StatusCode, string(respBody))
 			continue
 		}

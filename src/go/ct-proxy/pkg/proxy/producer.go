@@ -187,15 +187,8 @@ func (h *ProducerHandler) parseRecords(recordsBytes []byte) ([]*kgo.Record, erro
 		zap.Int("bytes_len", len(recordsBytes)),
 		zap.Binary("first_bytes", recordsBytes[:min(len(recordsBytes), 32)]))
 
-	// The recordsBytes contain one or more record batches in Kafka wire format.
-	// We'll use l0.DeserializeL0Object to parse them since it handles the same format.
-	// Create a placeholder that spans the entire buffer
-	placeholder := &l0.PlaceholderSerde{
-		Offset:    0,
-		SizeBytes: uint64(len(recordsBytes)),
-	}
-
-	records, err := l0.DeserializeL0Object(recordsBytes, placeholder)
+	// The recordsBytes contain one or more record batches in Kafka v2 wire format (big-endian).
+	records, err := l0.DeserializeKafkaBatch(recordsBytes)
 	if err != nil {
 		h.logger.Error("parseRecords: failed to deserialize",
 			zap.Error(err),
