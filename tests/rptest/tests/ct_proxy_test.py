@@ -68,7 +68,7 @@ class CtProxySmokeTest(RedpandaTest):
             partitions=1,
             replicas=3,
             config={
-                "redpanda.cloud_topic.enabled": "true",
+                "redpanda.storage.mode": "cloud",
             },
         )
         self.logger.info(f"Created cloud topic: {self.CLOUD_TOPIC_NAME}")
