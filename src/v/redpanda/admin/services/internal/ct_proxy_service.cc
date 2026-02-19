@@ -182,7 +182,19 @@ ct_proxy_service_impl::replicate_placeholders(
           auto ctp_api = ss::make_lw_shared<cloud_topics::ctp_stm_api>(stm);
 
           // Perform RW-fence with expected cluster epoch
-          auto fence_result = co_await ctp_api->fence_epoch(expected_epoch);
+          std::expected<cloud_topics::cluster_epoch_fence, cloud_topics::stale_cluster_epoch>
+            fence_result;
+          try {
+              fence_result = co_await ctp_api->fence_epoch(expected_epoch);
+          } catch (const std::runtime_error& e) {
+              // fence_epoch throws runtime_error on sync timeout, which
+              // typically means this node is not the leader for the
+              // partition.
+              co_return replicate_result{
+                .success = false,
+                .error_msg = fmt::format(
+                  "not leader for partition: {}", e.what())};
+          }
 
           if (!fence_result) {
               co_return replicate_result{
@@ -260,6 +272,9 @@ ct_proxy_service_impl::replicate_placeholders(
         } else if (
           result.error_msg == "fencing failed - cluster epoch mismatch") {
             throw serde::pb::rpc::invalid_argument_exception(result.error_msg);
+        } else if (result.error_msg.starts_with("not leader for partition")) {
+            // Node is not the leader - client should retry on another node
+            throw serde::pb::rpc::unavailable_exception(result.error_msg);
         } else {
             throw serde::pb::rpc::unavailable_exception(result.error_msg);
         }
