@@ -288,7 +288,7 @@ ct_proxy_service_impl::read_placeholders(
     }
 
     // Create log reader config
-    size_t max_bytes = req.get_max_bytes() > 0
+    size_t max_bytes = req.has_max_bytes()
                          ? req.get_max_bytes()
                          : std::numeric_limits<size_t>::max();
 
@@ -336,7 +336,16 @@ ct_proxy_service_impl::read_placeholders(
                   continue;
               }
 
-              // Parse placeholder from batch
+              // Save batch header info before moving batch
+              auto base_offset = batch.base_offset();
+              auto last_offset = batch.last_offset();
+              auto record_count = batch.record_count();
+              auto is_transactional
+                = batch.header().attrs.is_transactional();
+              auto producer_id = batch.header().producer_id;
+              auto producer_epoch = batch.header().producer_epoch;
+
+              // Parse placeholder from batch (consumes batch)
               auto placeholder = cloud_topics::parse_placeholder_batch(
                 std::move(batch));
 
@@ -359,22 +368,19 @@ ct_proxy_service_impl::read_placeholders(
               proto_ph.set_first_byte_offset(placeholder.offset());
               proto_ph.set_byte_range_size(placeholder.size_bytes());
 
-              // Calculate base/last offsets from batch header
-              auto base_offset = batch.base_offset();
-              auto last_offset = batch.last_offset();
               proto_ph.set_base_offset(model::offset_cast(base_offset)());
               proto_ph.set_last_offset(model::offset_cast(last_offset)());
 
               // Set batch metadata
               proto_batch.set_base_offset(model::offset_cast(base_offset)());
               proto_batch.set_last_offset(model::offset_cast(last_offset)());
-              proto_batch.set_record_count(batch.record_count());
+              proto_batch.set_record_count(record_count);
 
               // Producer metadata
-              if (batch.header().attrs.is_transactional()) {
+              if (is_transactional) {
                   proto_batch.set_is_transactional(true);
-                  proto_batch.set_producer_id(batch.header().producer_id);
-                  proto_batch.set_producer_epoch(batch.header().producer_epoch);
+                  proto_batch.set_producer_id(producer_id);
+                  proto_batch.set_producer_epoch(producer_epoch);
               }
 
               // Add to response
@@ -417,7 +423,7 @@ ct_proxy_service_impl::list_cloud_topic_partitions(
         const auto& metadata = metadata_opt->get();
 
         // Check if this is a cloud topic
-        if (!metadata.get_configuration().properties.cloud_topic_enabled) {
+        if (!metadata.get_configuration().is_cloud_topic()) {
             vlog(
               ctplog.debug,
               "list_cloud_topic_partitions: topic {} is not a cloud topic",
