@@ -12,6 +12,49 @@
 
 ---
 
+### Task 0: Add `get_range()` Accessor to `batch_cache_index`
+
+**Files:**
+- Modify: `src/v/storage/batch_cache.h`
+
+**Step 1: Add `get_range()` method to `batch_cache_index`**
+
+Add this public method to `storage::batch_cache_index` (after the existing
+`get()` method):
+
+```cpp
+/// Return a weak_ptr to the range holding the batch at the given offset.
+/// Returns an empty weak_ptr if the offset is not in the index.
+batch_cache::range_ptr get_range(model::offset o) const {
+    auto it = _index.find(o);
+    if (it == _index.end()) {
+        return {};
+    }
+    return it->second.range();
+}
+```
+
+This is needed by `raw_object_cache` to store a `range_ptr` alongside each
+cached object, enabling cheap detection of LRU eviction without calling
+`_index.get()`.
+
+**Step 2: Build to verify**
+
+Run: `bazel build //src/v/storage:batch_cache`
+Expected: BUILD SUCCESS
+
+**Step 3: Commit**
+
+```bash
+git add src/v/storage/batch_cache.h
+git commit -m "storage/cache: add get_range() accessor to batch_cache_index
+
+Returns a weak_ptr to the range at a given offset. Needed
+by raw_object_cache to detect LRU eviction."
+```
+
+---
+
 ### Task 1: Create `raw_object_cache` Header
 
 **Files:**
@@ -82,15 +125,22 @@ public:
     /// Number of cached objects.
     size_t object_count() const;
 
+    /// Remove stale entries whose underlying range was evicted by
+    /// memory pressure. Call periodically to keep accounting accurate.
+    void cleanup_stale_entries();
+
 private:
     struct object_entry {
         model::offset synthetic_offset;
+        storage::batch_cache::range_ptr range;  // weak_ptr to detect eviction
         size_t total_size;
         size_t bytes_consumed{0};
     };
 
     void evict_entry(
       absl::node_hash_map<object_id, object_entry>::iterator it);
+
+    bool is_entry_valid(const object_entry& entry) const;
 
     storage::batch_cache_index _index;
     model::offset _next_offset{0};
@@ -167,10 +217,12 @@ bool raw_object_cache::put(const object_id& id, iobuf data) {
 
     _index.put(batch, storage::batch_cache::is_dirty_entry::no);
 
+    auto range = _index.get_range(offset);
     _objects.emplace(
       id,
       object_entry{
         .synthetic_offset = offset,
+        .range = std::move(range),
         .total_size = sz,
       });
     _total_bytes += sz;
@@ -188,9 +240,16 @@ std::optional<iobuf> raw_object_cache::get_extent(
     }
 
     auto& entry = it->second;
+
+    // Check weak_ptr first — cheap detection of LRU eviction.
+    if (!is_entry_valid(entry)) {
+        _total_bytes -= entry.total_size;
+        _objects.erase(it);
+        return std::nullopt;
+    }
+
     auto batch = _index.get(entry.synthetic_offset);
     if (!batch.has_value()) {
-        // Range was evicted by memory pressure. Clean up the side map.
         _total_bytes -= entry.total_size;
         _objects.erase(it);
         return std::nullopt;
@@ -240,6 +299,21 @@ void raw_object_cache::evict_entry(
 size_t raw_object_cache::size_bytes() const { return _total_bytes; }
 
 size_t raw_object_cache::object_count() const { return _objects.size(); }
+
+bool raw_object_cache::is_entry_valid(const object_entry& entry) const {
+    return entry.range && entry.range->valid();
+}
+
+void raw_object_cache::cleanup_stale_entries() {
+    for (auto it = _objects.begin(); it != _objects.end();) {
+        if (!is_entry_valid(it->second)) {
+            _total_bytes -= it->second.total_size;
+            _objects.erase(it++);
+        } else {
+            ++it;
+        }
+    }
+}
 
 } // namespace cloud_topics
 ```

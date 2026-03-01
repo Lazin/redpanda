@@ -60,9 +60,9 @@ class raw_object_cache {
 
     struct object_entry {
         model::offset synthetic_offset;
+        storage::batch_cache::range_ptr range;  // weak_ptr to underlying range
         size_t total_size;
         size_t bytes_consumed{0};
-        model::cluster_epoch epoch;
     };
     absl::node_hash_map<object_id, object_entry> _objects;
 };
@@ -106,6 +106,32 @@ On retrieval via `_index.get(synthetic_offset)`, the records iobuf is extracted
 from the returned `record_batch` and the requested byte range is shared out via
 `iobuf::share()`.
 
+### Stale Entry Detection
+
+Each `object_entry` stores a `batch_cache::range_ptr` (weak_ptr to the
+underlying range). When the Seastar memory reclaimer evicts a range, the
+weak_ptr becomes invalid. This allows `raw_object_cache` to detect eviction:
+
+- **On access:** `get_extent()` checks `entry.range` validity before calling
+  `_index.get()`. If invalid, removes the stale entry from `_objects` and
+  returns nullopt.
+- **Periodic sweep:** A cleanup method iterates `_objects` and removes entries
+  with invalid range pointers, keeping `_total_bytes` and `object_count()`
+  accurate.
+
+To obtain the `range_ptr` after insertion, a new `get_range(model::offset)`
+accessor is added to `storage::batch_cache_index`:
+
+```cpp
+batch_cache::range_ptr get_range(model::offset o) const {
+    auto it = _index.find(o);
+    if (it == _index.end()) {
+        return {};
+    }
+    return it->second.range();
+}
+```
+
 ### Reader Integration
 
 Changes to `materialize()` in `materialized_extent.cc`:
@@ -126,9 +152,11 @@ the same L0 object.
 ### Eviction Flows
 
 **LRU (memory pressure):** Automatic via Seastar reclaimer. The batch_cache
-range holding the L0 data is evicted like any other range. On next access,
-`_index.get()` returns nullopt (weak_ptr invalidated), `get_extent()` returns
-nullopt, reader falls back to S3 download.
+range holding the L0 data is evicted like any other range. The `range_ptr`
+(weak_ptr) in `object_entry` becomes invalid. On next access, `get_extent()`
+detects this, cleans up the stale `_objects` entry, and returns nullopt. The
+reader falls back to S3 download. A periodic sweep also cleans stale entries
+to keep accounting accurate even without access.
 
 **Consumption (read-once):** After `get_extent()` increments `bytes_consumed`
 past `total_size`, the object is evicted from both `_objects` map and `_index`.
