@@ -18,9 +18,12 @@ eliminating disk I/O on the read path entirely.
 
 ## Design Decisions
 
-- **Granularity:** Store whole L0 objects (not per-extent chunks). Simpler,
-  avoids re-downloading when multiple partitions need data from the same
-  object.
+- **Granularity:** Split each L0 object into fixed-size chunks (128 KiB).
+  Each chunk is stored as a separate `record_batch` in the batch_cache,
+  giving per-chunk LRU eviction. This avoids the extremes of whole-object
+  storage (too coarse for effective eviction) and per-record-batch storage
+  (too many index entries). If a `get_extent()` call spans a chunk boundary,
+  it reads from both chunks and concatenates.
 - **Index:** Do not use `batch_cache_index` as the primary lookup. Use a
   separate `object_id -> entry` map. However, use a `batch_cache_index`
   internally as the adapter to plug into `storage::batch_cache`'s LRU and
@@ -54,19 +57,31 @@ Location: `src/v/cloud_topics/batch_cache/raw_object_cache.{h,cc}`
 Per-shard cache storing whole L0 objects downloaded from cloud storage.
 
 ```cpp
+static constexpr size_t chunk_size = 128_KiB;
+
 class raw_object_cache {
     storage::batch_cache_index _index;  // Adapter into batch_cache LRU
     model::offset _next_offset{0};      // Monotonic synthetic offset counter
 
-    struct object_entry {
+    struct chunk_entry {
         model::offset synthetic_offset;
-        storage::batch_cache::range_ptr range;  // weak_ptr to underlying range
+        storage::batch_cache::range_ptr range;  // weak_ptr to detect eviction
+        size_t size;                            // Actual size (last chunk may be smaller)
+    };
+
+    struct object_entry {
+        std::vector<chunk_entry> chunks;  // Ordered by L0 byte position
         size_t total_size;
         size_t bytes_consumed{0};
     };
     absl::node_hash_map<object_id, object_entry> _objects;
 };
 ```
+
+Each L0 object is split into `ceil(total_size / chunk_size)` chunks. Chunks
+are stored as separate `record_batch` entries in the `batch_cache_index`,
+each with its own synthetic offset and LRU range. This enables per-chunk
+eviction under memory pressure.
 
 ### Public Interface
 
@@ -95,16 +110,31 @@ void evict(const object_id& id);
 size_t size_bytes() const;
 ```
 
-### Record Batch Wrapping
+### Chunk Storage
 
-L0 objects are wrapped in a `model::record_batch` for storage via
-`batch_cache_index::put()`. The records payload of the batch is the raw L0
-iobuf. Overhead is one `record_batch_header` (~60 bytes) per object, negligible
-for objects typically hundreds of KiB to MiB.
+Each 128 KiB chunk is wrapped in a `model::record_batch` for storage via
+`batch_cache_index::put()`. The records payload of the batch is the raw chunk
+iobuf. Overhead is one `record_batch_header` (~60 bytes) per chunk. For a
+typical 1 MiB L0 object this means 8 chunks and ~480 bytes overhead.
 
-On retrieval via `_index.get(synthetic_offset)`, the records iobuf is extracted
-from the returned `record_batch` and the requested byte range is shared out via
-`iobuf::share()`.
+On retrieval, the chunk index is computed as `byte_offset / chunk_size`. If
+the requested byte range spans a chunk boundary, both chunks are read and
+the relevant portions concatenated into the result iobuf.
+
+```
+get_extent(id, offset=140KiB, size=20KiB):
+  chunk 1 (128-256KiB): read bytes 12KiB..128KiB  → 116KiB  (wait, no)
+```
+
+Example: `get_extent(id, offset=140KiB, size=20KiB)`:
+- first_chunk = 140 / 128 = 1 (covers bytes 128-256KiB)
+- last_chunk  = (140+20-1) / 128 = 1 (same chunk)
+- Read from chunk 1, share bytes at local offset 12KiB, length 20KiB
+
+Example: `get_extent(id, offset=120KiB, size=20KiB)`:
+- first_chunk = 120 / 128 = 0 (covers bytes 0-128KiB)
+- last_chunk  = (120+20-1) / 128 = 1 (covers bytes 128-256KiB)
+- Read 8KiB from end of chunk 0, 12KiB from start of chunk 1, concatenate
 
 ### Stale Entry Detection
 
@@ -155,12 +185,12 @@ the same L0 object.
 
 ### Eviction Flows
 
-**LRU (memory pressure):** Automatic via Seastar reclaimer. The batch_cache
-range holding the L0 data is evicted like any other range. The `range_ptr`
-(weak_ptr) in `object_entry` becomes invalid. On next access, `get_extent()`
-detects this, cleans up the stale `_objects` entry, and returns nullopt. The
-reader falls back to S3 download. A periodic sweep also cleans stale entries
-to keep accounting accurate even without access.
+**LRU (memory pressure):** Automatic via Seastar reclaimer. Individual chunks
+are evicted independently — the reclaimer may evict some chunks of an L0
+object while others remain. On `get_extent()`, if any required chunk has been
+evicted (detected via `range_ptr`), the call returns nullopt and the reader
+falls back to S3 download. A size-triggered sweep also cleans fully-stale
+object entries to keep accounting accurate.
 
 **Consumption (read-once):** After `get_extent()` increments `bytes_consumed`
 past `total_size`, the object is evicted from both `_objects` map and `_index`.

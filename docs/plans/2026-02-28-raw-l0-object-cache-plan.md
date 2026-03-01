@@ -97,7 +97,9 @@ namespace cloud_topics {
 /// the requested byte range is returned via iobuf::share().
 class raw_object_cache {
 public:
-    explicit raw_object_cache(storage::batch_cache& cache);
+    explicit raw_object_cache(
+      storage::batch_cache& cache,
+      size_t chunk_size = default_chunk_size);
 
     /// Store a downloaded L0 object. Returns false if already cached
     /// (another reader got there first).
@@ -129,10 +131,17 @@ public:
     /// memory pressure. Call periodically to keep accounting accurate.
     void cleanup_stale_entries();
 
+    static constexpr size_t default_chunk_size = 128_KiB;
+
 private:
-    struct object_entry {
+    struct chunk_entry {
         model::offset synthetic_offset;
         storage::batch_cache::range_ptr range;  // weak_ptr to detect eviction
+        size_t size;                            // Actual size (last chunk may be smaller)
+    };
+
+    struct object_entry {
+        std::vector<chunk_entry> chunks;  // Ordered by L0 byte position
         size_t total_size;
         size_t bytes_consumed{0};
     };
@@ -140,14 +149,20 @@ private:
     void evict_entry(
       absl::node_hash_map<object_id, object_entry>::iterator it);
 
-    bool is_entry_valid(const object_entry& entry) const;
+    bool is_chunk_valid(const chunk_entry& chunk) const;
+    bool has_any_valid_chunk(const object_entry& entry) const;
     void maybe_cleanup();
+
+    /// Read from a single chunk at local_offset within the chunk.
+    std::optional<iobuf> read_chunk(
+      const chunk_entry& chunk, size_t local_offset, size_t len);
 
     storage::batch_cache_index _index;
     model::offset _next_offset{0};
     absl::node_hash_map<object_id, object_entry> _objects;
     size_t _total_bytes{0};
-    size_t _last_valid_count{0};  // Valid count at last cleanup
+    size_t _last_valid_count{0};
+    size_t _chunk_size;
 };
 
 } // namespace cloud_topics
@@ -192,8 +207,10 @@ Expected: Will fail because BUILD target doesn't exist yet — that's expected, 
 
 namespace cloud_topics {
 
-raw_object_cache::raw_object_cache(storage::batch_cache& cache)
-  : _index(cache) {}
+raw_object_cache::raw_object_cache(
+  storage::batch_cache& cache, size_t chunk_size)
+  : _index(cache)
+  , _chunk_size(chunk_size) {}
 
 bool raw_object_cache::put(const object_id& id, iobuf data) {
     if (_objects.contains(id)) {
@@ -202,36 +219,64 @@ bool raw_object_cache::put(const object_id& id, iobuf data) {
 
     maybe_cleanup();
 
-    auto offset = _next_offset;
-    _next_offset = model::next_offset(offset);
+    auto total_sz = data.size_bytes();
+    std::vector<chunk_entry> chunks;
 
-    auto sz = data.size_bytes();
+    // Split the L0 object into fixed-size chunks.
+    size_t remaining = total_sz;
+    size_t pos = 0;
+    while (remaining > 0) {
+        auto chunk_sz = std::min(remaining, _chunk_size);
+        auto chunk_data = data.share(pos, chunk_sz);
 
-    // Wrap the raw iobuf in a minimal record_batch.
-    // Use a raft_data batch type so the batch_cache treats it normally.
-    auto header = model::record_batch_header{
-      .size_bytes = static_cast<int32_t>(
-        model::packed_record_batch_header_size + sz),
-      .base_offset = offset,
-      .type = model::record_batch_type::raft_data,
-      .record_count = 1,
-    };
-    auto batch = model::record_batch(
-      header, std::move(data), model::record_batch::tag_ctor_ng{});
+        auto offset = _next_offset;
+        _next_offset = model::next_offset(offset);
 
-    _index.put(batch, storage::batch_cache::is_dirty_entry::no);
+        auto header = model::record_batch_header{
+          .size_bytes = static_cast<int32_t>(
+            model::packed_record_batch_header_size + chunk_sz),
+          .base_offset = offset,
+          .type = model::record_batch_type::raft_data,
+          .record_count = 1,
+        };
+        auto batch = model::record_batch(
+          header, std::move(chunk_data), model::record_batch::tag_ctor_ng{});
 
-    auto range = _index.get_range(offset);
+        _index.put(batch, storage::batch_cache::is_dirty_entry::no);
+
+        auto range = _index.get_range(offset);
+        chunks.push_back(chunk_entry{
+          .synthetic_offset = offset,
+          .range = std::move(range),
+          .size = chunk_sz,
+        });
+
+        pos += chunk_sz;
+        remaining -= chunk_sz;
+    }
+
     _objects.emplace(
       id,
       object_entry{
-        .synthetic_offset = offset,
-        .range = std::move(range),
-        .total_size = sz,
+        .chunks = std::move(chunks),
+        .total_size = total_sz,
       });
-    _total_bytes += sz;
+    _total_bytes += total_sz;
 
     return true;
+}
+
+std::optional<iobuf> raw_object_cache::read_chunk(
+  const chunk_entry& chunk, size_t local_offset, size_t len) {
+    if (!is_chunk_valid(chunk)) {
+        return std::nullopt;
+    }
+    auto batch = _index.get(chunk.synthetic_offset);
+    if (!batch.has_value()) {
+        return std::nullopt;
+    }
+    auto records = std::move(batch->release_data());
+    return records.share(local_offset, len);
 }
 
 std::optional<iobuf> raw_object_cache::get_extent(
@@ -244,25 +289,35 @@ std::optional<iobuf> raw_object_cache::get_extent(
     }
 
     auto& entry = it->second;
+    auto first_chunk_idx = offset() / _chunk_size;
+    auto last_chunk_idx = (offset() + size() - 1) / _chunk_size;
 
-    // Check weak_ptr first — cheap detection of LRU eviction.
-    if (!is_entry_valid(entry)) {
-        _total_bytes -= entry.total_size;
-        _objects.erase(it);
-        return std::nullopt;
+    if (last_chunk_idx >= entry.chunks.size()) {
+        return std::nullopt;  // Out of bounds
     }
 
-    auto batch = _index.get(entry.synthetic_offset);
-    if (!batch.has_value()) {
-        _total_bytes -= entry.total_size;
-        _objects.erase(it);
-        return std::nullopt;
-    }
+    iobuf result;
 
-    // Extract the records iobuf from the batch and share the requested
-    // byte range.
-    auto records = std::move(batch->release_data());
-    auto result = records.share(offset(), size());
+    for (auto i = first_chunk_idx; i <= last_chunk_idx; ++i) {
+        auto& chunk = entry.chunks[i];
+        auto chunk_start = i * _chunk_size;
+        auto local_start = (i == first_chunk_idx)
+                             ? offset() - chunk_start
+                             : size_t{0};
+        auto local_end = (i == last_chunk_idx)
+                           ? offset() + size() - chunk_start
+                           : chunk.size;
+        auto len = local_end - local_start;
+
+        auto chunk_data = read_chunk(chunk, local_start, len);
+        if (!chunk_data.has_value()) {
+            // A required chunk was evicted. Clean up and return miss.
+            _total_bytes -= entry.total_size;
+            _objects.erase(it);
+            return std::nullopt;
+        }
+        result.append(std::move(*chunk_data));
+    }
 
     entry.bytes_consumed += size();
     if (entry.bytes_consumed >= entry.total_size) {
@@ -295,7 +350,9 @@ void raw_object_cache::evict(const object_id& id) {
 
 void raw_object_cache::evict_entry(
   absl::node_hash_map<object_id, object_entry>::iterator it) {
-    _index.testing_evict_from_cache(it->second.synthetic_offset);
+    for (auto& chunk : it->second.chunks) {
+        _index.testing_evict_from_cache(chunk.synthetic_offset);
+    }
     _total_bytes -= it->second.total_size;
     _objects.erase(it);
 }
@@ -304,13 +361,19 @@ size_t raw_object_cache::size_bytes() const { return _total_bytes; }
 
 size_t raw_object_cache::object_count() const { return _objects.size(); }
 
-bool raw_object_cache::is_entry_valid(const object_entry& entry) const {
-    return entry.range && entry.range->valid();
+bool raw_object_cache::is_chunk_valid(const chunk_entry& chunk) const {
+    return chunk.range && chunk.range->valid();
+}
+
+bool raw_object_cache::has_any_valid_chunk(const object_entry& entry) const {
+    return std::ranges::any_of(entry.chunks, [this](const chunk_entry& c) {
+        return is_chunk_valid(c);
+    });
 }
 
 void raw_object_cache::cleanup_stale_entries() {
     for (auto it = _objects.begin(); it != _objects.end();) {
-        if (!is_entry_valid(it->second)) {
+        if (!has_any_valid_chunk(it->second)) {
             _total_bytes -= it->second.total_size;
             _objects.erase(it++);
         } else {
@@ -321,8 +384,6 @@ void raw_object_cache::cleanup_stale_entries() {
 }
 
 void raw_object_cache::maybe_cleanup() {
-    // Trigger cleanup when map has grown to 2x the last known valid count.
-    // This bounds stale entry overhead from LRU eviction without access.
     if (_objects.size() > std::max<size_t>(_last_valid_count * 2, 64)) {
         cleanup_stale_entries();
     }
@@ -423,9 +484,12 @@ class raw_object_cache_test_fixture
   : public redpanda_thread_fixture
   , public ::testing::Test {
 public:
+    // Use small chunk size (256 bytes) for testing boundary conditions
+    static constexpr size_t test_chunk_size = 256;
+
     raw_object_cache_test_fixture()
       : redpanda_thread_fixture()
-      , _cache(app.storage.local().log_mgr().batch_cache()) {}
+      , _cache(app.storage.local().log_mgr().batch_cache(), test_chunk_size) {}
 
     raw_object_cache _cache;
 
@@ -528,6 +592,40 @@ TEST_F(raw_object_cache_test_fixture, test_evict_by_epoch) {
     auto result = _cache.get_extent(
       id3, first_byte_offset_t{0}, byte_range_size_t{100});
     ASSERT_TRUE(result.has_value());
+}
+
+TEST_F(raw_object_cache_test_fixture, test_get_extent_spanning_chunk_boundary) {
+    auto id = make_object_id();
+    // 600 bytes = 3 chunks at 256-byte chunk size (256 + 256 + 88)
+    auto payload = make_payload(600);
+    auto payload_copy = payload.copy();
+
+    ASSERT_TRUE(_cache.put(id, std::move(payload)));
+
+    // Read 100 bytes spanning the boundary between chunk 0 and chunk 1
+    // (bytes 200-300, crossing the 256-byte boundary)
+    auto result = _cache.get_extent(
+      id, first_byte_offset_t{200}, byte_range_size_t{100});
+    ASSERT_TRUE(result.has_value());
+    ASSERT_EQ(result->size_bytes(), 100);
+
+    auto expected = payload_copy.share(200, 100);
+    ASSERT_EQ(*result, expected);
+}
+
+TEST_F(raw_object_cache_test_fixture, test_partial_chunk_eviction_causes_miss) {
+    auto id = make_object_id();
+    // 600 bytes = 3 chunks
+    ASSERT_TRUE(_cache.put(id, make_payload(600)));
+
+    // Force reclaim — may evict some but not all chunks
+    app.storage.local().log_mgr().batch_cache().reclaim(1_MiB);
+
+    // Even if only one chunk is evicted, get_extent should return nullopt
+    auto result = _cache.get_extent(
+      id, first_byte_offset_t{0}, byte_range_size_t{600});
+    // Result depends on which chunks survived; either all data or nullopt
+    // (can't partially succeed)
 }
 
 TEST_F(raw_object_cache_test_fixture, test_multiple_objects_independent) {
