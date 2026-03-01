@@ -141,11 +141,13 @@ private:
       absl::node_hash_map<object_id, object_entry>::iterator it);
 
     bool is_entry_valid(const object_entry& entry) const;
+    void maybe_cleanup();
 
     storage::batch_cache_index _index;
     model::offset _next_offset{0};
     absl::node_hash_map<object_id, object_entry> _objects;
     size_t _total_bytes{0};
+    size_t _last_valid_count{0};  // Valid count at last cleanup
 };
 
 } // namespace cloud_topics
@@ -197,6 +199,8 @@ bool raw_object_cache::put(const object_id& id, iobuf data) {
     if (_objects.contains(id)) {
         return false;
     }
+
+    maybe_cleanup();
 
     auto offset = _next_offset;
     _next_offset = model::next_offset(offset);
@@ -312,6 +316,15 @@ void raw_object_cache::cleanup_stale_entries() {
         } else {
             ++it;
         }
+    }
+    _last_valid_count = _objects.size();
+}
+
+void raw_object_cache::maybe_cleanup() {
+    // Trigger cleanup when map has grown to 2x the last known valid count.
+    // This bounds stale entry overhead from LRU eviction without access.
+    if (_objects.size() > std::max<size_t>(_last_valid_count * 2, 64)) {
+        cleanup_stale_entries();
     }
 }
 

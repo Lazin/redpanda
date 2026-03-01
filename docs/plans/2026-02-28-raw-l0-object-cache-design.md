@@ -115,9 +115,13 @@ weak_ptr becomes invalid. This allows `raw_object_cache` to detect eviction:
 - **On access:** `get_extent()` checks `entry.range` validity before calling
   `_index.get()`. If invalid, removes the stale entry from `_objects` and
   returns nullopt.
-- **Periodic sweep:** A cleanup method iterates `_objects` and removes entries
-  with invalid range pointers, keeping `_total_bytes` and `object_count()`
-  accurate.
+- **Size-triggered sweep:** On `put()`, if `_objects.size()` exceeds a
+  threshold (e.g., 2x the number of entries with valid ranges last time we
+  checked), run `cleanup_stale_entries()` before inserting. This bounds the
+  stale entry overhead without requiring a timer.
+- **Periodic sweep:** A `cleanup_stale_entries()` method iterates `_objects`
+  and removes entries with invalid range pointers, keeping `_total_bytes` and
+  `object_count()` accurate. Can also be called externally on a timer.
 
 To obtain the `range_ptr` after insertion, a new `get_range(model::offset)`
 accessor is added to `storage::batch_cache_index`:
