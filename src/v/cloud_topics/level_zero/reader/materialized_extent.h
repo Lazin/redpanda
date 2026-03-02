@@ -10,32 +10,23 @@
 
 #pragma once
 
-#include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/remote.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
 #include "model/fundamental.h"
 #include "model/record.h"
 
-#include <seastar/core/file.hh>
-#include <seastar/core/fstream.hh>
-#include <seastar/core/iostream.hh>
 #include <seastar/core/lowres_clock.hh>
-#include <seastar/coroutine/as_future.hh>
-
-using namespace std::chrono_literals;
 
 namespace cloud_topics::l0 {
 
+class l0_object_cache;
 struct micro_probe;
 
 // Materialized placeholder extent
 //
 // Extent represents ctp_placeholder with the data
-// that it represents stored in cloud storage cache or
+// that it represents stored in the raw object cache or
 // main memory.
-// The extent can be hydrated (the data is moved from the cloud
-// storage to disk) or materialized (data is moved to the main
-// memory).
 struct materialized_extent {
     extent_meta meta;
     iobuf object;
@@ -43,13 +34,13 @@ struct materialized_extent {
 
 /// Fetch data referenced by the placeholder batch and the content of the
 /// ctp_placeholder.
-/// Return 'true' if the object was downloaded from the cloud storage.
-/// Otherwise, if the object was populated from the cache, return 'false'.
+/// Return 'true' if the object was served from the cache.
+/// Otherwise, if the object was downloaded from cloud storage, return 'false'.
 ss::future<result<bool>> materialize(
   materialized_extent* extent,
   cloud_storage_clients::bucket_name bucket,
   cloud_io::remote_api<>* api,
-  cloud_io::basic_cache_service_api<>* cache,
+  l0_object_cache* cache,
   basic_retry_chain_node<>* rtc,
   micro_probe* probe);
 

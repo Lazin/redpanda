@@ -11,7 +11,6 @@
 #pragma once
 
 #include "base/seastarx.h"
-#include "cloud_io/basic_cache_service_api.h"
 #include "cloud_io/remote.h"
 #include "cloud_topics/level_zero/pipeline/read_pipeline.h"
 #include "model/fundamental.h"
@@ -21,6 +20,8 @@
 #include <seastar/core/weak_ptr.hh>
 
 namespace cloud_topics::l0 {
+
+class l0_object_cache;
 
 /// Read request handler.
 /// This component can process ctp_placeholder batches.
@@ -33,7 +34,7 @@ public:
       l0::read_pipeline<>::stage,
       cloud_storage_clients::bucket_name,
       cloud_io::remote_api<>*,
-      cloud_io::basic_cache_service_api<>*);
+      l0_object_cache*);
 
     ss::future<> start();
     ss::future<> stop();
@@ -49,7 +50,7 @@ private:
 
     cloud_storage_clients::bucket_name _bucket;
     cloud_io::remote_api<>* _remote;
-    cloud_io::basic_cache_service_api<>* _cache;
+    l0_object_cache* _cache;
     retry_chain_node _rtc;
     retry_chain_logger _logger;
     ss::gate _gate;

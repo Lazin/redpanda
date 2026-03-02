@@ -11,9 +11,10 @@
 #include "base/vlog.h"
 #include "bytes/bytes.h"
 #include "bytes/iostream.h"
-#include "cloud_io/basic_cache_service_api.h"
+#include "cloud_topics/batch_cache/raw_object_cache.h"
 #include "cloud_topics/level_zero/common/extent_meta.h"
 #include "cloud_topics/level_zero/reader/materialized_extent.h"
+#include "cloud_topics/level_zero/reader/memory_l0_cache.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
 #include "container/chunked_vector.h"
 #include "mocks.h"
@@ -27,36 +28,6 @@
 #include <limits>
 #include <queue>
 
-enum class injected_cache_get_failure {
-    none,
-    return_error,   // cache get returns nullopt because the file does not
-                    // exist
-    throw_error,    // actually throws an exception
-    throw_shutdown, // throws shutdown exception
-};
-
-enum class injected_cache_put_failure {
-    none,
-    throw_shutdown, // throws 'shutdown' error
-    throw_error,    // throws unexpected exception
-};
-
-enum class injected_cache_rsv_failure {
-    none,
-    throw_shutdown, // throws 'shutdown' error
-    throw_error,    // throws unexpected exception
-};
-
-enum class injected_is_cached_failure {
-    none,
-    stall_then_ok,   // returns in_progress, next call returns available
-    stall_then_fail, // returns in_progress, next call returns
-                     // not_available
-    noop,            // is_cached is not called
-    throw_error,     // throws exception
-    throw_shutdown,  // throws shutdown exception
-};
-
 enum class injected_cloud_get_failure {
     none,
     return_failure,  // returns 'failed' error code
@@ -68,30 +39,26 @@ enum class injected_cloud_get_failure {
 
 /// The struct describes the injected failures for one particular placeholder
 struct injected_failure {
-    // cache get operation
-    injected_cache_get_failure cache_get{injected_cache_get_failure::none};
-    // cache put operation
-    injected_cache_put_failure cache_put{injected_cache_put_failure::none};
-    // cache reserve space
-    injected_cache_rsv_failure cache_rsv{injected_cache_rsv_failure::none};
-    // check cache for status
-    injected_is_cached_failure is_cached{injected_is_cached_failure::none};
     // cloud storage get
     injected_cloud_get_failure cloud_get{injected_cloud_get_failure::none};
 };
 
 class materialized_extent_fixture : public seastar_test {
 public:
+    ss::future<> TearDownAsync() override {
+        co_await _batch_cache.stop();
+    }
+
     // Generate random batches.
     // This is a source of truth for the test. The goal is to consume
     // these batches from placeholder/cache/cloud indirection.
     ss::future<> add_random_batches(int record_count);
 
     // Generate the 'partition' collection from the source of truth. If the
-    // 'cache' is set to 'true' the data is added to the cloud storage cache.
-    // The 'group_by' parameter control how many batches are stored per L0
-    // object.
-    // 'failures' parameters contains set of injected failures
+    // 'use_cache' is set to 'true' the data is pre-populated into the
+    // raw_object_cache. The 'group_by' parameter controls how many batches
+    // are stored per L0 object.
+    // 'failures' parameter contains set of injected failures (cloud only)
     void produce_placeholders(
       bool use_cache,
       int group_by,
@@ -127,5 +94,13 @@ public:
     chunked_vector<model::record_batch> partition;
     chunked_vector<model::record_batch> expected;
     remote_mock remote;
-    cache_mock cache;
+    storage::batch_cache _batch_cache{storage::batch_cache::reclaim_options{
+      .growth_window = std::chrono::seconds(3),
+      .stable_window = std::chrono::seconds(10),
+      .min_size = 128_KiB,
+      .max_size = 4_MiB,
+      .min_free_memory = 0,
+    }};
+    cloud_topics::raw_object_cache _raw_cache{_batch_cache};
+    cloud_topics::l0::memory_l0_cache _l0_cache{_raw_cache};
 };

@@ -84,21 +84,10 @@ void materialized_extent_fixture::produce_placeholders(
         }
         return std::move(builder).build();
     };
-    // Per-batch metadata for setting up cache range expectations
-    struct batch_cache_info {
-        std::filesystem::path path;
-        uint64_t offset;
-        uint64_t size;
-        iobuf data;
-    };
     // List of placeholder batches alongside the list of L0 objects
-    // that has to be added to the cloud storage mock and (optionally) cache
-    // mock
     struct placeholders_and_uploads {
         chunked_vector<model::record_batch> placeholders;
-        std::map<std::filesystem::path, iobuf> uploads;
-        // Per-batch info for cache range reads
-        std::vector<batch_cache_info> batch_infos;
+        std::map<cloud_topics::object_id, iobuf> uploads;
     };
     // Produce data for the partition and the cloud/cache. Group data
     // together using 'group_by' parameter.
@@ -107,13 +96,11 @@ void materialized_extent_fixture::produce_placeholders(
         std::queue<model::record_batch> sources,
         std::queue<iobuf> serialized_batches) -> placeholders_and_uploads {
         chunked_vector<model::record_batch> placeholders;
-        std::map<std::filesystem::path, iobuf> uploads;
-        std::vector<batch_cache_info> batch_infos;
+        std::map<cloud_topics::object_id, iobuf> uploads;
         while (!sources.empty()) {
             iobuf current;
             auto id = cloud_topics::object_id::create(
               cloud_topics::cluster_epoch(1));
-            auto fname = cloud_topics::object_path_factory::level_zero_path(id);
             for (int i = 0; i < group_by; i++) {
                 auto buf = std::move(serialized_batches.front());
                 serialized_batches.pop();
@@ -124,22 +111,13 @@ void materialized_extent_fixture::produce_placeholders(
                 auto placeholder = generate_placeholder(
                   id, offset, size, batch);
                 placeholders.push_back(std::move(placeholder));
-                // Track per-batch info for cache expectations
-                batch_infos.push_back(
-                  batch_cache_info{
-                    .path = fname,
-                    .offset = offset,
-                    .size = size,
-                    .data = buf.copy(),
-                  });
                 current.append(std::move(buf));
             }
-            uploads[fname] = std::move(current);
+            uploads[id] = std::move(current);
         }
         return {
           .placeholders = std::move(placeholders),
           .uploads = std::move(uploads),
-          .batch_infos = std::move(batch_infos),
         };
     };
     std::queue<model::record_batch> sources;
@@ -163,14 +141,12 @@ void materialized_extent_fixture::produce_placeholders(
               b.header().last_offset());
         }
         // serialize the batch
-        // add batch to the cache
         auto buf = serialize_batch(b.copy());
         serialized_batches.push(buf.copy());
         sources.push(b.copy());
     }
-    auto [placeholders, uploads, batch_infos]
-      = generate_placeholders_and_uploads(
-        std::move(sources), std::move(serialized_batches));
+    auto [placeholders, uploads] = generate_placeholders_and_uploads(
+      std::move(sources), std::move(serialized_batches));
     vlog(
       test_log.info,
       "Generated {} placeholders and {} L0 objects",
@@ -178,158 +154,53 @@ void materialized_extent_fixture::produce_placeholders(
       uploads.size());
 
     if (use_cache) {
-        // For cache reads, set up per-batch expectations for range reads
-        // Simplified event flow per batch:
-        // cache.is_cached() -> available
-        // cache.get_stream_range() -> payload for this batch's range
-        for (auto&& info : batch_infos) {
-            injected_failure failure = {};
-            if (!injected_failures.empty()) {
-                failure = injected_failures.back();
-                injected_failures.pop();
-            }
-            switch (failure.is_cached) {
-            case injected_is_cached_failure::none:
-                cache.expect_is_cached(
-                  info.path, cloud_io::cache_element_status::available);
-                break;
-            case injected_is_cached_failure::stall_then_ok:
-                cache.expect_is_cached(
-                  info.path,
-                  std::vector<cloud_io::cache_element_status>{
-                    cloud_io::cache_element_status::in_progress,
-                    cloud_io::cache_element_status::available});
-                break;
-            case injected_is_cached_failure::noop:
-                // The code is supposed to timeout before even
-                // invoking any methods.
-                continue;
-            case injected_is_cached_failure::stall_then_fail:
-                throw std::runtime_error("Not implemented");
-            case injected_is_cached_failure::throw_error:
-                cache.expect_is_cached_throws(
-                  info.path,
-                  std::make_exception_ptr(std::runtime_error("dummy")));
-                continue;
-            case injected_is_cached_failure::throw_shutdown:
-                cache.expect_is_cached_throws(
-                  info.path,
-                  std::make_exception_ptr(ss::gate_closed_exception()));
-                continue;
-            };
-
-            cloud_io::cache_item_stream s{
-              .body = make_iobuf_input_stream(std::move(info.data)),
-              .size = info.size,
-            };
-            switch (failure.cache_get) {
-            case injected_cache_get_failure::none:
-                cache.expect_get_stream_range(
-                  info.path, info.offset, info.size, std::move(s));
-                break;
-            case injected_cache_get_failure::return_error:
-                cache.expect_get_stream_range(
-                  info.path, info.offset, info.size, std::nullopt);
-                break;
-            case injected_cache_get_failure::throw_error:
-                cache.expect_get_stream_range_throws(
-                  info.path,
-                  info.offset,
-                  info.size,
-                  std::make_exception_ptr(std::runtime_error("dummy")));
-                break;
-            case injected_cache_get_failure::throw_shutdown:
-                cache.expect_get_stream_range_throws(
-                  info.path,
-                  info.offset,
-                  info.size,
-                  std::make_exception_ptr(ss::gate_closed_exception()));
-                break;
-            };
+        // Pre-populate the raw_object_cache with the L0 objects
+        for (auto& [id, data] : uploads) {
+            _raw_cache.put(id, data.copy());
         }
-    }
-
-    // For cloud storage reads (not cached), set up expectations per L0 object
-    if (!use_cache) {
-        for (auto&& kv : uploads) {
-            auto sz = kv.second.size_bytes();
+    } else {
+        // For cloud storage reads, set up expectations per L0 object
+        for (auto& [id, data] : uploads) {
+            auto fname = cloud_topics::object_path_factory::level_zero_path(id);
             injected_failure failure = {};
             if (!injected_failures.empty()) {
                 failure = injected_failures.back();
                 injected_failures.pop();
             }
-            // Simplified event flow:
-            // cache.is_cached() -> not_available
-            // remote.download_object() -> payload
-            // cache.reserve_space() -> guard
-            // cache.put(payload, guard)
-            cache.expect_is_cached(
-              kv.first, cloud_io::cache_element_status::not_available);
             switch (failure.cloud_get) {
             case injected_cloud_get_failure::none:
                 remote.expect_download_object(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   cloud_io::download_result::success,
-                  kv.second.copy());
+                  data.copy());
                 break;
             case injected_cloud_get_failure::return_failure:
                 remote.expect_download_object(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   cloud_io::download_result::failed,
-                  kv.second.copy());
-                continue;
+                  data.copy());
+                break;
             case injected_cloud_get_failure::return_notfound:
                 remote.expect_download_object(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   cloud_io::download_result::notfound,
-                  kv.second.copy());
-                continue;
+                  data.copy());
+                break;
             case injected_cloud_get_failure::return_timeout:
                 remote.expect_download_object(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   cloud_io::download_result::timedout,
-                  kv.second.copy());
-                continue;
+                  data.copy());
+                break;
             case injected_cloud_get_failure::throw_shutdown:
                 remote.expect_download_object_throw(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   ss::abort_requested_exception());
-                continue;
+                break;
             case injected_cloud_get_failure::throw_error:
                 remote.expect_download_object_throw(
-                  cloud_storage_clients::object_key(kv.first),
+                  cloud_storage_clients::object_key(fname),
                   std::runtime_error("boo"));
-                continue;
-            }
-            switch (failure.cache_rsv) {
-            case injected_cache_rsv_failure::none:
-                cache.expect_reserve_space(
-                  sz,
-                  1,
-                  cloud_io::basic_space_reservation_guard<ss::lowres_clock>(
-                    cache, 0, 0));
-                break;
-            case injected_cache_rsv_failure::throw_error:
-                cache.expect_reserve_space_throw(
-                  std::make_exception_ptr(std::runtime_error("boo")));
-                continue;
-            case injected_cache_rsv_failure::throw_shutdown:
-                cache.expect_reserve_space_throw(
-                  std::make_exception_ptr(ss::abort_requested_exception()));
-                continue;
-            }
-            switch (failure.cache_put) {
-            case injected_cache_put_failure::none:
-                cache.expect_put(kv.first);
-                break;
-            case injected_cache_put_failure::throw_error:
-                cache.expect_put(
-                  kv.first, std::make_exception_ptr(std::runtime_error("boo")));
-                break;
-            case injected_cache_put_failure::throw_shutdown:
-                cache.expect_put(
-                  kv.first,
-                  std::make_exception_ptr(ss::abort_requested_exception()));
                 break;
             }
         }

@@ -13,6 +13,7 @@
 #include "base/outcome.h"
 #include "cloud_io/cache_service.h"
 #include "cloud_topics/batch_cache/batch_cache.h"
+#include "cloud_topics/batch_cache/raw_object_cache.h"
 #include "cloud_topics/cluster_services.h"
 #include "cloud_topics/data_plane_api.h"
 #include "cloud_topics/level_zero/batcher/batcher.h"
@@ -23,6 +24,7 @@
 #include "cloud_topics/level_zero/read_fanout/read_fanout.h"
 #include "cloud_topics/level_zero/read_request_scheduler/read_request_scheduler.h"
 #include "cloud_topics/level_zero/reader/fetch_request_handler.h"
+#include "cloud_topics/level_zero/reader/memory_l0_cache.h"
 #include "cloud_topics/level_zero/write_request_scheduler/write_request_scheduler.h"
 #include "config/configuration.h"
 #include "model/fundamental.h"
@@ -94,13 +96,28 @@ public:
         }
 
         co_await construct_service(
+          _raw_object_cache,
+          ss::sharded_parameter([storage_api] {
+              return std::ref(
+                storage_api->local().log_mgr().get_batch_cache());
+          }));
+
+        co_await construct_service(
+          _memory_l0_cache, ss::sharded_parameter([this] {
+              return std::ref(_raw_object_cache.local());
+          }));
+
+        co_await construct_service(
           _fetch_handler,
           ss::sharded_parameter([this] {
               return _read_pipeline.local().register_read_pipeline_stage();
           }),
           ss::sharded_parameter([bucket] { return bucket; }),
           ss::sharded_parameter([io] { return &io->local(); }),
-          ss::sharded_parameter([cache] { return &cache->local(); }));
+          ss::sharded_parameter(
+            [this] -> l0::l0_object_cache* {
+                return &_memory_l0_cache.local();
+            }));
 
         co_await construct_service(
           _batch_cache, ss::sharded_parameter([storage_api] {
@@ -241,6 +258,8 @@ private:
     ss::sharded<l0::read_request_scheduler> _read_request_scheduler;
     ss::sharded<l0::read_debounce<>> _read_debounce;
 
+    ss::sharded<raw_object_cache> _raw_object_cache;
+    ss::sharded<l0::memory_l0_cache> _memory_l0_cache;
     ss::sharded<l0::fetch_handler> _fetch_handler;
     // Batch cache
     ss::sharded<batch_cache> _batch_cache;

@@ -151,6 +151,8 @@ redpanda_cc_library(
         "//src/v/cloud_topics:cluster_services_interface",
         "//src/v/cloud_topics:data_plane_api",
         "//src/v/cloud_topics/batch_cache",
+        "//src/v/cloud_topics/batch_cache:raw_object_cache",
+        "//src/v/cloud_topics/level_zero/reader:memory_l0_cache",
         "//src/v/cloud_topics/level_zero/batcher",
         "//src/v/cloud_topics/level_zero/cluster_services_impl",
         "//src/v/cloud_topics/level_zero/pipeline:read_pipeline",

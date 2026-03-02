@@ -36,7 +36,7 @@ fetch_handler::fetch_handler(
   l0::read_pipeline<>::stage pipeline_stage,
   cloud_storage_clients::bucket_name bucket,
   cloud_io::remote_api<>* remote,
-  cloud_io::basic_cache_service_api<>* cache)
+  l0_object_cache* cache)
   : _bucket(std::move(bucket))
   , _remote(remote)
   , _cache(cache)

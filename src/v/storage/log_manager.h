@@ -260,6 +260,9 @@ public:
 
     std::optional<batch_cache_index> create_cache(with_cache);
 
+    /// Return a reference to the shared batch cache.
+    batch_cache& get_batch_cache() { return _batch_cache; }
+
 private:
     using bflags = log_housekeeping_meta::bitflags;
 
