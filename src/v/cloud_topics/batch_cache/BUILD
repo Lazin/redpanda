@@ -23,6 +23,24 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "raw_object_cache",
+    srcs = [
+        "raw_object_cache.cc",
+    ],
+    hdrs = [
+        "raw_object_cache.h",
+    ],
+    deps = [
+        "//src/v/base",
+        "//src/v/bytes:iobuf",
+        "//src/v/cloud_topics:types",
+        "//src/v/model",
+        "//src/v/storage:batch_cache",
+        "@abseil-cpp//absl/container:node_hash_map",
+    ],
+)
+
+redpanda_cc_library(
     name = "batch_cache",
     srcs = [
         "batch_cache.cc",
