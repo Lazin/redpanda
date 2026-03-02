@@ -565,6 +565,17 @@ public:
      */
     std::optional<model::record_batch> get(model::offset offset);
 
+    /// Check if a batch at the given offset is still cached and its
+    /// underlying range is valid (not evicted by memory pressure).
+    bool is_cached(model::offset o) const {
+        auto it = _index.find(o);
+        if (it == _index.end()) {
+            return false;
+        }
+        auto& r = it->second.range();
+        return r && r->valid();
+    }
+
     /**
      * \brief Return a contiguous range of cached batches.
      *
