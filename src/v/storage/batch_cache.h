@@ -641,6 +641,13 @@ public:
         return _index.find(offset) != _index.end();
     }
 
+    /*
+     * Testing interface to obtain the underlying batch_cache. Useful when
+     * a component needs a batch_cache& and the only access path is through
+     * a batch_cache_index obtained from log_manager::create_cache().
+     */
+    batch_cache& testing_get_cache() { return *_cache; }
+
     // Leaves the batch_cache_index in a fully clean, re-usable state.
     ss::future<> reset() {
         lock_guard lk(*this);

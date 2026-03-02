@@ -19,3 +19,22 @@ redpanda_cc_gtest(
         "@seastar",
     ],
 )
+
+redpanda_cc_gtest(
+    name = "raw_object_cache_test",
+    timeout = "short",
+    srcs = [
+        "raw_object_cache_test.cc",
+    ],
+    deps = [
+        "//src/v/cloud_topics/batch_cache:raw_object_cache",
+        "//src/v/cloud_topics:types",
+        "//src/v/model",
+        "//src/v/random:generators",
+        "//src/v/redpanda/tests:fixture",
+        "//src/v/storage:batch_cache",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
