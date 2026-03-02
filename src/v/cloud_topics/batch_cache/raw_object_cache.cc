@@ -30,6 +30,8 @@ bool raw_object_cache::put(const object_id& id, iobuf data) {
         return false;
     }
 
+    maybe_cleanup();
+
     const size_t data_size = data.size_bytes();
     object_entry entry{
       .chunks = {},
@@ -104,8 +106,6 @@ std::optional<iobuf> raw_object_cache::get_extent(
   const object_id& id,
   first_byte_offset_t offset,
   byte_range_size_t size) {
-    maybe_cleanup();
-
     auto it = _objects.find(id);
     if (it == _objects.end()) {
         return std::nullopt;
@@ -177,18 +177,18 @@ std::optional<iobuf> raw_object_cache::get_extent(
 
 size_t
 raw_object_cache::evict_by_epoch(std::function<bool(cluster_epoch)> pred) {
-    size_t evicted = 0;
+    size_t evicted_bytes = 0;
     for (auto it = _objects.begin(); it != _objects.end();) {
         if (pred(it->first.epoch)) {
+            evicted_bytes += it->second.total_size;
             auto next = std::next(it);
             evict_entry(it);
             it = next;
-            ++evicted;
         } else {
             ++it;
         }
     }
-    return evicted;
+    return evicted_bytes;
 }
 
 void raw_object_cache::evict(const object_id& id) {
@@ -217,10 +217,11 @@ void raw_object_cache::evict_entry(
   absl::node_hash_map<object_id, object_entry>::iterator it) {
     auto& entry = it->second;
 
-    // Remove each chunk from the batch cache via truncate. We use truncate
-    // with offset+1 so that only the batch at that exact offset is removed.
+    // Evict each chunk's range from the batch cache. Uses the testing API
+    // which evicts the range but leaves the index entry (it becomes stale
+    // with an invalidated range_ptr and will be skipped on future lookups).
     for (const auto& chunk : entry.chunks) {
-        _index.truncate(chunk.synthetic_offset);
+        _index.testing_evict_from_cache(chunk.synthetic_offset);
     }
 
     _total_bytes -= entry.total_size;
@@ -234,18 +235,13 @@ bool raw_object_cache::has_any_valid_chunk(const object_entry& entry) const {
 }
 
 void raw_object_cache::maybe_cleanup() {
-    // Heuristic: if the number of objects shrank significantly since last
-    // cleanup (e.g. memory reclaim evicted ranges), do a full scan.
-    size_t valid = 0;
-    for (const auto& [_, entry] : _objects) {
-        if (has_any_valid_chunk(entry)) {
-            ++valid;
-        }
-    }
-    if (valid < _last_valid_count / 2 && _last_valid_count > 0) {
+    // Trigger cleanup when map has grown to 2x the last known valid count.
+    // This bounds stale entry overhead from LRU eviction without doing a
+    // full scan on every call.
+    if (_objects.size() > std::max<size_t>(_last_valid_count * 2, 64)) {
         cleanup_stale_entries();
+        _last_valid_count = _objects.size();
     }
-    _last_valid_count = _objects.size();
 }
 
 } // namespace cloud_topics
