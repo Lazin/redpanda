@@ -203,6 +203,16 @@ public:
         return _batch_cache.local().get(tidp, o);
     }
 
+    void cache_notify(
+      const model::topic_id_partition& tidp,
+      model::offset last_offset) final {
+        _batch_cache.local().notify(tidp, last_offset);
+    }
+
+    void cache_record_put_skip_no_term() final {
+        _batch_cache.local().record_put_skip_no_term();
+    }
+
     ss::future<> cache_wait(
       const model::topic_id_partition& tidp,
       model::offset offset,

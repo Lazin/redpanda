@@ -58,11 +58,17 @@ public:
     ss::future<> start();
     ss::future<> stop();
 
-    // Put element into the batch cache. The element shouldn't be dirty.
-    // The code that uses this class should only use this to cache committed
-    // entries.
+    // Put element into the batch cache.
     void
     put(const model::topic_id_partition& tidp, const model::record_batch& b);
+
+    // Record that a cache put was skipped because the batch had no term set.
+    void record_put_skip_no_term() { _probe.register_put_skip_no_term(); }
+
+    /// Signal that batches up to \p last_offset have been inserted for \p tidp.
+    /// Wakes readers blocked in wait_for_offset.
+    void
+    notify(const model::topic_id_partition& tidp, model::offset last_offset);
 
     // Fetch element from cache.
     std::optional<model::record_batch>

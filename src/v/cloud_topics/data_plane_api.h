@@ -96,6 +96,15 @@ public:
     virtual std::optional<model::record_batch>
     cache_get(const model::topic_id_partition&, model::offset o) = 0;
 
+    /// Signal that batches up to \p last_offset have been inserted for \p tidp.
+    /// Wakes readers blocked in cache_wait.
+    virtual void
+    cache_notify(const model::topic_id_partition&, model::offset last_offset)
+      = 0;
+
+    /// Record that a cache put was skipped because the batch had no term.
+    virtual void cache_record_put_skip_no_term() = 0;
+
     /// Retrieve current cluster epoch
     virtual ss::future<std::optional<cloud_topics::cluster_epoch>>
     get_current_epoch(ss::abort_source* as) = 0;

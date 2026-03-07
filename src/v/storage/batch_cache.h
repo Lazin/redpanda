@@ -534,6 +534,12 @@ public:
     // Requires that a `lock_guard` for `this` is held elsewhere.
     ss::future<> clear_async_unlocked();
     bool empty() const { return _index.empty(); }
+    model::offset first_offset() const {
+        return _index.empty() ? model::offset{} : _index.begin()->first;
+    }
+    model::offset last_offset() const {
+        return _index.empty() ? model::offset{} : _index.rbegin()->first;
+    }
 
     void
     put(const model::record_batch& batch, batch_cache::is_dirty_entry dirty) {

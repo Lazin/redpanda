@@ -55,6 +55,13 @@ void batch_cache_probe::setup_internal_metrics(bool disable) {
           [this] { return _misses; },
           sm::description("Number of cache misses"),
           labels),
+        sm::make_counter(
+          "put_skip_no_term",
+          [this] { return _put_skip_no_term; },
+          sm::description(
+            "Number of cache puts skipped because the batch term was not "
+            "set."),
+          labels),
       });
 }
 

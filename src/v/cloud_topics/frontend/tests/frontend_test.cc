@@ -79,6 +79,14 @@ public:
       (override));
 
     MOCK_METHOD(
+      void,
+      cache_notify,
+      (const model::topic_id_partition&, model::offset),
+      (override));
+
+    MOCK_METHOD(void, cache_record_put_skip_no_term, (), (override));
+
+    MOCK_METHOD(
       ss::future<>,
       cache_wait,
       (const model::topic_id_partition&,
@@ -152,6 +160,10 @@ TEST_F(frontend_fixture, test_replicate_epoch) {
     cloud_topics::frontend frontend(std::move(partition), _data_plane.get());
 
     EXPECT_CALL(*_data_plane, cache_put(_, _)).Times(2);
+    EXPECT_CALL(*_data_plane, cache_notify(_, _)).Times(AnyNumber());
+    ON_CALL(*_data_plane, cache_wait(_, _, _, _, _))
+      .WillByDefault(
+        [](const auto&, auto, auto, auto, auto) { return ss::now(); });
     using stage_result = std::expected<staged_write, std::error_code>;
     EXPECT_CALL(*_data_plane, stage_write(_))
       .WillOnce(Return(ss::as_ready_future(stage_result{})))

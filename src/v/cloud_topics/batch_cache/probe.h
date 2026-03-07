@@ -33,6 +33,7 @@ public:
         _hits++;
     }
     void register_miss() { _misses++; }
+    void register_put_skip_no_term() { _put_skip_no_term++; }
 
 private:
     void setup_internal_metrics(bool disable);
@@ -41,6 +42,7 @@ private:
     uint64_t _get_bytes{0};
     uint64_t _misses{0};
     uint64_t _hits{0};
+    uint64_t _put_skip_no_term{0};
 
     metrics::internal_metric_groups _metrics;
 };

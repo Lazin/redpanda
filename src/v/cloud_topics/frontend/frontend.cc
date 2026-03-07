@@ -699,6 +699,21 @@ ss::future<result<raft::replicate_result>> do_upload_and_replicate(
                   cache_batches,
                   kafka::offset_cast(res.value().last_offset),
                   res.value().last_term);
+                // Wait for the previous batch group to be cached so
+                // that inserts are monotonic and the reader sees a
+                // contiguous sequence when it wakes up.
+                auto prev = model::prev_offset(
+                  cache_batches.front().base_offset());
+                try {
+                    co_await api->cache_wait(
+                      *tidp,
+                      prev,
+                      model::offset{},
+                      model::timeout_clock::now()
+                        + std::chrono::milliseconds(25),
+                      std::nullopt);
+                } catch (const ss::timed_out_error&) {
+                }
                 for (const auto& b : cache_batches) {
                     vlog(
                       cd_log.trace,
@@ -706,9 +721,17 @@ ss::future<result<raft::replicate_result>> do_upload_and_replicate(
                       b.base_offset(),
                       b.term());
                     api->cache_put(*tidp, b);
+                    vlog(
+                      cd_log.info,
+                      "NEEDLE PUT {} {}",
+                      *tidp,
+                      b.base_offset());
                 }
+                api->cache_notify(
+                  *tidp, cache_batches.back().last_offset());
             }
         } else {
+            api->cache_record_put_skip_no_term();
             vlog(
               cd_log.debug,
               "Skipping cache put for ntp {} at offset {} with "
@@ -815,6 +838,17 @@ ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
         auto tidp = topic_id_partition();
         if (tidp) {
             update_batches(rb_copy, ret_offset, result.value().last_term);
+            auto prev = model::prev_offset(rb_copy.front().base_offset());
+            try {
+                co_await _data_plane->cache_wait(
+                  *tidp,
+                  prev,
+                  model::offset{},
+                  model::timeout_clock::now()
+                    + std::chrono::milliseconds(25),
+                  std::nullopt);
+            } catch (const ss::timed_out_error&) {
+            }
             for (const auto& b : rb_copy) {
                 vlog(
                   cd_log.trace,
@@ -823,7 +857,14 @@ ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
                   b.base_offset(),
                   b.term());
                 _data_plane->cache_put(*tidp, b);
+                vlog(
+                  cd_log.info,
+                  "NEEDLE PUT {} {}",
+                  *tidp,
+                  b.base_offset());
             }
+            _data_plane->cache_notify(
+              *tidp, rb_copy.back().last_offset());
         }
     }
     co_return ret_offset;

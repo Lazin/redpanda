@@ -85,7 +85,7 @@ level_zero_log_reader_impl::read_some(
     if (cache_enabled() && _ctp->is_leader()) {
         auto tidp = require_topic_id_partition();
         auto wait_deadline = model::timeout_clock::now()
-                             + std::chrono::milliseconds(25);
+                             + std::chrono::milliseconds(100);
         try {
             // Translate committed_offset from raft-space to kafka-space.
             // The batch cache monitor tracks kafka offsets (put() notifies
@@ -192,13 +192,6 @@ level_zero_log_reader_impl::maybe_read_batches_from_cache() {
         if (!batch.has_value()) {
             break;
         }
-
-        vlog(
-          _log.trace,
-          "Loaded batch from cache for {}: {} @ term {}",
-          _next_offset,
-          batch.value().base_offset(),
-          batch.value().term());
 
         auto batch_size = batch.value().size_bytes();
         if (is_over_limit_with_bytes(batch_size)) {
@@ -351,11 +344,6 @@ level_zero_log_reader_impl::materialize_batches(
                 auto cached = _ct_api->cache_get(
                   tidp, kafka::offset_cast(meta->base_offset));
                 if (cached.has_value()) {
-                    vlog(
-                      _log.trace,
-                      "Cache hit for extent at offset {} during "
-                      "materialize",
-                      meta->base_offset);
                     unhydrated_it->data = local_log_batch::cached_batch{
                       .batch = std::move(cached.value())};
                     continue;

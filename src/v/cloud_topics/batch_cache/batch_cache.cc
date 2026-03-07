@@ -10,6 +10,7 @@
 
 #include "cloud_topics/batch_cache/batch_cache.h"
 
+#include "cloud_topics/logger.h"
 #include "config/configuration.h"
 #include "ssx/future-util.h"
 #include "storage/batch_cache.h"
@@ -72,10 +73,20 @@ void batch_cache::put(
     }
     entry.index->put(b, storage::batch_cache::is_dirty_entry::no);
     _probe.register_put(b.size_bytes());
+    vlog(
+      cd_log.info,
+      "NEEDLE {} {} first {} last {}",
+      tidp,
+      b.base_offset(),
+      entry.index->first_offset(),
+      entry.index->last_offset());
+}
 
-    // Notify any readers waiting for this offset.
-    if (entry.monitor) {
-        entry.monitor->notify(b.last_offset());
+void batch_cache::notify(
+  const model::topic_id_partition& tidp, model::offset last_offset) {
+    auto it = _entries.find(tidp);
+    if (it != _entries.end() && it->second.monitor) {
+        it->second.monitor->notify(last_offset);
     }
 }
 
@@ -87,7 +98,8 @@ batch_cache::get(const model::topic_id_partition& tidp, model::offset o) {
     _gate.check();
     if (auto it = _entries.find(tidp);
         it != _entries.end() && it->second.index) {
-        auto rb = it->second.index->get(o);
+        auto& index = *it->second.index;
+        auto rb = index.get(o);
         if (rb.has_value()) {
             vassert(
               rb->term() > model::term_id{-1},
@@ -101,12 +113,12 @@ batch_cache::get(const model::topic_id_partition& tidp, model::offset o) {
               rb->last_offset(),
               o);
             _probe.register_get(rb->size_bytes());
-        } else {
+        } else if (o <= index.last_offset()) {
+            // Offset was within the cached range but got evicted.
             _probe.register_miss();
         }
         return rb;
     }
-    _probe.register_miss();
     return std::nullopt;
 }
 
