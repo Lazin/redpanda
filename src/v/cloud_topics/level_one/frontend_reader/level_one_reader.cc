@@ -112,7 +112,12 @@ level_one_log_reader_impl::open_reader_at(
 ss::future<model::record_batch_reader::storage_t>
 level_one_log_reader_impl::read_some(
   model::timeout_clock::time_point deadline) {
-    if (_config.strict_max_bytes && _config.max_bytes == 0) {
+    if (_config.max_bytes == 0) {
+        vlog(
+          _log.warn,
+          "NEEDLE L1 reader: max_bytes=0, skipping all cloud I/O at "
+          "offset {}",
+          _next_offset);
         set_end_of_stream();
         co_return model::record_batch_reader::storage_t{};
     }
@@ -160,6 +165,13 @@ level_one_log_reader_impl::read_some(
             }
             batches = read_fut.get();
         } else {
+            vlog(
+              _log.warn,
+              "NEEDLE L1 reader: starting cloud I/O at offset {}, "
+              "max_bytes={}, strict_max_bytes={}",
+              _next_offset,
+              _config.max_bytes,
+              _config.strict_max_bytes);
             auto object = co_await lookup_object_for_offset(
               _next_offset, deadline);
             if (!object.has_value()) {
@@ -187,6 +199,14 @@ level_one_log_reader_impl::read_some(
                 if (local_reader) {
                     local_reader->next_offset = _next_offset;
                 }
+            } else {
+                vlog(
+                  _log.warn,
+                  "NEEDLE L1 reader: byte limit hit with no batches "
+                  "returned at offset {}, max_bytes={}, bytes_consumed={}",
+                  _next_offset,
+                  _config.max_bytes,
+                  _bytes_consumed);
             }
             co_await return_or_close(std::move(local_reader));
             co_return batches;

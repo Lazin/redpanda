@@ -363,12 +363,13 @@ ss::future<read_result> read_from_ntp(
 
 } // namespace testing
 
-static void fill_fetch_responses(
+static bool fill_fetch_responses(
   op_context& octx,
   chunked_vector<read_result> results,
   const chunked_vector<op_context::response_placeholder_ptr>& responses,
   op_context::latency_point start_time,
   bool record_latency = true) {
+    bool any_data_dropped = false;
     auto range = boost::irange<size_t>(0, results.size());
     if (unlikely(results.size() != responses.size())) {
         // soft assert & recovery attempt
@@ -460,7 +461,23 @@ static void fill_fetch_responses(
             resp_units = std::move(res.memory_units);
             resp.records = batch_reader(std::move(res).release_data());
         } else {
-            // TODO: add probe to measure how much of read data is discarded
+            if (res.has_data()) {
+                // Data was read from cloud storage but cannot fit in the
+                // response budget. This is pure read amplification: S3 bytes
+                // were downloaded, materialized, and now dropped.
+                any_data_dropped = true;
+                octx.rctx.probe().add_fetch_response_dropped_bytes(
+                  res.data_size_bytes());
+                vlog(
+                  klog.warn,
+                  "NEEDLE fill_responses: dropping {} bytes for {} "
+                  "(response_size={}, bytes_left={}, data_size={})",
+                  res.data_size_bytes(),
+                  ktp,
+                  octx.response_size,
+                  bytes_left,
+                  res.data_size_bytes());
+            }
             resp.records = batch_reader();
         }
 
@@ -473,6 +490,7 @@ static void fill_fetch_responses(
             octx.rctx.probe().record_fetch_latency(fetch_latency);
         }
     }
+    return any_data_dropped;
 }
 
 static ss::future<chunked_vector<read_result>> fetch_ntps(
@@ -521,6 +539,13 @@ static ss::future<chunked_vector<read_result>> fetch_ntps(
           // partition reads.
           if (total_read_size >= max_bytes_per_fetch) {
               ntp_cfg.cfg.skip_read = true;
+              vlog(
+                klog.warn,
+                "NEEDLE executor: skip_read set for {} due to budget "
+                "exhaustion, total_read_size={}, max_bytes_per_fetch={}",
+                ntp_cfg.ktp(),
+                total_read_size,
+                max_bytes_per_fetch);
           }
 
           // In Kafka first non-empty partition in a request or session
@@ -1100,7 +1125,7 @@ private:
                   [](auto& worker) { return worker.run(); });
             });
 
-        fill_fetch_responses(
+        const bool any_dropped = fill_fetch_responses(
           octx,
           std::move(results.read_results),
           fetch.responses,
@@ -1109,6 +1134,17 @@ private:
 
         octx.rctx.probe().record_fetch_latency(
           results.first_run_latency_result);
+
+        // If any data read by this shard was dropped (could not fit in the
+        // response budget), drain bytes_left to zero. This prevents the
+        // shard from being re-queued and re-reading the same data from cloud
+        // storage: the dropped partition won't fit next time either, so
+        // re-reading it is pure amplification. The existing guard
+        // `if (octx.bytes_left <= 0) co_return` will skip all further shard
+        // worker invocations.
+        if (any_dropped) {
+            octx.bytes_left = 0;
+        }
 
         _last_result_size[fetch.shard] = results.total_size;
         _completed_shard_fetches.push_back(std::move(fetch));
@@ -1386,8 +1422,41 @@ class simple_fetch_planner final : public fetch_planner::impl {
                           bytes_left_in_plan -= std::min(
                             est_read_size, max_bytes);
                       } else {
-                          bytes_left_in_plan -= max_bytes;
+                          // avg_bytes_per_offset is zero: the last fetch for
+                          // this partition returned no bytes (e.g. data not
+                          // yet in L1). Charging the full max_bytes would
+                          // monopolize the plan budget for one partition and
+                          // starve all others. Use avg_batch_size as a
+                          // conservative single-batch estimate instead.
+                          bytes_left_in_plan -= std::min(
+                            avg_batch_size, max_bytes);
                       }
+                      vlog(
+                        klog.warn,
+                        "NEEDLE planner: {} fetch_md hit, "
+                        "est_read_size={}, max_bytes={}, "
+                        "bytes_left_in_plan={}, capped={}",
+                        ktp,
+                        est_read_size,
+                        max_bytes,
+                        bytes_left_in_plan,
+                        est_read_size > max_bytes);
+                  } else if (!fetch_md) {
+                      // No metadata cache entry: we can't estimate the read
+                      // size, so charge the full max_bytes against the plan
+                      // budget. Without this, every cold-cache partition
+                      // bypasses budget accounting and gets scheduled for
+                      // cloud I/O regardless of how much budget has already
+                      // been consumed.
+                      bytes_left_in_plan -= max_bytes;
+                      vlog(
+                        klog.warn,
+                        "NEEDLE planner: {} fetch_md miss (cold cache), "
+                        "charging max_bytes={} against budget, "
+                        "bytes_left_in_plan={}",
+                        ktp,
+                        max_bytes,
+                        bytes_left_in_plan);
                   }
 
                   plan.fetches_per_shard[*shard].push_back(
