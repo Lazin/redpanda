@@ -70,7 +70,9 @@ struct topic_configuration
                  false);
     }
     bool is_cloud_topic() const {
-        return properties.storage_mode == model::redpanda_storage_mode::cloud;
+        return properties.storage_mode == model::redpanda_storage_mode::cloud
+               || properties.storage_mode
+                    == model::redpanda_storage_mode::tiered_cloud;
     }
     bool is_compacted() const { return properties.is_compacted(); }
 
