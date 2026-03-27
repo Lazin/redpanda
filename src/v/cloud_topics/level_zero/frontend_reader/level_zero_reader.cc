@@ -247,9 +247,14 @@ level_zero_log_reader_impl::ctp_read_config() const {
      * writing). This is a small size used across all existing workloads, and
      * for cloud topics it provides plenty of metadata to drive large scans when
      * materialized batches are big.
+     *
+     * In tiered_cloud mode, raft_data batches are full-size (not placeholders),
+     * so we use the caller's max_bytes to avoid under-reading.
      */
     const auto ctp_reader_max_bytes
-      = storage::local_log_reader_config::segment_reader_max_buffer_size;
+      = _ctp->get_ntp_config().is_tiered_cloud()
+          ? _config.max_bytes
+          : storage::local_log_reader_config::segment_reader_max_buffer_size;
 
     storage::local_log_reader_config cfg(
       start_offset,
