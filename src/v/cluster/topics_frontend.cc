@@ -115,7 +115,7 @@ get_enterprise_features(const cluster::topic_configuration& cfg) {
     }
     if (config::shard_local_cfg().cloud_topics_enabled.is_restricted()) {
         if (
-          cfg.properties.storage_mode == model::redpanda_storage_mode::cloud) {
+          cfg.is_cloud_topic()) {
             features.emplace_back("cloud topics");
         }
     }
@@ -226,7 +226,10 @@ std::vector<std::string_view> get_enterprise_features(
         }
     }
     if (config::shard_local_cfg().cloud_topics_enabled.is_restricted()) {
-        if (properties.storage_mode == model::redpanda_storage_mode::cloud) {
+        if (
+          properties.storage_mode == model::redpanda_storage_mode::cloud
+          || properties.storage_mode
+               == model::redpanda_storage_mode::tiered_cloud) {
             features.emplace_back("cloud topics");
         }
     }

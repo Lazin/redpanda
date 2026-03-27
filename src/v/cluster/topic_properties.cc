@@ -181,7 +181,8 @@ bool topic_properties::requires_cloud_topic_remote_erase() const {
     // * Using cloud topics
     // * Not a read replica
     // * Has redpanda.remote.delete=true
-    return storage_mode == model::redpanda_storage_mode::cloud
+    return (storage_mode == model::redpanda_storage_mode::cloud
+            || storage_mode == model::redpanda_storage_mode::tiered_cloud)
            && !read_replica.value_or(false) && remote_delete;
 }
 
