@@ -794,6 +794,18 @@ ss::future<result<raft::replicate_result>> do_upload_and_replicate(
 
 ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
   chunked_vector<model::record_batch> batches, raft::replicate_options opts) {
+    // In tiered_cloud mode, replicate raft_data directly through raft.
+    // No L0 upload, no placeholders, no epoch fencing.
+    if (_partition->get_ntp_config().is_tiered_cloud()) {
+        opts.consistency = raft::consistency_level::quorum_ack;
+        auto result = co_await _partition->replicate(
+          std::move(batches), opts);
+        if (!result) {
+            co_return std::unexpected(result.error());
+        }
+        co_return model::offset(result.value().last_offset());
+    }
+
     chunked_vector<model::record_batch_header> headers;
     headers.reserve(batches.size());
     for (const auto& batch : batches) {
@@ -903,6 +915,13 @@ raft::replicate_stages frontend::replicate(
   model::batch_identity batch_id,
   model::record_batch batch,
   raft::replicate_options opts) {
+    // In tiered_cloud mode, replicate raft_data directly through raft.
+    if (_partition->get_ntp_config().is_tiered_cloud()) {
+        opts.consistency = raft::consistency_level::quorum_ack;
+        return _partition->replicate_in_stages(
+          batch_id, std::move(batch), opts);
+    }
+
     auto ctp_stm_api = make_ctp_stm_api(_partition);
     auto header = batch.header();
     chunked_vector<model::record_batch> batch_vec, to_cache;
