@@ -50,6 +50,7 @@ redpanda_cc_gtest(
         "//src/v/cloud_topics/level_zero/stm:placeholder",
         "//src/v/cluster:state_machine_registry",
         "//src/v/model",
+        "//src/v/model/tests:random",
         "//src/v/raft/tests:raft_fixture",
         "//src/v/ssx:when_all",
         "//src/v/test_utils:gtest",

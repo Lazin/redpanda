@@ -274,17 +274,25 @@ ss::future<std::optional<cluster_epoch>> ctp_stm::get_inactive_epoch() {
 ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
     if (
       batch.header().type != model::record_batch_type::ctp_placeholder
-      && batch.header().type != model::record_batch_type::ctp_stm_command) {
+      && batch.header().type != model::record_batch_type::ctp_stm_command
+      && batch.header().type != model::record_batch_type::raft_data) {
         co_return;
     }
-    vlog(_log.debug, "Applying record batch: {}", batch.header());
 
     switch (batch.header().type) {
     case model::record_batch_type::ctp_placeholder:
+        vlog(_log.debug, "Applying record batch: {}", batch.header());
         apply_placeholder(batch);
         break;
 
+    case model::record_batch_type::raft_data:
+        _state.record_placeholder_size(
+          batch.header().base_offset,
+          static_cast<uint64_t>(batch.header().size_bytes));
+        break;
+
     case model::record_batch_type::ctp_stm_command:
+        vlog(_log.debug, "Applying record batch: {}", batch.header());
         // Decode the command and apply it to the state.
         batch.for_each_record(
           [this, off = batch.header().base_offset](model::record&& r) {

@@ -9,6 +9,7 @@
  */
 
 #include "cloud_topics/level_zero/stm/ctp_stm.h"
+#include "model/tests/random_batch.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_api.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_commands.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
@@ -1305,4 +1306,26 @@ TEST_F_CORO(ctp_stm_fixture, test_reset_state_cmd) {
       << "max_applied_epoch should be cleared after reset";
     ASSERT_FALSE_CORO(stm->state().get_last_reconciled_offset().has_value())
       << "LRO should be cleared after reset";
+}
+
+TEST_F_CORO(ctp_stm_fixture, test_raft_data_size_tracking) {
+    co_await start();
+    ss::abort_source as;
+
+    auto& node = node_for(co_await leader_id());
+    auto stm = node.raft()->stm_manager()->get<ct::ctp_stm>();
+
+    // Replicate a raft_data batch directly (as tiered_cloud would)
+    auto batch = model::test::make_random_batch(model::offset{0}, 1, false);
+    auto data_size = batch.header().size_bytes;
+    auto res = co_await node.raft()->replicate(
+      model::make_memory_record_batch_reader(std::move(batch)),
+      raft::replicate_options(raft::consistency_level::quorum_ack));
+    ASSERT_TRUE(res.has_value());
+
+    // Wait for STM to apply
+    co_await stm->sync(10s, as);
+
+    // The size estimator should have tracked the raft_data batch
+    EXPECT_GT(stm->estimated_data_size(), 0);
 }

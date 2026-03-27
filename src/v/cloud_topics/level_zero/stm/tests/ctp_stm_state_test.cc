@@ -470,4 +470,15 @@ TEST(ctp_stm_state_test, l0_simulation) {
     }
 }
 
+TEST(ctp_stm_state_test, record_raft_data_batch_size) {
+    ct::ctp_stm_state state;
+
+    // Simulate what do_apply would do for raft_data batches
+    state.record_placeholder_size(model::offset(0), 1024);
+    state.record_placeholder_size(model::offset(1), 2048);
+
+    // Total estimated data should be 3072
+    EXPECT_EQ(state.estimated_data_size(), 3072);
+}
+
 } // anonymous namespace
