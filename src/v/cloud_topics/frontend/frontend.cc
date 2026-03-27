@@ -803,7 +803,7 @@ ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
         if (!result) {
             co_return std::unexpected(result.error());
         }
-        co_return model::offset(result.value().last_offset());
+        co_return result.value().last_offset;
     }
 
     chunked_vector<model::record_batch_header> headers;
@@ -916,10 +916,25 @@ raft::replicate_stages frontend::replicate(
   model::record_batch batch,
   raft::replicate_options opts) {
     // In tiered_cloud mode, replicate raft_data directly through raft.
+    // Use partition->replicate_in_stages which returns kafka_stages (with
+    // kafka-translated offsets), then adapt to raft::replicate_stages.
     if (_partition->get_ntp_config().is_tiered_cloud()) {
         opts.consistency = raft::consistency_level::quorum_ack;
-        return _partition->raft()->replicate_in_stages(
-          std::move(batch), opts);
+        auto ks = _partition->replicate_in_stages(
+          batch_id, std::move(batch), opts);
+        raft::replicate_stages out(raft::errc::success);
+        out.request_enqueued = std::move(ks.request_enqueued);
+        out.replicate_finished = ks.replicate_finished.then(
+          [](result<cluster::kafka_result> r) -> result<raft::replicate_result> {
+              if (!r) {
+                  return r.error();
+              }
+              return raft::replicate_result{
+                .last_offset = kafka::offset_cast(r.value().last_offset),
+                .last_term = r.value().last_term,
+              };
+          });
+        return out;
     }
 
     auto ctp_stm_api = make_ctp_stm_api(_partition);
