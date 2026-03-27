@@ -95,9 +95,14 @@ class EndToEndCloudTopicsBase(EndToEndTest):
     def setUp(self):
         assert self.redpanda
         self.redpanda.start()
+        # Allow tests to select storage mode via @matrix(storage_mode=...).
+        # Default to cloud if not specified.
+        storage_mode = self.test_context.injected_args.get(
+            "storage_mode", TopicSpec.STORAGE_MODE_CLOUD
+        )
         for topic in self.topics:
             config = {
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
+                TopicSpec.PROPERTY_STORAGE_MODE: storage_mode,
                 "cleanup.policy": topic.cleanup_policy,
             }
             if topic.min_cleanable_dirty_ratio is not None:
@@ -168,7 +173,13 @@ class EndToEndCloudTopicsTest(EndToEndCloudTopicsBase):
         )
 
     @cluster(num_nodes=5)
-    def test_write(self):
+    @matrix(
+        storage_mode=[
+            TopicSpec.STORAGE_MODE_CLOUD,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        ],
+    )
+    def test_write(self, storage_mode):
         self.start_producer()
 
         self.await_num_produced(min_records=50000)
