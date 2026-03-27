@@ -918,8 +918,8 @@ raft::replicate_stages frontend::replicate(
     // In tiered_cloud mode, replicate raft_data directly through raft.
     if (_partition->get_ntp_config().is_tiered_cloud()) {
         opts.consistency = raft::consistency_level::quorum_ack;
-        return _partition->replicate_in_stages(
-          batch_id, std::move(batch), opts);
+        return _partition->raft()->replicate_in_stages(
+          std::move(batch), opts);
     }
 
     auto ctp_stm_api = make_ctp_stm_api(_partition);

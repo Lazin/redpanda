@@ -1310,22 +1310,21 @@ TEST_F_CORO(ctp_stm_fixture, test_reset_state_cmd) {
 
 TEST_F_CORO(ctp_stm_fixture, test_raft_data_size_tracking) {
     co_await start();
-    ss::abort_source as;
 
-    auto& node = node_for(co_await leader_id());
-    auto stm = node.raft()->stm_manager()->get<ct::ctp_stm>();
+    co_await wait_for_leader(raft::default_timeout());
+    auto& leader_node = node(*get_leader());
+    auto stm_api = api(leader_node);
 
     // Replicate a raft_data batch directly (as tiered_cloud would)
     auto batch = model::test::make_random_batch(model::offset{0}, 1, false);
-    auto data_size = batch.header().size_bytes;
-    auto res = co_await node.raft()->replicate(
-      model::make_memory_record_batch_reader(std::move(batch)),
+    auto res = co_await leader_node.raft()->replicate(
+      std::move(batch),
       raft::replicate_options(raft::consistency_level::quorum_ack));
-    ASSERT_TRUE(res.has_value());
+    ASSERT_TRUE_CORO(res.has_value());
 
-    // Wait for STM to apply
-    co_await stm->sync(10s, as);
+    // Wait for STM to catch up to the replicated offset
+    co_await stm_api.sync_in_term(model::no_timeout, as);
 
     // The size estimator should have tracked the raft_data batch
-    EXPECT_GT(stm->estimated_data_size(), 0);
+    EXPECT_GT(stm_api.estimated_data_size(), uint64_t{0});
 }
