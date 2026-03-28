@@ -578,7 +578,9 @@ class StorageModeTransitionTest(StorageModeTestBase):
                 TopicSpec.PROPERTY_STORAGE_MODE,
                 TopicSpec.STORAGE_MODE_TIERED_CLOUD,
             )
-            assert False, "Transition from unset to tiered_cloud should have been rejected"
+            assert False, (
+                "Transition from unset to tiered_cloud should have been rejected"
+            )
         except Exception:
             pass  # Expected - transition should be rejected
         assert (
@@ -598,7 +600,9 @@ class StorageModeTransitionTest(StorageModeTestBase):
                 TopicSpec.PROPERTY_STORAGE_MODE,
                 TopicSpec.STORAGE_MODE_TIERED_CLOUD,
             )
-            assert False, "Transition from local to tiered_cloud should have been rejected"
+            assert False, (
+                "Transition from local to tiered_cloud should have been rejected"
+            )
         except Exception:
             pass  # Expected - transition should be rejected
         assert (
@@ -744,7 +748,9 @@ class StorageModeCloudTransitionTest(StorageModeTestBase):
         self._create_topic(
             rpk,
             "topic-tc-blocked",
-            config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD},
+            config={
+                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD
+            },
         )
         assert (
             self._get_topic_storage_mode(rpk, "topic-tc-blocked")
@@ -758,7 +764,9 @@ class StorageModeCloudTransitionTest(StorageModeTestBase):
                 TopicSpec.PROPERTY_STORAGE_MODE,
                 TopicSpec.STORAGE_MODE_LOCAL,
             )
-            assert False, "Transition from tiered_cloud to local should have been rejected"
+            assert False, (
+                "Transition from tiered_cloud to local should have been rejected"
+            )
         except Exception:
             pass
         assert (
@@ -773,7 +781,9 @@ class StorageModeCloudTransitionTest(StorageModeTestBase):
                 TopicSpec.PROPERTY_STORAGE_MODE,
                 TopicSpec.STORAGE_MODE_TIERED,
             )
-            assert False, "Transition from tiered_cloud to tiered should have been rejected"
+            assert False, (
+                "Transition from tiered_cloud to tiered should have been rejected"
+            )
         except Exception:
             pass
         assert (
@@ -788,7 +798,9 @@ class StorageModeCloudTransitionTest(StorageModeTestBase):
                 TopicSpec.PROPERTY_STORAGE_MODE,
                 TopicSpec.STORAGE_MODE_UNSET,
             )
-            assert False, "Transition from tiered_cloud to unset should have been rejected"
+            assert False, (
+                "Transition from tiered_cloud to unset should have been rejected"
+            )
         except Exception:
             pass
         assert (
@@ -806,7 +818,9 @@ class StorageModeCloudTransitionTest(StorageModeTestBase):
         self._create_topic(
             rpk,
             "topic-created-as-tc",
-            config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD},
+            config={
+                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD
+            },
         )
         assert (
             self._get_topic_storage_mode(rpk, "topic-created-as-tc")

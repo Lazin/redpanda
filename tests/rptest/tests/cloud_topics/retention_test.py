@@ -131,7 +131,9 @@ class CloudTopicsRetentionTest(EndToEndCloudTopicsBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_size_based_retention(self, cloud_storage_type: CloudStorageType, storage_mode: str):
+    def test_size_based_retention(
+        self, cloud_storage_type: CloudStorageType, storage_mode: str
+    ):
         """
         Test that size-based retention (retention.bytes) correctly deletes
         old data from cloud topics.
@@ -224,7 +226,9 @@ class CloudTopicsRetentionTest(EndToEndCloudTopicsBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_time_based_retention(self, cloud_storage_type: CloudStorageType, storage_mode: str):
+    def test_time_based_retention(
+        self, cloud_storage_type: CloudStorageType, storage_mode: str
+    ):
         """
         Test that time-based retention (retention.ms) correctly deletes
         old data from cloud topics based on message timestamps.
