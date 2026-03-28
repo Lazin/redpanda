@@ -272,23 +272,10 @@ ss::future<std::optional<cluster_epoch>> ctp_stm::get_inactive_epoch() {
 }
 
 ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
-    if (
-      batch.header().type != model::record_batch_type::ctp_placeholder
-      && batch.header().type != model::record_batch_type::ctp_stm_command
-      && batch.header().type != model::record_batch_type::raft_data) {
-        co_return;
-    }
-
     switch (batch.header().type) {
     case model::record_batch_type::ctp_placeholder:
         vlog(_log.debug, "Applying record batch: {}", batch.header());
         apply_placeholder(batch);
-        break;
-
-    case model::record_batch_type::raft_data:
-        _state.record_placeholder_size(
-          batch.header().base_offset,
-          static_cast<uint64_t>(batch.header().size_bytes));
         break;
 
     case model::record_batch_type::ctp_stm_command:
@@ -320,8 +307,15 @@ ss::future<> ctp_stm::do_apply(const model::record_batch& batch) {
         break;
 
     default:
+        // In tiered_cloud mode, raft_data and transactional control batches
+        // (tx_fence, tx_prepare, etc.) are replicated directly through raft.
+        // Track their size so DescribeLogDirs reports correct partition sizes.
+        _state.record_placeholder_size(
+          batch.header().base_offset,
+          static_cast<uint64_t>(batch.header().size_bytes));
         break;
     }
+    co_return;
 }
 
 void ctp_stm::apply_advance_reconciled_offset(model::record record) {
