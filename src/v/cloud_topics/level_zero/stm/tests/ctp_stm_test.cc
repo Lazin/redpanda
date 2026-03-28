@@ -9,13 +9,13 @@
  */
 
 #include "cloud_topics/level_zero/stm/ctp_stm.h"
-#include "model/tests/random_batch.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_api.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_commands.h"
 #include "cloud_topics/level_zero/stm/placeholder.h"
 #include "cloud_topics/logger.h"
 #include "cloud_topics/types.h"
 #include "model/fundamental.h"
+#include "model/tests/random_batch.h"
 #include "model/timeout_clock.h"
 #include "model/timestamp.h"
 #include "raft/tests/raft_fixture.h"

@@ -301,8 +301,7 @@ TEST_F(frontend_fixture, test_tiered_cloud_replicate_skips_l0_upload) {
     auto res = frontend
                  .replicate(
                    std::move(buf),
-                   raft::replicate_options(
-                     raft::consistency_level::quorum_ack))
+                   raft::replicate_options(raft::consistency_level::quorum_ack))
                  .get();
 
     ASSERT_TRUE(res.has_value());

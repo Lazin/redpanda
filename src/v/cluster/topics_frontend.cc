@@ -114,8 +114,7 @@ get_enterprise_features(const cluster::topic_configuration& cfg) {
         }
     }
     if (config::shard_local_cfg().cloud_topics_enabled.is_restricted()) {
-        if (
-          cfg.is_cloud_topic()) {
+        if (cfg.is_cloud_topic()) {
             features.emplace_back("cloud topics");
         }
     }

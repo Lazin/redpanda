@@ -798,8 +798,7 @@ ss::future<std::expected<kafka::offset, std::error_code>> frontend::replicate(
     // No L0 upload, no placeholders, no epoch fencing.
     if (_partition->get_ntp_config().is_tiered_cloud()) {
         opts.consistency = raft::consistency_level::quorum_ack;
-        auto result = co_await _partition->replicate(
-          std::move(batches), opts);
+        auto result = co_await _partition->replicate(std::move(batches), opts);
         if (!result) {
             co_return std::unexpected(result.error());
         }
@@ -925,7 +924,8 @@ raft::replicate_stages frontend::replicate(
         raft::replicate_stages out(raft::errc::success);
         out.request_enqueued = std::move(ks.request_enqueued);
         out.replicate_finished = ks.replicate_finished.then(
-          [](result<cluster::kafka_result> r) -> result<raft::replicate_result> {
+          [](
+            result<cluster::kafka_result> r) -> result<raft::replicate_result> {
               if (!r) {
                   return r.error();
               }
