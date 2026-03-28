@@ -120,9 +120,15 @@ class EndToEndCloudTopicsIcebergCompactionTest(EndToEndCloudTopicsIcebergTestBas
         )
 
     @cluster(num_nodes=4)
-    @matrix(cloud_storage_type=supported_storage_types())
+    @matrix(
+        cloud_storage_type=supported_storage_types(),
+        storage_mode=[
+            TopicSpec.STORAGE_MODE_CLOUD,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        ],
+    )
     def test_compaction_preserves_all_offsets_in_iceberg(
-        self, cloud_storage_type: CloudStorageType
+        self, cloud_storage_type: CloudStorageType, storage_mode: str
     ):
         """
         Produce messages with a small key set (causing many duplicates),
@@ -140,7 +146,7 @@ class EndToEndCloudTopicsIcebergCompactionTest(EndToEndCloudTopicsIcebergTestBas
                 self.topic_name,
                 iceberg_mode="key_value",
                 config={
-                    TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
+                    TopicSpec.PROPERTY_STORAGE_MODE: storage_mode,
                     "cleanup.policy": TopicSpec.CLEANUP_COMPACT,
                 },
             )
@@ -216,9 +222,15 @@ class EndToEndCloudTopicsIcebergDeletionTest(EndToEndCloudTopicsIcebergTestBase)
         )
 
     @cluster(num_nodes=4)
-    @matrix(cloud_storage_type=supported_storage_types())
+    @matrix(
+        cloud_storage_type=supported_storage_types(),
+        storage_mode=[
+            TopicSpec.STORAGE_MODE_CLOUD,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        ],
+    )
     def test_deletion_blocked_until_translated(
-        self, cloud_storage_type: CloudStorageType
+        self, cloud_storage_type: CloudStorageType, storage_mode: str
     ):
         """
         Test that even when running with very low retention policies, we
@@ -236,7 +248,7 @@ class EndToEndCloudTopicsIcebergDeletionTest(EndToEndCloudTopicsIcebergTestBase)
                 self.topic_name,
                 iceberg_mode="key_value",
                 config={
-                    TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
+                    TopicSpec.PROPERTY_STORAGE_MODE: storage_mode,
                     "retention.ms": 500,
                     "retention.bytes": 1024,
                 },
