@@ -151,7 +151,7 @@ class DebugRowsTest(EndToEndCloudTopicsBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_read_and_write_rows(self, storage_mode) -> None:
+    def test_read_and_write_rows(self, storage_mode: str) -> None:
         topic: TopicSpec = self.topics[0]
         self.start_producer(num_nodes=1)  # type: ignore[reportUnknownMemberType]
         self.await_num_produced(min_records=5000, timeout_sec=120)  # type: ignore[reportUnknownMemberType]

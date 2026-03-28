@@ -263,7 +263,7 @@ class CompactionStressKeyCardinalityTest(CompactionStressBase):
     def setUp(self):
         assert self.redpanda
         self.redpanda.start()
-        storage_mode = self.test_context.injected_args.get(
+        storage_mode = (self.test_context.injected_args or {}).get(
             "storage_mode", TopicSpec.STORAGE_MODE_CLOUD
         )
         self.rpk.create_topic(
@@ -284,7 +284,7 @@ class CompactionStressKeyCardinalityTest(CompactionStressBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_key_cardinality_overflow(self, storage_mode):
+    def test_key_cardinality_overflow(self, storage_mode: str):
         self.wait_for_managed_logs()
 
         producer = self.produce_and_wait(

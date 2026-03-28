@@ -56,7 +56,7 @@ class CloudTopicsSizeReportingTest(EndToEndCloudTopicsBase):
 
     def setUp(self) -> None:
         super().setUp()
-        storage_mode = self.test_context.injected_args.get(
+        storage_mode = (self.test_context.injected_args or {}).get(
             "storage_mode", TopicSpec.STORAGE_MODE_CLOUD
         )
         self.rpk.create_topic(
@@ -173,7 +173,7 @@ class CloudTopicsSizeReportingTest(EndToEndCloudTopicsBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_l0_size_reporting(self, storage_mode) -> None:
+    def test_l0_size_reporting(self, storage_mode: str) -> None:
         """
         Verify that L0 data appears in DescribeLogDirs, survives restarts
         and leadership transfers, and that total size is roughly preserved

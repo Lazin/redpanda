@@ -97,7 +97,7 @@ class EndToEndCloudTopicsBase(EndToEndTest):
         self.redpanda.start()
         # Allow tests to select storage mode via @matrix(storage_mode=...).
         # Default to cloud if not specified.
-        storage_mode = self.test_context.injected_args.get(
+        storage_mode = (self.test_context.injected_args or {}).get(
             "storage_mode", TopicSpec.STORAGE_MODE_CLOUD
         )
         for topic in self.topics:
@@ -179,7 +179,7 @@ class EndToEndCloudTopicsTest(EndToEndCloudTopicsBase):
             TopicSpec.STORAGE_MODE_TIERED_CLOUD,
         ],
     )
-    def test_write(self, storage_mode):
+    def test_write(self, storage_mode: str):
         self.start_producer()
 
         self.await_num_produced(min_records=50000)
