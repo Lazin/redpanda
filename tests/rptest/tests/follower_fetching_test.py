@@ -172,7 +172,12 @@ class FollowerFetchingTest(PreallocNodesTest):
 
     @cluster(num_nodes=5)
     @matrix(
-        fetch_from=[FetchFrom.LOCAL, FetchFrom.TIERED_STORAGE, FetchFrom.CLOUD_TOPIC, FetchFrom.TIERED_CLOUD_TOPIC]
+        fetch_from=[
+            FetchFrom.LOCAL,
+            FetchFrom.TIERED_STORAGE,
+            FetchFrom.CLOUD_TOPIC,
+            FetchFrom.TIERED_CLOUD_TOPIC,
+        ]
     )
     def test_basic_follower_fetching(self, fetch_from):
         rack_layout_str = "ABC"
@@ -245,7 +250,12 @@ class FollowerFetchingTest(PreallocNodesTest):
 
     @cluster(num_nodes=5)
     @matrix(
-        fetch_from=[FetchFrom.LOCAL, FetchFrom.TIERED_STORAGE, FetchFrom.CLOUD_TOPIC, FetchFrom.TIERED_CLOUD_TOPIC]
+        fetch_from=[
+            FetchFrom.LOCAL,
+            FetchFrom.TIERED_STORAGE,
+            FetchFrom.CLOUD_TOPIC,
+            FetchFrom.TIERED_CLOUD_TOPIC,
+        ]
     )
     def test_with_leadership_transfers(self, fetch_from):
         """
@@ -325,7 +335,12 @@ class FollowerFetchingTest(PreallocNodesTest):
 
     @cluster(num_nodes=5)
     @matrix(
-        fetch_from=[FetchFrom.LOCAL, FetchFrom.TIERED_STORAGE, FetchFrom.CLOUD_TOPIC, FetchFrom.TIERED_CLOUD_TOPIC]
+        fetch_from=[
+            FetchFrom.LOCAL,
+            FetchFrom.TIERED_STORAGE,
+            FetchFrom.CLOUD_TOPIC,
+            FetchFrom.TIERED_CLOUD_TOPIC,
+        ]
     )
     def test_follower_fetching_with_maintenance_mode(self, fetch_from):
         rack_layout_str = "ABC"
