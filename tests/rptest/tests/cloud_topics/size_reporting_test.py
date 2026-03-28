@@ -14,6 +14,7 @@ from ducktape.tests.test import TestContext
 from ducktape.utils.util import wait_until
 
 from rptest.clients.admin.v2 import Admin as AdminV2, l0_pb, ntp_pb
+from ducktape.mark import matrix
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin as AdminV1
 from rptest.services.cluster import cluster
@@ -55,12 +56,15 @@ class CloudTopicsSizeReportingTest(EndToEndCloudTopicsBase):
 
     def setUp(self) -> None:
         super().setUp()
+        storage_mode = self.test_context.injected_args.get(
+            "storage_mode", TopicSpec.STORAGE_MODE_CLOUD
+        )
         self.rpk.create_topic(
             topic=self.topic_name,
             partitions=1,
             replicas=3,
             config={
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
+                TopicSpec.PROPERTY_STORAGE_MODE: storage_mode,
             },
         )
 
@@ -163,7 +167,13 @@ class CloudTopicsSizeReportingTest(EndToEndCloudTopicsBase):
     # --- Test ---
 
     @cluster(num_nodes=4)
-    def test_l0_size_reporting(self) -> None:
+    @matrix(
+        storage_mode=[
+            TopicSpec.STORAGE_MODE_CLOUD,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        ],
+    )
+    def test_l0_size_reporting(self, storage_mode) -> None:
         """
         Verify that L0 data appears in DescribeLogDirs, survives restarts
         and leadership transfers, and that total size is roughly preserved
