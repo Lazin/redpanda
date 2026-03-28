@@ -91,12 +91,19 @@ inline constexpr auto storage_mode_properties
     {topic_property_record_value_subject_name_strategy_compat,
      storage_mode_mask::all},
 
-    // Properties valid for local and tiered only (NOT cloud)
-    {topic_property_flush_bytes, storage_mode_mask::local_tiered},
-    {topic_property_flush_ms, storage_mode_mask::local_tiered},
-    {topic_property_segment_size, storage_mode_mask::local_tiered},
-    {topic_property_segment_ms, storage_mode_mask::local_tiered},
-    {topic_property_write_caching, storage_mode_mask::local_tiered},
+    // Properties valid for local, tiered, and tiered_cloud (NOT cloud).
+    // In tiered_cloud mode data goes through raft and local storage,
+    // so segment and flush settings apply.
+    {topic_property_flush_bytes,
+     storage_mode_mask::local_tiered | storage_mode_mask::tiered_cloud},
+    {topic_property_flush_ms,
+     storage_mode_mask::local_tiered | storage_mode_mask::tiered_cloud},
+    {topic_property_segment_size,
+     storage_mode_mask::local_tiered | storage_mode_mask::tiered_cloud},
+    {topic_property_segment_ms,
+     storage_mode_mask::local_tiered | storage_mode_mask::tiered_cloud},
+    {topic_property_write_caching,
+     storage_mode_mask::local_tiered | storage_mode_mask::tiered_cloud},
 
     // Properties valid for tiered only
     {topic_property_initial_retention_local_target_bytes,
