@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>L0 Read Path Cache Visualization</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; }
+
+.layout { display: flex; height: 100vh; }
+.sidebar { width: 320px; min-width: 320px; background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.viz-area { flex: 1; overflow: auto; padding: 16px; }
+.metrics-bar { display: flex; gap: 16px; padding: 12px 16px; background: #161b22; border-top: 1px solid #30363d; flex-wrap: wrap; }
+
+h1 { font-size: 16px; color: #58a6ff; margin-bottom: 12px; }
+h2 { font-size: 13px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin: 16px 0 8px; }
+h2:first-child { margin-top: 0; }
+
+.param { margin-bottom: 10px; }
+.param label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+.param label span { color: #58a6ff; font-weight: 600; }
+.param input[type="range"] { width: 100%; accent-color: #58a6ff; }
+.param .desc { font-size: 10px; color: #484f58; margin-top: 1px; }
+
+.controls { display: flex; gap: 6px; margin: 12px 0; flex-wrap: wrap; }
+.controls button {
+  padding: 6px 14px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9;
+  border-radius: 6px; cursor: pointer; font-size: 12px; transition: background 0.15s;
+}
+.controls button:hover { background: #30363d; }
+.controls button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+.controls button.primary:hover { background: #2ea043; }
+.controls button.danger { background: #da3633; border-color: #f85149; color: #fff; }
+.controls button.danger:hover { background: #f85149; }
+
+.metric {
+  background: #21262d; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; min-width: 120px;
+}
+.metric .label { font-size: 10px; color: #8b949e; text-transform: uppercase; }
+.metric .value { font-size: 20px; font-weight: 700; color: #58a6ff; }
+.metric .value.good { color: #3fb950; }
+.metric .value.warn { color: #d29922; }
+.metric .value.bad { color: #f85149; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; font-size: 11px; }
+.legend-item { display: flex; align-items: center; gap: 4px; }
+.legend-swatch { width: 14px; height: 14px; border-radius: 2px; border: 1px solid #30363d; }
+
+/* Object grid */
+.grid-container { margin-bottom: 20px; }
+.grid-title { font-size: 13px; color: #8b949e; margin-bottom: 6px; }
+.object-grid {
+  display: inline-grid; gap: 1px; background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+  overflow: hidden;
+}
+.object-grid .cell {
+  width: 10px; height: 10px; transition: background 0.2s;
+}
+.object-grid .header-cell {
+  width: 10px; height: 14px; font-size: 7px; text-align: center; line-height: 14px;
+  color: #484f58; background: #161b22;
+}
+.object-grid .row-header {
+  height: 10px; width: 28px; font-size: 7px; text-align: right; padding-right: 3px;
+  line-height: 10px; color: #484f58; background: #161b22;
+}
+
+/* Cache bar */
+.cache-bar-container { margin: 16px 0; }
+.cache-bar {
+  height: 24px; background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+  overflow: hidden; display: flex; position: relative;
+}
+.cache-bar .segment { transition: width 0.3s; height: 100%; }
+.cache-bar-label {
+  position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: #c9d1d9; pointer-events: none; text-shadow: 0 1px 2px #000;
+}
+
+/* Partition progress */
+.partition-progress { margin: 16px 0; }
+.pp-row { display: flex; align-items: center; gap: 4px; margin-bottom: 2px; font-size: 10px; }
+.pp-label { width: 40px; text-align: right; color: #484f58; flex-shrink: 0; }
+.pp-bar { flex: 1; height: 10px; background: #21262d; border-radius: 2px; overflow: hidden; position: relative; }
+.pp-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+.pp-reconciled { background: #238636; }
+.pp-written { background: #30363d; }
+
+/* Timeline chart */
+.chart-container { margin: 16px 0; }
+canvas { border-radius: 4px; background: #0d1117; border: 1px solid #30363d; }
+
+/* Shard view */
+.shard-view { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.shard-box {
+  background: #21262d; border: 1px solid #30363d; border-radius: 4px;
+  padding: 6px 10px; min-width: 60px; text-align: center;
+}
+.shard-box .shard-id { font-size: 10px; color: #484f58; }
+.shard-box .shard-parts { font-size: 14px; font-weight: 600; color: #58a6ff; }
+
+.tooltip {
+  position: fixed; background: #1c2128; border: 1px solid #30363d; border-radius: 6px;
+  padding: 8px 12px; font-size: 11px; pointer-events: none; z-index: 100; max-width: 250px;
+  display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+.speed-display { font-size: 11px; color: #8b949e; margin: 4px 0; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="sidebar">
+    <h1>L0 Cache Simulation</h1>
+
+    <h2>Topology</h2>
+    <div class="param">
+      <label>Partitions <span id="v-partitions">50</span></label>
+      <input type="range" id="partitions" min="4" max="200" value="50" step="1">
+      <div class="desc">Number of cloud topic partitions</div>
+    </div>
+    <div class="param">
+      <label>Shards <span id="v-shards">4</span></label>
+      <input type="range" id="shards" min="1" max="32" value="4" step="1">
+      <div class="desc">Number of CPU shards</div>
+    </div>
+
+    <h2>Write Path</h2>
+    <div class="param">
+      <label>L0 object size <span id="v-l0size">4</span> MiB</label>
+      <input type="range" id="l0size" min="1" max="8" value="4" step="1">
+    </div>
+    <div class="param">
+      <label>Write rate <span id="v-writerate">10</span> L0/step</label>
+      <input type="range" id="writerate" min="1" max="50" value="10" step="1">
+      <div class="desc">L0 objects produced per simulation step</div>
+    </div>
+
+    <h2>Reconciler</h2>
+    <div class="param" style="margin-bottom:12px">
+      <label style="cursor:pointer">
+        <input type="checkbox" id="breadthfirst" checked>
+        <strong>Breadth-first</strong> (uncheck for depth-first)
+      </label>
+    </div>
+    <div class="param">
+      <label>Reconcile interval <span id="v-reconcileinterval">10</span> steps</label>
+      <input type="range" id="reconcileinterval" min="1" max="50" value="10" step="1">
+      <div class="desc">Steps between reconciler runs</div>
+    </div>
+    <div class="param">
+      <label>L1 object size <span id="v-l1size">80</span> MiB</label>
+      <input type="range" id="l1size" min="8" max="256" value="80" step="8">
+      <div class="desc">Target L1 object size</div>
+    </div>
+    <div id="breadth-params">
+      <div class="param">
+        <label>Min partition data <span id="v-minpartdata">16</span> MiB</label>
+        <input type="range" id="minpartdata" min="1" max="64" value="16" step="1">
+        <div class="desc">Skip partition if less than this; also max per partition per L1 object</div>
+      </div>
+    </div>
+    <div id="depth-params" style="display:none">
+      <div class="param">
+        <label>Partitions per run <span id="v-partsperrun">3</span></label>
+        <input type="range" id="partsperrun" min="1" max="20" value="3" step="1">
+        <div class="desc">Partitions reconciled per run (depth-first)</div>
+      </div>
+    </div>
+
+    <h2>Cache</h2>
+    <div class="param">
+      <label>Cache capacity <span id="v-cachesize">100</span> MiB</label>
+      <input type="range" id="cachesize" min="10" max="102400" value="100" step="10">
+      <div class="desc">Disk cache capacity for L0 objects</div>
+    </div>
+
+    <h2>Simulation</h2>
+    <div class="param">
+      <label>Speed <span id="v-speed">5</span>x</label>
+      <input type="range" id="speed" min="1" max="50" value="5" step="1">
+    </div>
+
+    <div class="controls">
+      <button class="primary" id="btn-start">Start</button>
+      <button id="btn-step">Step</button>
+      <button class="danger" id="btn-reset">Reset</button>
+    </div>
+
+    <div class="speed-display">Step: <span id="step-counter">0</span> | Reconcile runs: <span id="reconcile-counter">0</span></div>
+
+    <h2>Legend</h2>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-swatch" style="background:#161b22"></div> Empty</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#1f6feb"></div> Has data</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#3fb950"></div> Cached</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#f0883e"></div> Reading</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#238636"></div> Reconciled</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#8b949e"></div> Evicted</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="viz-area" id="viz-area">
+      <div class="grid-container">
+        <div class="grid-title">L0 Objects (rows) x Partitions (columns) — cell = extent in object for partition</div>
+        <div id="object-grid"></div>
+      </div>
+
+      <div class="cache-bar-container">
+        <div class="grid-title">Cache Usage</div>
+        <div class="cache-bar" id="cache-bar"></div>
+      </div>
+
+      <div class="partition-progress">
+        <div class="grid-title">Per-Partition Reconciliation Progress</div>
+        <div id="partition-bars"></div>
+      </div>
+
+      <div class="grid-container">
+        <div class="grid-title">Shard Assignment</div>
+        <div class="shard-view" id="shard-view"></div>
+      </div>
+
+      <div class="chart-container">
+        <div class="grid-title">Cache Hit Rate Over Time</div>
+        <canvas id="chart-hitrate" width="800" height="200"></canvas>
+      </div>
+
+      <div class="chart-container">
+        <div class="grid-title">Downloads Over Time (cumulative)</div>
+        <canvas id="chart-downloads" width="800" height="200"></canvas>
+      </div>
+    </div>
+
+    <div class="metrics-bar">
+      <div class="metric"><div class="label">Cache Hit Rate</div><div class="value" id="m-hitrate">—</div></div>
+      <div class="metric"><div class="label">Total Downloads</div><div class="value" id="m-downloads">0</div></div>
+      <div class="metric"><div class="label">Cache Hits</div><div class="value" id="m-hits">0</div></div>
+      <div class="metric"><div class="label">Read Amplification</div><div class="value" id="m-readamp">—</div></div>
+      <div class="metric"><div class="label">L0 Objects</div><div class="value" id="m-objects">0</div></div>
+      <div class="metric"><div class="label">Unique Objects Read</div><div class="value" id="m-unique">0</div></div>
+      <div class="metric"><div class="label">Cache Evictions</div><div class="value" id="m-evictions">0</div></div>
+      <div class="metric"><div class="label">L1 Uploads</div><div class="value" id="m-l1uploads">0</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// ── Parameters ──
+const params = {
+  partitions: 50, shards: 4, l0size: 4, writerate: 10,
+  reconcileinterval: 10, minpartdata: 16, l1size: 80, partsperrun: 3, cachesize: 100, speed: 5
+};
+
+let breadthFirst = true;
+
+const paramIds = Object.keys(params);
+paramIds.forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return; // skip if not in DOM (toggle-hidden params)
+  el.addEventListener('input', () => {
+    params[id] = parseInt(el.value);
+    document.getElementById('v-' + id).textContent = el.value;
+  });
+});
+
+document.getElementById('breadthfirst').addEventListener('change', (e) => {
+  breadthFirst = e.target.checked;
+  document.getElementById('breadth-params').style.display = breadthFirst ? '' : 'none';
+  document.getElementById('depth-params').style.display = breadthFirst ? 'none' : '';
+});
+
+// ── State ──
+let state = null;
+let running = false;
+let animFrame = null;
+let lastTime = 0;
+
+function createState() {
+  const s = {
+    step: 0,
+    reconcileRuns: 0,
+    // L0 objects: array of { id, size, extents: Map<partitionId, {offset, size}> }
+    objects: [],
+    nextObjectId: 0,
+    // Per-partition state
+    partitionWriteOffset: new Array(params.partitions).fill(0), // next offset to write
+    partitionReconcileOffset: new Array(params.partitions).fill(0), // next offset to reconcile
+    // Which partition to reconcile next (round-robin index)
+    nextReconcilePartition: 0,
+    // Cache: Map<objectId, {size, lastAccess}>
+    cache: new Map(),
+    cacheUsed: 0,
+    // Metrics
+    totalDownloads: 0,
+    totalHits: 0,
+    totalBytesRead: 0,   // actual bytes needed (useful)
+    totalBytesDownloaded: 0, // full objects downloaded
+    uniqueObjectsRead: new Set(),
+    evictions: 0,
+    l1Uploads: 0,
+    // For current step highlighting
+    activeReads: new Set(), // object IDs being read this step
+    activePartitions: new Set(),
+    // Time series
+    hitRateHistory: [],
+    downloadHistory: [],
+    // Shard partition assignment
+    shardPartitions: [],
+  };
+  // Assign partitions to shards round-robin
+  s.shardPartitions = new Array(params.shards).fill(null).map(() => []);
+  for (let p = 0; p < params.partitions; p++) {
+    s.shardPartitions[p % params.shards].push(p);
+  }
+  return s;
+}
+
+// ── Simulation Logic ──
+
+function simWriteStep(s) {
+  // Producers write to all partitions, data aggregated into L0 objects.
+  // Each L0 object is ~l0size MiB and contains extents for a subset of partitions.
+  // We model: each step produces `writerate` L0 objects. Each object contains data
+  // from all partitions (spread across), with each extent being l0size/partitions MiB.
+  // In practice, the write path batches data from multiple partitions into each L0 object.
+
+  const extentSize = params.l0size / params.partitions; // MiB per partition per object
+  const recordsPerExtent = Math.max(1, Math.floor(extentSize * 256)); // ~256 records per MiB
+
+  for (let o = 0; o < params.writerate; o++) {
+    const obj = {
+      id: s.nextObjectId++,
+      size: params.l0size,
+      extents: new Map(),
+    };
+    // Each object has data for all partitions
+    for (let p = 0; p < params.partitions; p++) {
+      const baseOffset = s.partitionWriteOffset[p];
+      const numRecords = recordsPerExtent;
+      obj.extents.set(p, {
+        baseOffset: baseOffset,
+        lastOffset: baseOffset + numRecords - 1,
+        size: extentSize,
+      });
+      s.partitionWriteOffset[p] += numRecords;
+    }
+    s.objects.push(obj);
+  }
+}
+
+function cacheEvict(s, needed) {
+  // LRU eviction
+  while (s.cacheUsed + needed > params.cachesize && s.cache.size > 0) {
+    // Find LRU entry
+    let oldestId = null, oldestAccess = Infinity;
+    for (const [id, entry] of s.cache) {
+      if (entry.lastAccess < oldestAccess) {
+        oldestAccess = entry.lastAccess;
+        oldestId = id;
+      }
+    }
+    if (oldestId === null) break;
+    const entry = s.cache.get(oldestId);
+    s.cacheUsed -= entry.size;
+    s.cache.delete(oldestId);
+    s.evictions++;
+  }
+}
+
+function cacheGet(s, objectId) {
+  const entry = s.cache.get(objectId);
+  if (entry) {
+    entry.lastAccess = s.step;
+    return true;
+  }
+  return false;
+}
+
+function cachePut(s, objectId, size) {
+  if (s.cache.has(objectId)) {
+    s.cache.get(objectId).lastAccess = s.step;
+    return;
+  }
+  cacheEvict(s, size);
+  if (s.cacheUsed + size <= params.cachesize) {
+    s.cache.set(objectId, { size, lastAccess: s.step });
+    s.cacheUsed += size;
+  }
+}
+
+function partitionPendingData(s, p) {
+  // Compute how much un-reconciled data partition p has (in MiB).
+  const currentOffset = s.partitionReconcileOffset[p];
+  const maxOffset = s.partitionWriteOffset[p];
+  if (currentOffset >= maxOffset) return 0;
+
+  let total = 0;
+  for (const obj of s.objects) {
+    const ext = obj.extents.get(p);
+    if (!ext) continue;
+    if (ext.lastOffset < currentOffset) continue;
+    if (ext.baseOffset > maxOffset) break;
+    total += ext.size;
+  }
+  return total;
+}
+
+function readPartitionData(s, p, budgetMiB) {
+  // Read L0 objects for partition p, up to budgetMiB.
+  // Returns the amount of useful data read (MiB).
+  let bytesRead = 0;
+  const currentOffset = s.partitionReconcileOffset[p];
+  const maxOffset = s.partitionWriteOffset[p];
+
+  if (currentOffset >= maxOffset) return 0;
+
+  let newReconcileOffset = currentOffset;
+
+  for (const obj of s.objects) {
+    if (bytesRead >= budgetMiB) break;
+
+    const ext = obj.extents.get(p);
+    if (!ext) continue;
+    if (ext.lastOffset < currentOffset) continue;
+    if (ext.baseOffset > maxOffset) break;
+
+    s.activeReads.add(obj.id);
+    s.uniqueObjectsRead.add(obj.id);
+    s.totalBytesRead += ext.size;
+
+    if (cacheGet(s, obj.id)) {
+      s.totalHits++;
+    } else {
+      s.totalDownloads++;
+      s.totalBytesDownloaded += obj.size;
+      cachePut(s, obj.id, obj.size);
+    }
+
+    newReconcileOffset = Math.max(newReconcileOffset, ext.lastOffset + 1);
+    bytesRead += ext.size;
+  }
+
+  s.partitionReconcileOffset[p] = newReconcileOffset;
+  return bytesRead;
+}
+
+function simReconcileBreadthFirst(s) {
+  // Breadth-first: scan ALL partitions, pick up to minpartdata MiB each,
+  // skip partitions with less than minpartdata pending, pack into L1 objects.
+  // Repeat immediately if any partition still has >= minpartdata pending.
+  let keepGoing = true;
+  while (keepGoing) {
+    keepGoing = false;
+    let l1Remaining = params.l1size;
+    let l1HasData = false;
+
+    for (let p = 0; p < params.partitions; p++) {
+      const pending = partitionPendingData(s, p);
+      if (pending < params.minpartdata) continue;
+
+      s.activePartitions.add(p);
+      const budget = Math.min(params.minpartdata, l1Remaining);
+      const dataRead = readPartitionData(s, p, budget);
+      if (dataRead > 0) {
+        l1HasData = true;
+        l1Remaining -= dataRead;
+      }
+
+      if (l1Remaining <= 0) {
+        s.l1Uploads++;
+        l1Remaining = params.l1size;
+        l1HasData = false;
+      }
+    }
+
+    if (l1HasData) s.l1Uploads++;
+
+    for (let p = 0; p < params.partitions; p++) {
+      if (partitionPendingData(s, p) >= params.minpartdata) {
+        keepGoing = true;
+        break;
+      }
+    }
+  }
+}
+
+function simReconcileDepthFirst(s) {
+  // Depth-first: pick partsperrun partitions round-robin, read as much as
+  // fits into L1 objects. If a partition overflows an L1 object, immediately
+  // start the next one.
+  const partitionsToReconcile = [];
+  for (let i = 0; i < params.partsperrun; i++) {
+    const p = s.nextReconcilePartition % params.partitions;
+    partitionsToReconcile.push(p);
+    s.nextReconcilePartition = (s.nextReconcilePartition + 1) % params.partitions;
+  }
+
+  let keepBuilding = true;
+  while (keepBuilding) {
+    keepBuilding = false;
+    let l1Remaining = params.l1size;
+
+    for (const p of partitionsToReconcile) {
+      if (l1Remaining <= 0) break;
+      s.activePartitions.add(p);
+
+      const currentOffset = s.partitionReconcileOffset[p];
+      const maxOffset = s.partitionWriteOffset[p];
+      if (currentOffset >= maxOffset) continue;
+
+      const dataRead = readPartitionData(s, p, l1Remaining);
+      l1Remaining -= dataRead;
+
+      if (s.partitionReconcileOffset[p] < s.partitionWriteOffset[p] && dataRead > 0) {
+        keepBuilding = true;
+      }
+    }
+
+    if (l1Remaining < params.l1size) s.l1Uploads++;
+    if (l1Remaining === params.l1size) break;
+  }
+}
+
+function simReconcileStep(s) {
+  s.activeReads.clear();
+  s.activePartitions.clear();
+  s.reconcileRuns++;
+
+  if (breadthFirst) {
+    simReconcileBreadthFirst(s);
+  } else {
+    simReconcileDepthFirst(s);
+  }
+
+  const total = s.totalHits + s.totalDownloads;
+  const hitRate = total > 0 ? s.totalHits / total : 0;
+  s.hitRateHistory.push({ step: s.step, value: hitRate });
+  s.downloadHistory.push({ step: s.step, value: s.totalDownloads });
+}
+
+function simStep(s) {
+  s.step++;
+  simWriteStep(s);
+
+  if (s.step % params.reconcileinterval === 0) {
+    simReconcileStep(s);
+  } else {
+    s.activeReads.clear();
+    s.activePartitions.clear();
+  }
+}
+
+// ── Rendering ──
+
+function renderGrid(s) {
+  const container = document.getElementById('object-grid');
+
+  // Show last N objects to keep grid manageable
+  const maxRows = 60;
+  const startIdx = Math.max(0, s.objects.length - maxRows);
+  const visibleObjects = s.objects.slice(startIdx);
+
+  // Limit columns too
+  const maxCols = Math.min(params.partitions, 100);
+  const colStep = params.partitions > maxCols ? Math.ceil(params.partitions / maxCols) : 1;
+  const numCols = Math.min(params.partitions, maxCols);
+
+  const gridCols = numCols + 1; // +1 for row header
+  container.style.gridTemplateColumns = `28px repeat(${numCols}, 10px)`;
+
+  let html = '';
+  // Header row
+  html += '<div class="row-header" style="height:14px"></div>';
+  for (let c = 0; c < numCols; c++) {
+    const p = c * colStep;
+    html += `<div class="header-cell">${p % 10 === 0 ? p : ''}</div>`;
+  }
+
+  for (const obj of visibleObjects) {
+    html += `<div class="row-header">L${obj.id}</div>`;
+    for (let c = 0; c < numCols; c++) {
+      const p = c * colStep;
+      const ext = obj.extents.get(p);
+      let color = '#161b22'; // empty
+      if (ext) {
+        const isReconciled = s.partitionReconcileOffset[p] > ext.lastOffset;
+        const isActive = s.activeReads.has(obj.id) && s.activePartitions.has(p);
+        const isCached = s.cache.has(obj.id);
+
+        if (isActive) color = '#f0883e';
+        else if (isReconciled) color = '#238636';
+        else if (isCached) color = '#3fb950';
+        else color = '#1f6feb';
+      }
+      html += `<div class="cell" style="background:${color}" data-obj="${obj.id}" data-part="${p}"></div>`;
+    }
+  }
+
+  container.innerHTML = html;
+  container.style.display = 'inline-grid';
+}
+
+function renderCacheBar(s) {
+  const bar = document.getElementById('cache-bar');
+  const usedPct = (s.cacheUsed / params.cachesize * 100).toFixed(1);
+  const usedColor = s.cacheUsed / params.cachesize > 0.9 ? '#f85149' :
+                    s.cacheUsed / params.cachesize > 0.7 ? '#d29922' : '#3fb950';
+  bar.innerHTML = `
+    <div class="segment" style="width:${usedPct}%;background:${usedColor}"></div>
+    <div class="cache-bar-label">${s.cacheUsed.toFixed(1)} / ${params.cachesize} MiB (${usedPct}%) — ${s.cache.size} objects</div>
+  `;
+}
+
+function renderPartitionBars(s) {
+  const container = document.getElementById('partition-bars');
+  // Show a subset if too many
+  const maxShow = 40;
+  const step = params.partitions > maxShow ? Math.ceil(params.partitions / maxShow) : 1;
+
+  let html = '';
+  for (let p = 0; p < params.partitions; p += step) {
+    const maxOff = s.partitionWriteOffset[p];
+    const reconciled = s.partitionReconcileOffset[p];
+    const reconciledPct = maxOff > 0 ? (reconciled / maxOff * 100) : 0;
+    const isActive = s.activePartitions.has(p);
+    const barColor = isActive ? '#f0883e' : '#238636';
+
+    html += `<div class="pp-row">
+      <div class="pp-label">P${p}</div>
+      <div class="pp-bar">
+        <div class="pp-fill" style="width:${reconciledPct}%;background:${barColor}"></div>
+      </div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderShards(s) {
+  const container = document.getElementById('shard-view');
+  let html = '';
+  for (let sh = 0; sh < params.shards; sh++) {
+    const parts = s.shardPartitions[sh] || [];
+    const activeParts = parts.filter(p => s.activePartitions.has(p));
+    const borderColor = activeParts.length > 0 ? '#f0883e' : '#30363d';
+    html += `<div class="shard-box" style="border-color:${borderColor}">
+      <div class="shard-id">Shard ${sh}</div>
+      <div class="shard-parts">${parts.length}</div>
+      <div style="font-size:9px;color:#484f58">${activeParts.length > 0 ? 'active: ' + activeParts.join(',') : ''}</div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderChart(canvasId, data, label, color, isRate) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const pad = { top: 20, right: 10, bottom: 25, left: 50 };
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (data.length < 2) return;
+
+  const maxVal = isRate ? 1 : Math.max(...data.map(d => d.value), 1);
+  const minStep = data[0].step;
+  const maxStep = data[data.length - 1].step;
+  const stepRange = maxStep - minStep || 1;
+
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  // Axes
+  ctx.strokeStyle = '#30363d';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, pad.top);
+  ctx.lineTo(pad.left, H - pad.bottom);
+  ctx.lineTo(W - pad.right, H - pad.bottom);
+  ctx.stroke();
+
+  // Y labels
+  ctx.fillStyle = '#484f58';
+  ctx.font = '10px system-ui';
+  ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.top + plotH * (1 - i / 4);
+    const val = maxVal * i / 4;
+    ctx.fillText(isRate ? (val * 100).toFixed(0) + '%' : val.toFixed(0), pad.left - 5, y + 3);
+    ctx.strokeStyle = '#21262d';
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(W - pad.right, y);
+    ctx.stroke();
+  }
+
+  // Data line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const x = pad.left + (data[i].step - minStep) / stepRange * plotW;
+    const y = pad.top + plotH * (1 - data[i].value / maxVal);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  ctx.font = '11px system-ui';
+  ctx.fillText(label, pad.left + 5, pad.top - 5);
+}
+
+function renderMetrics(s) {
+  const total = s.totalHits + s.totalDownloads;
+  const hitRate = total > 0 ? s.totalHits / total : 0;
+  const readAmp = s.totalBytesRead > 0 ? s.totalBytesDownloaded / s.totalBytesRead : 0;
+
+  const hrEl = document.getElementById('m-hitrate');
+  hrEl.textContent = (hitRate * 100).toFixed(1) + '%';
+  hrEl.className = 'value ' + (hitRate > 0.5 ? 'good' : hitRate > 0.2 ? 'warn' : 'bad');
+
+  document.getElementById('m-downloads').textContent = s.totalDownloads;
+  document.getElementById('m-hits').textContent = s.totalHits;
+
+  const raEl = document.getElementById('m-readamp');
+  raEl.textContent = readAmp.toFixed(1) + 'x';
+  raEl.className = 'value ' + (readAmp < 2 ? 'good' : readAmp < 5 ? 'warn' : 'bad');
+
+  document.getElementById('m-objects').textContent = s.objects.length;
+  document.getElementById('m-unique').textContent = s.uniqueObjectsRead.size;
+  document.getElementById('m-evictions').textContent = s.evictions;
+  document.getElementById('m-l1uploads').textContent = s.l1Uploads;
+
+  document.getElementById('step-counter').textContent = s.step;
+  document.getElementById('reconcile-counter').textContent = s.reconcileRuns;
+}
+
+function render(s) {
+  renderGrid(s);
+  renderCacheBar(s);
+  renderPartitionBars(s);
+  renderShards(s);
+  renderChart('chart-hitrate', s.hitRateHistory, 'Cache Hit Rate', '#3fb950', true);
+  renderChart('chart-downloads', s.downloadHistory, 'Total Downloads', '#f85149', false);
+  renderMetrics(s);
+}
+
+// ── Controls ──
+
+function reset() {
+  running = false;
+  if (animFrame) cancelAnimationFrame(animFrame);
+  document.getElementById('btn-start').textContent = 'Start';
+  state = createState();
+  render(state);
+}
+
+function step() {
+  if (!state) state = createState();
+  simStep(state);
+  render(state);
+}
+
+function toggleRun() {
+  if (running) {
+    running = false;
+    document.getElementById('btn-start').textContent = 'Start';
+    if (animFrame) cancelAnimationFrame(animFrame);
+  } else {
+    running = true;
+    document.getElementById('btn-start').textContent = 'Pause';
+    lastTime = performance.now();
+    runLoop();
+  }
+}
+
+function runLoop() {
+  if (!running) return;
+  const now = performance.now();
+  const interval = 1000 / params.speed;
+  if (now - lastTime >= interval) {
+    step();
+    lastTime = now;
+  }
+  animFrame = requestAnimationFrame(runLoop);
+}
+
+document.getElementById('btn-start').addEventListener('click', toggleRun);
+document.getElementById('btn-step').addEventListener('click', step);
+document.getElementById('btn-reset').addEventListener('click', reset);
+
+// Tooltip
+const tooltip = document.getElementById('tooltip');
+document.getElementById('object-grid').addEventListener('mousemove', (e) => {
+  const cell = e.target;
+  if (!cell.classList.contains('cell')) { tooltip.style.display = 'none'; return; }
+  const objId = parseInt(cell.dataset.obj);
+  const partId = parseInt(cell.dataset.part);
+  const obj = state.objects.find(o => o.id === objId);
+  if (!obj) return;
+  const ext = obj.extents.get(partId);
+  const isCached = state.cache.has(objId);
+  const isReconciled = ext && state.partitionReconcileOffset[partId] > ext.lastOffset;
+
+  tooltip.innerHTML = `<strong>L0 Object #${objId}</strong><br>
+    Partition: ${partId}<br>
+    ${ext ? `Offsets: [${ext.baseOffset}, ${ext.lastOffset}]<br>Extent size: ${ext.size.toFixed(2)} MiB` : 'No data for this partition'}<br>
+    Cached: ${isCached ? 'Yes' : 'No'}<br>
+    Reconciled: ${isReconciled ? 'Yes' : 'No'}`;
+  tooltip.style.display = 'block';
+  tooltip.style.left = e.clientX + 12 + 'px';
+  tooltip.style.top = e.clientY + 12 + 'px';
+});
+document.getElementById('object-grid').addEventListener('mouseleave', () => {
+  tooltip.style.display = 'none';
+});
+
+// Initialize
+reset();
+</script>
+</body>
+</html>
