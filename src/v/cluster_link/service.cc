@@ -37,7 +37,6 @@
 #include "kafka/data/partition_proxy.h"
 #include "kafka/server/group_router.h"
 #include "kafka/server/snc_quota_manager.h"
-#include "kafka/server/write_at_offset_stm.h"
 
 #include <seastar/coroutine/switch_to.hh>
 
@@ -399,17 +398,10 @@ public:
       ss::lw_shared_ptr<cluster::partition> partition,
       const cluster::metadata_cache& md_cache,
       cluster::id_allocator_frontend& id_alloc)
-      : _partition(std::move(partition))
+      : _partition(partition)
       , _metadata_cache{md_cache}
       , _id_allocator_frontend(id_alloc)
-      , _stm(_partition->raft()
-               ->stm_manager()
-               ->get<kafka::write_at_offset_stm>()) {
-        vassert(
-          _stm,
-          "write_at_offset_stm not attached to partition {}",
-          _partition->ntp());
-    }
+      , _proxy(kafka::make_partition_proxy(partition)) {}
     ss::future<> start() final { return initialize(); }
 
     ss::future<> reset() final { return initialize(); }
@@ -490,7 +482,7 @@ public:
           batches.back().header(),
           _last_replicated_offset,
           new_last_replicated_end);
-        auto stages = _stm->replicate(
+        auto stages = _proxy.replicate_at_offset(
           std::move(batches),
           std::move(expected_offsets),
           _last_replicated_offset,
@@ -541,16 +533,16 @@ public:
         auto timeout
           = std::chrono::duration_cast<::model::timeout_clock::duration>(
             deadline - ss::lowres_clock::now());
-        auto err = co_await _stm->ensure_truncatable(
+        auto err = co_await _proxy.ensure_write_at_offset_truncatable(
           truncation_offset, timeout);
-        if (err != kafka::write_at_offset_stm::errc::success) {
+        if (err) {
             vlog(
               cllog.warn,
               "[{}] Failed to ensure truncatable offset {}: {}, will be "
               "retried later",
               _partition->ntp(),
               truncation_offset,
-              err);
+              err.message());
             // a blanket error to trigger a retry later
             co_return kafka::error_code::offset_out_of_range;
         }
@@ -604,7 +596,7 @@ public:
 private:
     ss::future<> initialize() {
         auto holder = _gate.hold();
-        auto sync_offset = co_await _stm->get_expected_last_offset(
+        auto sync_offset = co_await _proxy.get_write_at_offset_last_offset(
           sync_timeout);
         if (sync_offset.has_error()) {
             throw std::runtime_error(
@@ -625,7 +617,7 @@ private:
     ss::lw_shared_ptr<cluster::partition> _partition;
     const cluster::metadata_cache& _metadata_cache;
     cluster::id_allocator_frontend& _id_allocator_frontend;
-    ss::shared_ptr<kafka::write_at_offset_stm> _stm;
+    kafka::partition_proxy _proxy;
     // set in start();
     std::optional<kafka::offset> _last_replicated_offset;
     ::model::producer_id _highest_seen_pid{::model::no_producer_id};

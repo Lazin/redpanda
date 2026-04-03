@@ -121,6 +121,26 @@ public:
       model::record_batch,
       raft::replicate_options) final;
 
+    // Not supported for read replicas (read-only).
+    raft::replicate_stages replicate_at_offset(
+      chunked_vector<model::record_batch>,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as
+      = std::nullopt) final;
+
+    // Not supported for read replicas (read-only).
+    ss::future<result<kafka::offset>> get_write_at_offset_last_offset(
+      model::timeout_clock::duration sync_timeout) final;
+
+    // Not supported for read replicas (read-only).
+    ss::future<std::error_code> ensure_write_at_offset_truncatable(
+      kafka::offset new_start_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as
+      = std::nullopt) final;
+
     // Returns partition info built from raft state.
     result<kafka::partition_info> get_partition_info() const final;
 

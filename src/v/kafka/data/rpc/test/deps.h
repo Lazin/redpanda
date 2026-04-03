@@ -195,6 +195,24 @@ public:
     get_cloud_storage_status() const override {
         throw std::runtime_error("unimplemented");
     }
+    raft::replicate_stages replicate_at_offset(
+      chunked_vector<model::record_batch>,
+      chunked_vector<kafka::offset>,
+      std::optional<kafka::offset>,
+      model::timeout_clock::duration,
+      std::optional<std::reference_wrapper<ss::abort_source>>) final {
+        throw std::runtime_error("unimplemented");
+    }
+    ss::future<result<kafka::offset>>
+    get_write_at_offset_last_offset(model::timeout_clock::duration) final {
+        throw std::runtime_error("unimplemented");
+    }
+    ss::future<std::error_code> ensure_write_at_offset_truncatable(
+      kafka::offset,
+      model::timeout_clock::duration,
+      std::optional<std::reference_wrapper<ss::abort_source>>) final {
+        throw std::runtime_error("unimplemented");
+    }
 
 private:
     model::offset latest_offset() {

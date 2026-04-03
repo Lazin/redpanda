@@ -35,6 +35,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/read_replica:snapshot_provider",
         "//src/v/cloud_topics/read_replica:stm",
         "//src/v/cluster",
+        "//src/v/kafka/server:write_at_offset_stm",
         "//src/v/raft",
         "//src/v/storage",
         "@boost//:numeric_conversion",

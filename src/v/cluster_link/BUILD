@@ -218,7 +218,6 @@ redpanda_cc_library(
         "//src/v/kafka/client/direct_consumer",
         "//src/v/kafka/data/rpc",
         "//src/v/kafka/server",
-        "//src/v/kafka/server:write_at_offset_stm",
         "//src/v/model",
         "//src/v/raft",
         "//src/v/rpc",

@@ -10,6 +10,7 @@
 #pragma once
 
 #include "base/format_to.h"
+#include "base/outcome.h"
 #include "cloud_topics/frontend/errc.h"
 #include "cloud_topics/level_one/metastore/metastore.h"
 #include "cloud_topics/level_zero/stm/ctp_stm_api.h"
@@ -32,6 +33,10 @@
 
 namespace cluster {
 class partition;
+}
+
+namespace kafka {
+class write_at_offset_stm;
 }
 
 namespace cloud_topics {
@@ -129,6 +134,23 @@ public:
     raft::replicate_stages replicate(
       model::batch_identity, model::record_batch, raft::replicate_options);
 
+    raft::replicate_stages replicate_at_offset(
+      chunked_vector<model::record_batch>,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as
+      = std::nullopt);
+
+    ss::future<result<kafka::offset>> get_write_at_offset_last_offset(
+      model::timeout_clock::duration sync_timeout);
+
+    ss::future<std::error_code> ensure_write_at_offset_truncatable(
+      kafka::offset new_start_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as
+      = std::nullopt);
+
     ss::future<storage::translating_reader>
     make_reader(cloud_topic_log_reader_config cfg);
 
@@ -204,6 +226,14 @@ private:
     ss::future<std::optional<storage::timequery_result>>
       refine_timequery_result(
         coarse_grained_timequery_result, model::opt_abort_source_t);
+
+    ss::future<result<raft::replicate_result>> do_replicate_at_offset(
+      chunked_vector<model::record_batch>,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as,
+      ss::shared_ptr<kafka::write_at_offset_stm> stm);
 
     raft::replicate_stages upload_and_replicate(
       model::batch_identity batch_id,

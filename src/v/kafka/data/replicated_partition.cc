@@ -16,6 +16,7 @@
 #include "kafka/data/log_reader_config.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/server/errors.h"
+#include "kafka/server/write_at_offset_stm.h"
 #include "logger.h"
 #include "model/fundamental.h"
 #include "model/timeout_clock.h"
@@ -407,6 +408,56 @@ raft::replicate_stages replicated_partition::replicate(
             raft::replicate_result{model::offset(r.value().last_offset())});
       });
     return out;
+}
+
+raft::replicate_stages replicated_partition::replicate_at_offset(
+  chunked_vector<model::record_batch> batches,
+  chunked_vector<kafka::offset> expected_base_offsets,
+  std::optional<kafka::offset> prev_log_offset,
+  model::timeout_clock::duration timeout,
+  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+    auto stm
+      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
+    vassert(
+      stm,
+      "write_at_offset_stm not attached to partition {}",
+      _partition->ntp());
+    return stm->replicate(
+      std::move(batches),
+      std::move(expected_base_offsets),
+      prev_log_offset,
+      timeout,
+      as);
+}
+
+ss::future<result<kafka::offset>>
+replicated_partition::get_write_at_offset_last_offset(
+  model::timeout_clock::duration sync_timeout) {
+    auto stm
+      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
+    vassert(
+      stm,
+      "write_at_offset_stm not attached to partition {}",
+      _partition->ntp());
+    return stm->get_expected_last_offset(sync_timeout);
+}
+
+ss::future<std::error_code>
+replicated_partition::ensure_write_at_offset_truncatable(
+  kafka::offset new_start_offset,
+  model::timeout_clock::duration timeout,
+  std::optional<std::reference_wrapper<ss::abort_source>> as) {
+    auto stm
+      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
+    vassert(
+      stm,
+      "write_at_offset_stm not attached to partition {}",
+      _partition->ntp());
+    auto err = co_await stm->ensure_truncatable(new_start_offset, timeout, as);
+    if (err != kafka::write_at_offset_stm::errc::success) {
+        co_return stm->make_error_code(err);
+    }
+    co_return std::error_code{};
 }
 
 model::offset replicated_partition::partition_kafka_start_offset() const {
