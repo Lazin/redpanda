@@ -30,7 +30,7 @@ from rptest.tests.cluster_linking_test_base import (
     ShadowLinkTestBase,
 )
 from rptest.tests.schema_registry_test import SchemaRegistryRedpandaClient
-from rptest.util import expect_exception, expect_timeout, wait_until
+from rptest.util import expect_exception, wait_until
 from typing import Any
 
 import ducktape.errors
