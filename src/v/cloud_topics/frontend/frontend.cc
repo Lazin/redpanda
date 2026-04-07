@@ -27,6 +27,7 @@
 #include "cluster/partition.h"
 #include "cluster/rm_stm_types.h"
 #include "cluster/types.h"
+#include "kafka/data/exact_offset_replicator.h"
 #include "kafka/server/write_at_offset_stm.h"
 #include "model/fundamental.h"
 #include "model/offset_interval.h"
@@ -1236,167 +1237,194 @@ auto frontend::advance_epoch(
     co_return get_epoch_info();
 }
 
-ss::future<result<kafka::offset>> frontend::get_write_at_offset_last_offset(
-  model::timeout_clock::duration sync_timeout) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
-    return stm->get_expected_last_offset(sync_timeout);
-}
+namespace {
 
-ss::future<std::error_code> frontend::ensure_write_at_offset_truncatable(
-  kafka::offset new_start_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
-    auto err = co_await stm->ensure_truncatable(new_start_offset, timeout, as);
-    if (err != kafka::write_at_offset_stm::errc::success) {
-        co_return stm->make_error_code(err);
-    }
-    co_return std::error_code{};
-}
+/// Cloud topics implementation of exact_offset_replicator.
+/// For tiered_cloud mode: delegates raw batches directly to the STM.
+/// For cloud mode: uploads data to object storage, generates placeholders,
+/// then replicates the placeholders through the STM.
+class ct_exact_offset_replicator final : public kafka::exact_offset_replicator {
+public:
+    ct_exact_offset_replicator(
+      ss::lw_shared_ptr<cluster::partition> partition,
+      data_plane_api* data_plane,
+      ss::lw_shared_ptr<ctp_stm_api> ctp_stm_api,
+      ss::shared_ptr<kafka::write_at_offset_stm> stm)
+      : _partition(std::move(partition))
+      , _data_plane(data_plane)
+      , _ctp_stm_api(std::move(ctp_stm_api))
+      , _stm(std::move(stm)) {}
 
-raft::replicate_stages frontend::replicate_at_offset(
-  chunked_vector<model::record_batch> batches,
-  chunked_vector<kafka::offset> expected_base_offsets,
-  std::optional<kafka::offset> prev_log_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
+    raft::replicate_stages replicate(
+      chunked_vector<model::record_batch> batches,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as) final {
+        // In tiered_cloud mode, replicate raw data directly through the STM.
+        if (_partition->get_ntp_config().is_tiered_cloud()) {
+            return _stm->replicate(
+              std::move(batches),
+              std::move(expected_base_offsets),
+              prev_log_offset,
+              timeout,
+              as);
+        }
 
-    // In tiered_cloud mode, replicate raw data directly through the STM.
-    if (_partition->get_ntp_config().is_tiered_cloud()) {
-        return stm->replicate(
+        // Cloud mode: upload data, generate placeholders, replicate
+        // placeholders through the STM.
+        raft::replicate_stages out(raft::errc::success);
+        ss::promise<result<raft::replicate_result>> result_promise;
+        out.replicate_finished = result_promise.get_future();
+        out.request_enqueued = ss::now();
+        do_replicate(
           std::move(batches),
           std::move(expected_base_offsets),
           prev_log_offset,
           timeout,
-          as);
+          as)
+          .forward_to(std::move(result_promise));
+        return out;
     }
 
-    // Cloud mode: upload data, generate placeholders, replicate placeholders
-    // through the STM.
-    raft::replicate_stages out(raft::errc::success);
-    ss::promise<result<raft::replicate_result>> result_promise;
-    out.replicate_finished = result_promise.get_future();
-    out.request_enqueued = do_replicate_at_offset(
-                             std::move(batches),
-                             std::move(expected_base_offsets),
-                             prev_log_offset,
-                             timeout,
-                             as,
-                             std::move(stm))
-                             .then_wrapped([p = std::move(result_promise)](
-                                             auto fut) mutable {
-                                 if (fut.failed()) {
-                                     p.set_exception(fut.get_exception());
-                                     return;
-                                 }
-                                 p.set_value(std::move(fut.get()));
-                             });
-    return out;
-}
-
-ss::future<result<raft::replicate_result>> frontend::do_replicate_at_offset(
-  chunked_vector<model::record_batch> batches,
-  chunked_vector<kafka::offset> expected_base_offsets,
-  std::optional<kafka::offset> prev_log_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as,
-  ss::shared_ptr<kafka::write_at_offset_stm> stm) {
-    chunked_vector<model::record_batch_header> headers;
-    headers.reserve(batches.size());
-    for (const auto& batch : batches) {
-        headers.push_back(batch.header());
+    ss::future<result<kafka::offset>>
+    get_last_offset(model::timeout_clock::duration sync_timeout) final {
+        return _stm->get_expected_last_offset(sync_timeout);
     }
 
-    auto min_epoch = cluster_epoch(_partition->get_topic_revision_id());
-    vassert(
-      min_epoch() > 0L,
-      "Unexpected invalid min epoch {} for {}",
-      min_epoch,
-      ntp());
-
-    auto staged = co_await _data_plane->stage_write(std::move(batches));
-    if (!staged.has_value()) {
-        co_return staged.error();
+    ss::future<std::error_code> ensure_truncatable(
+      kafka::offset new_start_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as) final {
+        auto err = co_await _stm->ensure_truncatable(
+          new_start_offset, timeout, as);
+        if (err != kafka::write_at_offset_stm::errc::success) {
+            co_return _stm->make_error_code(err);
+        }
+        co_return std::error_code{};
     }
 
-    auto deadline = model::timeout_clock::now() + timeout;
-    auto res = co_await _data_plane->execute_write(
-      ntp(), min_epoch, std::move(staged.value()), deadline);
+private:
+    const model::ntp& ntp() const { return _partition->ntp(); }
 
-    if (!res.has_value()) {
-        co_return res.error();
-    }
+    ss::future<result<raft::replicate_result>> do_replicate(
+      chunked_vector<model::record_batch> batches,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as) {
+        chunked_vector<model::record_batch_header> headers;
+        headers.reserve(batches.size());
+        for (const auto& batch : batches) {
+            headers.push_back(batch.header());
+        }
 
-    auto batch_epoch = res.value().extents.front().id.epoch;
+        auto min_epoch = cluster_epoch(_partition->get_topic_revision_id());
 
-    auto fence_fut = co_await ss::coroutine::as_future(
-      _ctp_stm_api->fence_epoch(batch_epoch));
-    if (fence_fut.failed()) {
-        auto not_leader = !_partition->is_leader();
-        auto e = fence_fut.get_exception();
-        if (not_leader) {
+        // Use the std::max trick from the normal produce path to reduce
+        // the likelihood of fencing errors when shards are on different
+        // epochs.
+        auto accepted_min = _ctp_stm_api->get_max_seen_epoch(
+          _partition->term());
+        if (!accepted_min) {
+            accepted_min = _ctp_stm_api->get_max_epoch();
+        }
+        if (accepted_min) {
+            min_epoch = std::max(min_epoch, *accepted_min);
+        }
+
+        vassert(
+          min_epoch() > 0L,
+          "Unexpected invalid min epoch {} for {}",
+          min_epoch,
+          ntp());
+
+        auto staged = co_await _data_plane->stage_write(std::move(batches));
+        if (!staged.has_value()) {
+            co_return staged.error();
+        }
+
+        auto deadline = model::timeout_clock::now() + timeout;
+        auto res = co_await _data_plane->execute_write(
+          ntp(), min_epoch, std::move(staged.value()), deadline);
+
+        if (!res.has_value()) {
+            co_return res.error();
+        }
+
+        auto batch_epoch = res.value().extents.front().id.epoch;
+
+        auto fence_fut = co_await ss::coroutine::as_future(
+          _ctp_stm_api->fence_epoch(batch_epoch));
+        if (fence_fut.failed()) {
+            auto not_leader = !_partition->is_leader();
+            auto e = fence_fut.get_exception();
+            if (not_leader) {
+                vlog(
+                  cd_log.debug,
+                  "Failed to fence epoch {} for ntp {}, not a leader",
+                  batch_epoch,
+                  ntp());
+            } else {
+                vlogl(
+                  cd_log,
+                  ssx::is_shutdown_exception(e) ? ss::log_level::debug
+                                                : ss::log_level::warn,
+                  "Failed to fence epoch {} for ntp {}, error: {}",
+                  batch_epoch,
+                  ntp(),
+                  e);
+            }
+            std::rethrow_exception(e);
+        }
+        auto fence = std::move(fence_fut.get());
+        if (!fence.has_value()) {
             vlog(
-              cd_log.debug,
-              "Failed to fence epoch {} for ntp {}, not a leader",
-              batch_epoch,
-              ntp());
-        } else {
-            vlogl(
-              cd_log,
-              ssx::is_shutdown_exception(e) ? ss::log_level::debug
-                                            : ss::log_level::warn,
-              "Failed to fence epoch {} for ntp {}, error: {}",
+              cd_log.warn,
+              "Failed to fence epoch {} for ntp {}, ctp latest seen epoch "
+              "is [{}, {}]",
               batch_epoch,
               ntp(),
-              e);
+              fence.error().window_min,
+              fence.error().window_max);
+            co_return raft::errc::not_leader;
         }
-        std::rethrow_exception(e);
-    }
-    auto fence = std::move(fence_fut.get());
-    if (!fence.has_value()) {
-        vlog(
-          cd_log.warn,
-          "Failed to fence epoch {} for ntp {}, ctp latest seen epoch is "
-          "[{}, {}]",
-          batch_epoch,
-          ntp(),
-          fence.error().window_min,
-          fence.error().window_max);
-        co_return raft::errc::not_leader;
-    }
 
-    auto placeholders = co_await convert_to_placeholders(
-      res.value().extents, headers);
+        auto placeholders = co_await convert_to_placeholders(
+          res.value().extents, headers);
 
-    chunked_vector<model::record_batch> placeholder_batches;
-    for (auto&& batch : placeholders.batches) {
-        placeholder_batches.push_back(std::move(batch));
+        chunked_vector<model::record_batch> placeholder_batches;
+        for (auto&& batch : placeholders.batches) {
+            placeholder_batches.push_back(std::move(batch));
+        }
+
+        auto stages = _stm->replicate(
+          std::move(placeholder_batches),
+          std::move(expected_base_offsets),
+          prev_log_offset,
+          timeout,
+          as);
+
+        co_return co_await std::move(stages.replicate_finished);
     }
 
-    auto stages = stm->replicate(
-      std::move(placeholder_batches),
-      std::move(expected_base_offsets),
-      prev_log_offset,
-      timeout,
-      as);
+    ss::lw_shared_ptr<cluster::partition> _partition;
+    data_plane_api* _data_plane;
+    ss::lw_shared_ptr<ctp_stm_api> _ctp_stm_api;
+    ss::shared_ptr<kafka::write_at_offset_stm> _stm;
+};
 
-    co_return co_await std::move(stages.replicate_finished);
+} // namespace
+
+std::unique_ptr<kafka::exact_offset_replicator>
+frontend::make_exact_offset_replicator() {
+    auto stm
+      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
+    if (!stm) {
+        return nullptr;
+    }
+    return std::make_unique<ct_exact_offset_replicator>(
+      _partition, _data_plane, _ctp_stm_api, std::move(stm));
 }
 
 fmt::iterator

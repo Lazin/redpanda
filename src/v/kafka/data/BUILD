@@ -12,6 +12,18 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "exact_offset_replicator",
+    hdrs = ["exact_offset_replicator.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/base",
+        "//src/v/model",
+        "//src/v/raft",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "partition_proxy",
     srcs = [
         "cloud_topic_partition.cc",
@@ -42,6 +54,7 @@ redpanda_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":exact_offset_replicator",
         "//src/v/base",
         "//src/v/cloud_storage:types",
         "//src/v/cloud_topics:data_plane_api",

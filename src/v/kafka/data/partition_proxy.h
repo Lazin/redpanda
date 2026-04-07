@@ -13,6 +13,7 @@
 #include "base/outcome.h"
 #include "cluster/fwd.h"
 #include "cluster/types.h"
+#include "kafka/data/exact_offset_replicator.h"
 #include "kafka/data/log_reader_config.h"
 #include "kafka/protocol/errors.h"
 #include "kafka/protocol/types.h"
@@ -92,26 +93,10 @@ public:
           model::batch_identity, model::record_batch, raft::replicate_options)
           = 0;
 
-        virtual raft::replicate_stages replicate_at_offset(
-          chunked_vector<model::record_batch>,
-          chunked_vector<kafka::offset> expected_base_offsets,
-          std::optional<kafka::offset> prev_log_offset,
-          model::timeout_clock::duration timeout,
-          std::optional<std::reference_wrapper<ss::abort_source>> as
-          = std::nullopt)
-          = 0;
-
-        virtual ss::future<result<kafka::offset>>
-        get_write_at_offset_last_offset(
-          model::timeout_clock::duration sync_timeout)
-          = 0;
-
-        virtual ss::future<std::error_code> ensure_write_at_offset_truncatable(
-          kafka::offset new_start_offset,
-          model::timeout_clock::duration timeout,
-          std::optional<std::reference_wrapper<ss::abort_source>> as
-          = std::nullopt)
-          = 0;
+        /// Returns a replicator for writing batches at exact offsets,
+        /// or nullptr if the partition does not support this operation.
+        virtual std::unique_ptr<exact_offset_replicator>
+        make_exact_offset_replicator() = 0;
 
         virtual result<partition_info> get_partition_info() const = 0;
         virtual size_t estimate_size_between(kafka::offset, kafka::offset) const
@@ -212,33 +197,8 @@ public:
         return _impl->replicate(bi, std::move(batch), opts);
     }
 
-    raft::replicate_stages replicate_at_offset(
-      chunked_vector<model::record_batch> batches,
-      chunked_vector<kafka::offset> expected_base_offsets,
-      std::optional<kafka::offset> prev_log_offset,
-      model::timeout_clock::duration timeout,
-      std::optional<std::reference_wrapper<ss::abort_source>> as
-      = std::nullopt) {
-        return _impl->replicate_at_offset(
-          std::move(batches),
-          std::move(expected_base_offsets),
-          prev_log_offset,
-          timeout,
-          std::move(as));
-    }
-
-    ss::future<result<kafka::offset>> get_write_at_offset_last_offset(
-      model::timeout_clock::duration sync_timeout) {
-        return _impl->get_write_at_offset_last_offset(sync_timeout);
-    }
-
-    ss::future<std::error_code> ensure_write_at_offset_truncatable(
-      kafka::offset new_start_offset,
-      model::timeout_clock::duration timeout,
-      std::optional<std::reference_wrapper<ss::abort_source>> as
-      = std::nullopt) {
-        return _impl->ensure_write_at_offset_truncatable(
-          new_start_offset, timeout, std::move(as));
+    std::unique_ptr<exact_offset_replicator> make_exact_offset_replicator() {
+        return _impl->make_exact_offset_replicator();
     }
 
     /*

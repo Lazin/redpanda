@@ -410,54 +410,57 @@ raft::replicate_stages replicated_partition::replicate(
     return out;
 }
 
-raft::replicate_stages replicated_partition::replicate_at_offset(
-  chunked_vector<model::record_batch> batches,
-  chunked_vector<kafka::offset> expected_base_offsets,
-  std::optional<kafka::offset> prev_log_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
-    return stm->replicate(
-      std::move(batches),
-      std::move(expected_base_offsets),
-      prev_log_offset,
-      timeout,
-      as);
-}
+namespace {
+class stm_exact_offset_replicator final : public exact_offset_replicator {
+public:
+    explicit stm_exact_offset_replicator(
+      ss::shared_ptr<write_at_offset_stm> stm)
+      : _stm(std::move(stm)) {}
 
-ss::future<result<kafka::offset>>
-replicated_partition::get_write_at_offset_last_offset(
-  model::timeout_clock::duration sync_timeout) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
-    return stm->get_expected_last_offset(sync_timeout);
-}
-
-ss::future<std::error_code>
-replicated_partition::ensure_write_at_offset_truncatable(
-  kafka::offset new_start_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    auto stm
-      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
-    vassert(
-      stm,
-      "write_at_offset_stm not attached to partition {}",
-      _partition->ntp());
-    auto err = co_await stm->ensure_truncatable(new_start_offset, timeout, as);
-    if (err != kafka::write_at_offset_stm::errc::success) {
-        co_return stm->make_error_code(err);
+    raft::replicate_stages replicate(
+      chunked_vector<model::record_batch> batches,
+      chunked_vector<kafka::offset> expected_base_offsets,
+      std::optional<kafka::offset> prev_log_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as) final {
+        return _stm->replicate(
+          std::move(batches),
+          std::move(expected_base_offsets),
+          prev_log_offset,
+          timeout,
+          as);
     }
-    co_return std::error_code{};
+
+    ss::future<result<kafka::offset>>
+    get_last_offset(model::timeout_clock::duration sync_timeout) final {
+        return _stm->get_expected_last_offset(sync_timeout);
+    }
+
+    ss::future<std::error_code> ensure_truncatable(
+      kafka::offset new_start_offset,
+      model::timeout_clock::duration timeout,
+      std::optional<std::reference_wrapper<ss::abort_source>> as) final {
+        auto err = co_await _stm->ensure_truncatable(
+          new_start_offset, timeout, as);
+        if (err != write_at_offset_stm::errc::success) {
+            co_return _stm->make_error_code(err);
+        }
+        co_return std::error_code{};
+    }
+
+private:
+    ss::shared_ptr<write_at_offset_stm> _stm;
+};
+} // namespace
+
+std::unique_ptr<exact_offset_replicator>
+replicated_partition::make_exact_offset_replicator() {
+    auto stm
+      = _partition->raft()->stm_manager()->get<kafka::write_at_offset_stm>();
+    if (!stm) {
+        return nullptr;
+    }
+    return std::make_unique<stm_exact_offset_replicator>(std::move(stm));
 }
 
 model::offset replicated_partition::partition_kafka_start_offset() const {

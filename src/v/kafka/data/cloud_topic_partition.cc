@@ -173,33 +173,9 @@ raft::replicate_stages cloud_topic_partition::replicate(
     return _fe->replicate(batch_id, std::move(batch), opts);
 }
 
-raft::replicate_stages cloud_topic_partition::replicate_at_offset(
-  chunked_vector<model::record_batch> batches,
-  chunked_vector<kafka::offset> expected_base_offsets,
-  std::optional<kafka::offset> prev_log_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    return _fe->replicate_at_offset(
-      std::move(batches),
-      std::move(expected_base_offsets),
-      prev_log_offset,
-      timeout,
-      as);
-}
-
-ss::future<result<kafka::offset>>
-cloud_topic_partition::get_write_at_offset_last_offset(
-  model::timeout_clock::duration sync_timeout) {
-    return _fe->get_write_at_offset_last_offset(sync_timeout);
-}
-
-ss::future<std::error_code>
-cloud_topic_partition::ensure_write_at_offset_truncatable(
-  kafka::offset new_start_offset,
-  model::timeout_clock::duration timeout,
-  std::optional<std::reference_wrapper<ss::abort_source>> as) {
-    return _fe->ensure_write_at_offset_truncatable(
-      new_start_offset, timeout, as);
+std::unique_ptr<exact_offset_replicator>
+cloud_topic_partition::make_exact_offset_replicator() {
+    return _fe->make_exact_offset_replicator();
 }
 
 ss::future<std::optional<model::offset>>

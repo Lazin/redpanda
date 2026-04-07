@@ -69,22 +69,8 @@ public:
       model::record_batch,
       raft::replicate_options) final;
 
-    raft::replicate_stages replicate_at_offset(
-      chunked_vector<model::record_batch>,
-      chunked_vector<kafka::offset> expected_base_offsets,
-      std::optional<kafka::offset> prev_log_offset,
-      model::timeout_clock::duration timeout,
-      std::optional<std::reference_wrapper<ss::abort_source>> as
-      = std::nullopt) final;
-
-    ss::future<result<kafka::offset>> get_write_at_offset_last_offset(
-      model::timeout_clock::duration sync_timeout) final;
-
-    ss::future<std::error_code> ensure_write_at_offset_truncatable(
-      kafka::offset new_start_offset,
-      model::timeout_clock::duration timeout,
-      std::optional<std::reference_wrapper<ss::abort_source>> as
-      = std::nullopt) final;
+    std::unique_ptr<exact_offset_replicator>
+    make_exact_offset_replicator() final;
 
     ss::future<storage::translating_reader>
     make_reader(kafka::log_reader_config cfg) final;

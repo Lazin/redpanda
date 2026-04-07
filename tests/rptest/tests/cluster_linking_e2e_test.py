@@ -4371,7 +4371,7 @@ class ShadowLinkCustomStartOffsetSelectionTests(ShadowLinkPreAllocTestBase):
 class ShadowLinkingCloudTopicReplicationTests(ShadowLinkPreAllocTestBase):
     """
     Tests cluster linking replication with cloud topics
-    (redpanda.storage.mode=cloud) on the source cluster.
+    (redpanda.storage.mode=cloud and tiered_cloud) on the source cluster.
     """
 
     def __init__(self, test_context: TestContext, *args: Any, **kwargs: Any):
@@ -4403,13 +4403,19 @@ class ShadowLinkingCloudTopicReplicationTests(ShadowLinkPreAllocTestBase):
         )
 
     @cluster(num_nodes=7)
-    def test_cloud_topic_replication(self):
+    @matrix(
+        storage_mode=[
+            TopicSpec.STORAGE_MODE_CLOUD,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        ],
+    )
+    def test_cloud_topic_replication(self, storage_mode):
         """
-        Verify that data produced to a cloud topic on the source cluster
-        is replicated to the target cluster via cluster linking.
+        Verify that data produced to a cloud/tiered_cloud topic on the source
+        cluster is replicated to the target cluster via cluster linking.
         """
         topic = TopicSpec(
-            name="cloud-topic",
+            name="ct-topic",
             partition_count=3,
             replication_factor=1,
         )
@@ -4420,15 +4426,12 @@ class ShadowLinkingCloudTopicReplicationTests(ShadowLinkPreAllocTestBase):
             partitions=topic.partition_count,
             replicas=topic.replication_factor,
             config={
-                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD,
+                TopicSpec.PROPERTY_STORAGE_MODE: storage_mode,
             },
         )
 
         source_configs = source_rpk.describe_topic_configs(topic.name)
-        assert (
-            source_configs[TopicSpec.PROPERTY_STORAGE_MODE][0]
-            == TopicSpec.STORAGE_MODE_CLOUD
-        ), (
+        assert source_configs[TopicSpec.PROPERTY_STORAGE_MODE][0] == storage_mode, (
             f"Source topic storage mode: {source_configs[TopicSpec.PROPERTY_STORAGE_MODE]}"
         )
 
@@ -4441,5 +4444,15 @@ class ShadowLinkingCloudTopicReplicationTests(ShadowLinkPreAllocTestBase):
             err_msg=f"Topic {topic.name} not found in target cluster",
         )
 
-        with self.producer_consumer(topic=topic.name, msg_size=128, msg_cnt=10000):
+        # Verify target topic has the same storage mode
+        target_rpk = RpkTool(self.target_cluster.service)
+        target_configs = target_rpk.describe_topic_configs(topic.name)
+        assert target_configs[TopicSpec.PROPERTY_STORAGE_MODE][0] == storage_mode, (
+            f"Target topic storage mode: {target_configs[TopicSpec.PROPERTY_STORAGE_MODE]}, "
+            f"expected: {storage_mode}"
+        )
+
+        with self.producer_consumer(
+            topic=topic.name, msg_size=128, msg_cnt=10000
+        ):
             self.verify()

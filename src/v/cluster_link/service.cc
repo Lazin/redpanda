@@ -401,7 +401,14 @@ public:
       : _partition(partition)
       , _metadata_cache{md_cache}
       , _id_allocator_frontend(id_alloc)
-      , _proxy(kafka::make_partition_proxy(partition)) {}
+      , _replicator(
+          kafka::make_partition_proxy(partition)
+            .make_exact_offset_replicator()) {
+        vassert(
+          _replicator,
+          "exact_offset_replicator not available for partition {}",
+          _partition->ntp());
+    }
     ss::future<> start() final { return initialize(); }
 
     ss::future<> reset() final { return initialize(); }
@@ -482,7 +489,7 @@ public:
           batches.back().header(),
           _last_replicated_offset,
           new_last_replicated_end);
-        auto stages = _proxy.replicate_at_offset(
+        auto stages = _replicator->replicate(
           std::move(batches),
           std::move(expected_offsets),
           _last_replicated_offset,
@@ -533,7 +540,7 @@ public:
         auto timeout
           = std::chrono::duration_cast<::model::timeout_clock::duration>(
             deadline - ss::lowres_clock::now());
-        auto err = co_await _proxy.ensure_write_at_offset_truncatable(
+        auto err = co_await _replicator->ensure_truncatable(
           truncation_offset, timeout);
         if (err) {
             vlog(
@@ -596,8 +603,7 @@ public:
 private:
     ss::future<> initialize() {
         auto holder = _gate.hold();
-        auto sync_offset = co_await _proxy.get_write_at_offset_last_offset(
-          sync_timeout);
+        auto sync_offset = co_await _replicator->get_last_offset(sync_timeout);
         if (sync_offset.has_error()) {
             throw std::runtime_error(
               fmt::format(
@@ -617,7 +623,7 @@ private:
     ss::lw_shared_ptr<cluster::partition> _partition;
     const cluster::metadata_cache& _metadata_cache;
     cluster::id_allocator_frontend& _id_allocator_frontend;
-    kafka::partition_proxy _proxy;
+    std::unique_ptr<kafka::exact_offset_replicator> _replicator;
     // set in start();
     std::optional<kafka::offset> _last_replicated_offset;
     ::model::producer_id _highest_seen_pid{::model::no_producer_id};

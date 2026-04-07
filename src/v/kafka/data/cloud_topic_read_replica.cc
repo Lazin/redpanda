@@ -270,29 +270,9 @@ raft::replicate_stages partition_proxy::replicate(
         make_error_code(kafka::error_code::invalid_topic_exception))};
 }
 
-raft::replicate_stages partition_proxy::replicate_at_offset(
-  chunked_vector<model::record_batch>,
-  chunked_vector<kafka::offset>,
-  std::optional<kafka::offset>,
-  model::timeout_clock::duration,
-  std::optional<std::reference_wrapper<ss::abort_source>>) {
-    return {
-      ss::now(),
-      ss::make_ready_future<result<raft::replicate_result>>(
-        make_error_code(kafka::error_code::invalid_topic_exception))};
-}
-
-ss::future<result<kafka::offset>>
-partition_proxy::get_write_at_offset_last_offset(
-  model::timeout_clock::duration) {
-    co_return kafka::error_code::invalid_topic_exception;
-}
-
-ss::future<std::error_code> partition_proxy::ensure_write_at_offset_truncatable(
-  kafka::offset,
-  model::timeout_clock::duration,
-  std::optional<std::reference_wrapper<ss::abort_source>>) {
-    co_return make_error_code(kafka::error_code::invalid_topic_exception);
+std::unique_ptr<kafka::exact_offset_replicator>
+partition_proxy::make_exact_offset_replicator() {
+    return nullptr;
 }
 
 result<kafka::partition_info> partition_proxy::get_partition_info() const {
