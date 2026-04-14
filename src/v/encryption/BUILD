@@ -54,6 +54,23 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "schema_resolver",
+    srcs = [
+        "schema_resolver.cc",
+    ],
+    hdrs = [
+        "schema_resolver.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":field_transformer",
+        "//src/v/container:chunked_hash_map",
+        "//src/v/model",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "field_transformer",
     srcs = [
         "field_transformer_ref.cc",
