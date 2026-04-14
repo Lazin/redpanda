@@ -146,7 +146,8 @@ struct proto_test_schema {
         f_ssn->set_name("ssn");
         f_ssn->set_number(1);
         f_ssn->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
-        f_ssn->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+        f_ssn->set_label(
+          google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
 
         for (size_t i = 1; i < field_count; ++i) {
             auto* f = msg->add_field();
@@ -260,12 +261,12 @@ struct encrypt_bench {
     iobuf avro_10kb{
       build_avro_record(avro_large_schema, large_fields, large_size)};
 
-    encryption::encryption_schema avro_es_small{make_avro_es(
-      avro_small_schema_ptr)};
-    encryption::encryption_schema avro_es_medium{make_avro_es(
-      avro_medium_schema_ptr)};
-    encryption::encryption_schema avro_es_large{make_avro_es(
-      avro_large_schema_ptr)};
+    encryption::encryption_schema avro_es_small{
+      make_avro_es(avro_small_schema_ptr)};
+    encryption::encryption_schema avro_es_medium{
+      make_avro_es(avro_medium_schema_ptr)};
+    encryption::encryption_schema avro_es_large{
+      make_avro_es(avro_large_schema_ptr)};
 
     // Protobuf
     proto_test_schema pb_schema_small;
@@ -400,8 +401,9 @@ PERF_TEST_F(encrypt_bench, json_ref_100b) {
 }
 
 PERF_TEST_F(encrypt_bench, json_ref_1kb) {
-    return ref.transform(json_1kb.copy(), json_es, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
+    return ref.transform(json_1kb.copy(), json_es, deks).then([](iobuf result) {
+        perf_tests::do_not_optimize(result);
+    });
 }
 
 PERF_TEST_F(encrypt_bench, json_ref_10kb) {

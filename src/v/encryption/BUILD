@@ -1,6 +1,26 @@
 load("//bazel:build.bzl", "redpanda_cc_library")
 
 redpanda_cc_library(
+    name = "encryption_service",
+    srcs = [
+        "encryption_service.cc",
+    ],
+    hdrs = [
+        "encryption_service.h",
+    ],
+    implementation_deps = [
+        ":field_transformer_opt",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encryption",
+        ":schema_resolver",
+        "@fmt",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "encryption",
     srcs = [
         "dek_manager.cc",

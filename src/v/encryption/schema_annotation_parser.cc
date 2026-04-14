@@ -125,7 +125,8 @@ void collect_json_schema_annotations(
               kek_it->value.GetString(), kek_it->value.GetStringLength());
 
             auto kid_it = member.value.FindMember(kms_key_id_key.data());
-            if (kid_it != member.value.MemberEnd() && kid_it->value.IsString()) {
+            if (
+              kid_it != member.value.MemberEnd() && kid_it->value.IsString()) {
                 ann.kms_key_id = ss::sstring(
                   kid_it->value.GetString(), kid_it->value.GetStringLength());
             }

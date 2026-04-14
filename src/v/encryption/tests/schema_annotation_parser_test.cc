@@ -33,8 +33,7 @@ TEST(schema_annotation_parser_test, avro_single_field) {
     EXPECT_EQ(annotations[0].path, std::vector<ss::sstring>{"ssn"});
     EXPECT_EQ(annotations[0].kek_name, "pii-key");
     EXPECT_EQ(
-      annotations[0].kms_key_id,
-      "arn:aws:kms:us-east-1:123456789:key/abc");
+      annotations[0].kms_key_id, "arn:aws:kms:us-east-1:123456789:key/abc");
 }
 
 TEST(schema_annotation_parser_test, avro_multiple_fields) {

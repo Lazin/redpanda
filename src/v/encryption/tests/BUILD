@@ -1,6 +1,23 @@
 load("//bazel:test.bzl", "redpanda_cc_gtest")
 
 redpanda_cc_gtest(
+    name = "encryption_service_test",
+    timeout = "short",
+    srcs = [
+        "encryption_service_test.cc",
+    ],
+    deps = [
+        "//src/v/encryption",
+        "//src/v/encryption:encryption_service",
+        "//src/v/encryption:schema_resolver",
+        "//src/v/model",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "mock_kms_test",
     timeout = "short",
     srcs = [

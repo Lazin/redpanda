@@ -17,6 +17,7 @@ class kms_provider;
 class dek_manager;
 class schema_resolver;
 class field_transformer;
+class encryption_service;
 struct encryption_services;
 
 } // namespace encryption
