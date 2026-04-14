@@ -840,9 +840,9 @@ public:
 
     development_feature_property<int> development_feature_property_testing_only;
 
-    property<ss::sstring> encryption_kms_type;
-    property<ss::sstring> encryption_kms_key_id;
-    property<ss::sstring> encryption_dek_algorithm;
+    property<std::optional<ss::sstring>> encryption_kms_type;
+    property<std::optional<ss::sstring>> encryption_kms_key_id;
+    property<std::optional<ss::sstring>> encryption_dek_algorithm;
     property<int32_t> encryption_dek_expiry_seconds;
 
 private:

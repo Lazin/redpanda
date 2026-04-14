@@ -108,8 +108,8 @@ public:
         return _inner->replicate(bi, std::move(batch), opts);
     }
 
-    std::unique_ptr<exact_offset_replicator>
-    make_exact_offset_replicator() && override {
+    std::unique_ptr<exact_offset_replicator> make_exact_offset_replicator()
+      && override {
         return std::move(*_inner).make_exact_offset_replicator();
     }
 
@@ -117,9 +117,8 @@ public:
         return _inner->get_partition_info();
     }
 
-    size_t
-    estimate_size_between(kafka::offset begin, kafka::offset end) const
-      override {
+    size_t estimate_size_between(
+      kafka::offset begin, kafka::offset end) const override {
         return _inner->estimate_size_between(begin, end);
     }
 

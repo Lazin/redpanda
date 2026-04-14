@@ -252,4 +252,9 @@ partition_proxy make_partition_proxy(
   const ss::lw_shared_ptr<cluster::partition>&,
   encryption::encryption_services* enc);
 
+std::optional<partition_proxy> make_partition_proxy(
+  const model::ntp&,
+  cluster::partition_manager&,
+  encryption::encryption_services* enc);
+
 } // namespace kafka

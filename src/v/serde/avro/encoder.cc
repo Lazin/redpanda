@@ -18,6 +18,7 @@
 
 #include <boost/range/irange.hpp>
 
+#include <cstring>
 #include <stdexcept>
 
 namespace serde::avro {
@@ -60,14 +61,17 @@ private:
     }
 
     void write_float(float value) {
-        // Avro encodes floats as 4 bytes little-endian, which matches the
-        // in-memory representation on x86/ARM (IEEE 754).
-        _out.append(reinterpret_cast<const char*>(&value), sizeof(float));
+        // Avro encodes floats as 4 bytes little-endian.
+        char buf[sizeof(float)];
+        std::memcpy(buf, &value, sizeof(float));
+        _out.append(buf, sizeof(float));
     }
 
     void write_double(double value) {
         // Avro encodes doubles as 8 bytes little-endian.
-        _out.append(reinterpret_cast<const char*>(&value), sizeof(double));
+        char buf[sizeof(double)];
+        std::memcpy(buf, &value, sizeof(double));
+        _out.append(buf, sizeof(double));
     }
 
     void write_bool(bool value) {
@@ -80,8 +84,8 @@ private:
         write_raw_bytes(buf);
     }
 
-    ss::future<>
-    encode_primitive(const parsed::primitive& prim, const ::avro::NodePtr& node) {
+    ss::future<> encode_primitive(
+      const parsed::primitive& prim, const ::avro::NodePtr& node) {
         std::visit(
           [this, &node](auto&& val) {
               using T = std::decay_t<decltype(val)>;
@@ -118,9 +122,10 @@ private:
         state.level++;
         auto decrement_on_exit = ss::defer([&state] { state.level--; });
         if (state.level >= max_nested_depth) {
-            throw std::invalid_argument(fmt::format(
-              "max nested field depth of {} reached during encoding",
-              max_nested_depth));
+            throw std::invalid_argument(
+              fmt::format(
+                "max nested field depth of {} reached during encoding",
+                max_nested_depth));
         }
         // Resolve symbolic references before dispatch.
         auto resolved = node->type() == ::avro::AVRO_SYMBOLIC
@@ -128,8 +133,7 @@ private:
                           : node;
 
         co_await std::visit(
-          [this, &resolved, &state](
-            auto&& val) -> ss::future<> {
+          [this, &resolved, &state](auto&& val) -> ss::future<> {
               using T = std::decay_t<decltype(val)>;
               if constexpr (std::is_same_v<T, parsed::primitive>) {
                   return encode_primitive(val, resolved);
@@ -156,9 +160,7 @@ private:
     }
 
     ss::future<> encode_map(
-      const parsed::map& m,
-      const ::avro::NodePtr& node,
-      encoder_state& state) {
+      const parsed::map& m, const ::avro::NodePtr& node, encoder_state& state) {
         if (!m.entries.empty()) {
             // Write block count
             write_zigzag_varint(static_cast<int64_t>(m.entries.size()));

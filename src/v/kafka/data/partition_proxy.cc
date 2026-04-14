@@ -86,16 +86,24 @@ partition_proxy make_partition_proxy(
     if (!enc) {
         return proxy;
     }
-    if (!partition->get_ntp_config().cloud_topic_enabled()) {
-        return proxy;
-    }
-    const auto& topic = partition->ntp().tp.topic;
-    if (!enc->resolver.has_encryption_rules_cached(topic)) {
-        return proxy;
-    }
+    // Always wrap when encryption services are available. The encrypting
+    // proxy's encrypt_batch() resolves rules asynchronously and returns
+    // the batch unchanged if no encryption annotations exist for the topic.
     auto inner = std::move(proxy).release_impl();
-    return partition_proxy(std::make_unique<encrypting_partition_proxy>(
-      std::move(inner), enc->resolver, enc->dek_mgr, enc->transformer));
+    return partition_proxy(
+      std::make_unique<encrypting_partition_proxy>(
+        std::move(inner), enc->resolver, enc->dek_mgr, enc->transformer));
+}
+
+std::optional<partition_proxy> make_partition_proxy(
+  const model::ntp& ntp,
+  cluster::partition_manager& mgr,
+  encryption::encryption_services* enc) {
+    auto partition = mgr.get(ntp);
+    if (!partition) {
+        return std::nullopt;
+    }
+    return make_partition_proxy(partition, enc);
 }
 
 } // namespace kafka

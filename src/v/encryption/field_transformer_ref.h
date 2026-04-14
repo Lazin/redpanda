@@ -11,16 +11,10 @@
 
 #pragma once
 
+#include "encryption/crypto_utils.h"
 #include "encryption/field_transformer.h"
 
 namespace encryption {
-
-/// Encrypt a plaintext iobuf with AES-GCM (128 or 256 depending on key size).
-/// Returns: [12-byte IV | ciphertext | 16-byte auth tag]
-iobuf encrypt_field_value(bytes_view dek, iobuf plaintext);
-
-/// Decrypt: parse [IV | ciphertext | tag], verify and decrypt.
-iobuf decrypt_field_value(bytes_view dek, iobuf ciphertext);
 
 /// Reference (full-copy) field transformer implementation.
 ///

@@ -143,13 +143,14 @@ public:
         last_batch.emplace(std::move(batch));
         ss::promise<result<raft::replicate_result>> p;
         auto f = p.get_future();
-        raft::replicate_result rr{.last_offset = model::offset{42}, .last_term = model::term_id{1}};
+        raft::replicate_result rr{
+          .last_offset = model::offset{42}, .last_term = model::term_id{1}};
         p.set_value(rr);
         return raft::replicate_stages(ss::make_ready_future<>(), std::move(f));
     }
 
     std::unique_ptr<kafka::exact_offset_replicator>
-    make_exact_offset_replicator() && override {
+      make_exact_offset_replicator() && override {
         return nullptr;
     }
 
@@ -157,8 +158,7 @@ public:
         return kafka::partition_info{};
     }
 
-    size_t
-    estimate_size_between(kafka::offset, kafka::offset) const override {
+    size_t estimate_size_between(kafka::offset, kafka::offset) const override {
         return 0;
     }
 
@@ -231,8 +231,8 @@ iobuf prepend_schema_prefix(iobuf value, int32_t schema_id = 1) {
 }
 
 /// Build a batch with a single record whose value has the schema prefix.
-model::record_batch make_prefixed_batch(
-  const ss::sstring& payload, int32_t schema_id = 1) {
+model::record_batch
+make_prefixed_batch(const ss::sstring& payload, int32_t schema_id = 1) {
     storage::record_batch_builder builder(
       model::record_batch_type::raft_data, model::offset{0});
     iobuf value;
@@ -249,8 +249,8 @@ void register_test_rules(encryption::schema_resolver& resolver) {
     config.handle = std::monostate{};
     config.rules.push_back(
       encryption::encryption_rule{.tag = "PII", .kek_name = "test-kek"});
-    config.field_tags.push_back(encryption::field_tag_mapping{
-      .path = {"field1"}, .tag = "PII"});
+    config.field_tags.push_back(
+      encryption::field_tag_mapping{.path = {"field1"}, .tag = "PII"});
     resolver.register_rules(model::topic{"test-topic"}, std::move(config));
 }
 
@@ -284,7 +284,8 @@ TEST_CORO(encrypting_partition_proxy_test, replicate_encrypts_tagged_fields) {
     EXPECT_TRUE(mock_ptr->last_batches.has_value());
     EXPECT_EQ(mock_ptr->last_batches->size(), 1);
 
-    if (!mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
+    if (
+      !mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
         co_return;
     }
 
@@ -311,8 +312,7 @@ TEST_CORO(encrypting_partition_proxy_test, replicate_encrypts_tagged_fields) {
     });
 }
 
-TEST_CORO(
-  encrypting_partition_proxy_test, replicate_passthrough_no_rules) {
+TEST_CORO(encrypting_partition_proxy_test, replicate_passthrough_no_rules) {
     encryption::mock_kms_provider kms;
     encryption::dek_manager dek_mgr{kms};
     encryption::schema_resolver resolver;
@@ -339,7 +339,8 @@ TEST_CORO(
     EXPECT_TRUE(mock_ptr->last_batches.has_value());
     EXPECT_EQ(mock_ptr->last_batches->size(), 1);
 
-    if (!mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
+    if (
+      !mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
         co_return;
     }
 
@@ -391,15 +392,15 @@ TEST_CORO(
     EXPECT_TRUE(mock_ptr->last_batches.has_value());
     EXPECT_EQ(mock_ptr->last_batches->size(), 1);
 
-    if (!mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
+    if (
+      !mock_ptr->last_batches.has_value() || mock_ptr->last_batches->empty()) {
         co_return;
     }
 
     // The received batch should have the rp.encryption header on the first
     // record.
     auto& received = mock_ptr->last_batches->front();
-    auto extracted
-      = co_await encryption::extract_encryption_metadata(received);
+    auto extracted = co_await encryption::extract_encryption_metadata(received);
     EXPECT_TRUE(extracted.has_value())
       << "batch should contain rp.encryption header";
     if (extracted.has_value()) {
@@ -408,8 +409,7 @@ TEST_CORO(
     }
 }
 
-TEST_CORO(
-  encrypting_partition_proxy_test, replicate_stages_futures_chain) {
+TEST_CORO(encrypting_partition_proxy_test, replicate_stages_futures_chain) {
     encryption::mock_kms_provider kms;
     encryption::dek_manager dek_mgr{kms};
     encryption::schema_resolver resolver;
@@ -442,8 +442,7 @@ TEST_CORO(
     EXPECT_TRUE(mock_ptr->last_batch.has_value());
 }
 
-TEST_CORO(
-  encrypting_partition_proxy_test, replicate_error_propagation) {
+TEST_CORO(encrypting_partition_proxy_test, replicate_error_propagation) {
     encryption::mock_kms_provider kms;
     encryption::dek_manager dek_mgr{kms};
     encryption::schema_resolver resolver;

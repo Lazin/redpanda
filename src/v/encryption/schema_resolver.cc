@@ -11,12 +11,16 @@
 
 #include "encryption/schema_resolver.h"
 
+#include "base/vlog.h"
 #include "encryption/schema_annotation_parser.h"
 
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/as_future.hh>
+#include <seastar/util/log.hh>
 
 #include <avro/Compiler.hh>
+
+static ss::logger enclog("encryption");
 
 namespace encryption {
 
@@ -97,11 +101,12 @@ schema_resolver::build_schema(const topic_encryption_config& config) {
         // Find the first rule whose tag matches this field's tag.
         for (const auto& rule : config.rules) {
             if (rule.tag == field.tag) {
-                tagged_fields.push_back(tagged_field{
-                  .path = field.path,
-                  .tag = field.tag,
-                  .kek_name = rule.kek_name,
-                });
+                tagged_fields.push_back(
+                  tagged_field{
+                    .path = field.path,
+                    .tag = field.tag,
+                    .kek_name = rule.kek_name,
+                  });
                 break;
             }
         }
@@ -124,18 +129,31 @@ schema_resolver::resolve_from_registry(const model::topic& topic) const {
     auto subject_name = ss::sstring(topic()) + "-value";
 
     // Fetch the latest schema for the subject via the fetcher callback.
+    vlog(enclog.trace, "Fetching schema for subject '{}'", subject_name);
     auto fetch_fut = co_await ss::coroutine::as_future(
       (*_fetcher)(subject_name));
     if (fetch_fut.failed()) {
+        vlog(
+          enclog.trace,
+          "Schema fetch failed for subject '{}': {}",
+          subject_name,
+          fetch_fut.get_exception());
         fetch_fut.ignore_ready_future();
         co_return std::nullopt;
     }
     auto fetched = std::move(fetch_fut.get());
     if (!fetched.has_value()) {
+        vlog(enclog.trace, "No schema found for subject '{}'", subject_name);
         co_return std::nullopt;
     }
 
     auto& schema_text = fetched->schema_text;
+    vlog(
+      enclog.trace,
+      "Got schema for subject '{}', type={}, text length={}",
+      subject_name,
+      static_cast<int>(fetched->type),
+      schema_text.size());
 
     // Parse encryption annotations based on schema type.
     std::vector<field_encryption_annotation> annotations;
@@ -166,6 +184,12 @@ schema_resolver::resolve_from_registry(const model::topic& topic) const {
         // Protobuf annotation parsing is not yet supported.
         co_return std::nullopt;
     }
+
+    vlog(
+      enclog.trace,
+      "Parsed {} encryption annotations for subject '{}'",
+      annotations.size(),
+      subject_name);
 
     // No annotations means no encryption for this topic.
     if (annotations.empty()) {

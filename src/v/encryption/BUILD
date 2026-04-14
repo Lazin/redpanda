@@ -9,7 +9,7 @@ redpanda_cc_library(
         "encryption_service.h",
     ],
     implementation_deps = [
-        ":field_transformer_opt",
+        ":field_transformer",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -75,6 +75,46 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "dek_dedup",
+    srcs = [
+        "dek_dedup.cc",
+    ],
+    hdrs = [
+        "dek_dedup.h",
+    ],
+    implementation_deps = [
+        ":encryption_metadata_ser",
+        "//src/v/storage:record_batch_builder",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encryption",
+        "//src/v/base",
+        "//src/v/container:chunked_hash_map",
+        "//src/v/model",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
+    name = "schema_annotation_parser",
+    srcs = [
+        "schema_annotation_parser.cc",
+    ],
+    hdrs = [
+        "schema_annotation_parser.h",
+    ],
+    implementation_deps = [
+        "//src/v/json",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/v/base",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "schema_resolver",
     srcs = [
         "schema_resolver.cc",
@@ -84,6 +124,7 @@ redpanda_cc_library(
     ],
     implementation_deps = [
         ":schema_annotation_parser",
+        "//src/v/base",
         "@avro",
     ],
     visibility = ["//visibility:public"],
@@ -101,6 +142,7 @@ redpanda_cc_library(
         "field_transformer_ref.cc",
     ],
     hdrs = [
+        "crypto_utils.h",
         "field_transformer.h",
         "field_transformer_ref.h",
     ],

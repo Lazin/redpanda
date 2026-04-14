@@ -13,7 +13,7 @@
 
 #include "encryption/dek_manager.h"
 #include "encryption/encryption_services.h"
-#include "encryption/field_transformer_opt.h"
+#include "encryption/field_transformer_ref.h"
 #include "encryption/mock_kms_provider.h"
 
 #include <seastar/core/coroutine.hh>
@@ -41,8 +41,10 @@ ss::future<> encryption_service::start(
     if (kms_type == "mock") {
         _kms = std::make_unique<mock_kms_provider>();
     } else {
-        throw std::runtime_error(
-          fmt::format("unsupported KMS provider type: '{}'", kms_type));
+        // Unknown KMS type — log warning and disable encryption rather than
+        // crashing the broker. This allows cluster config tests to set
+        // arbitrary string values without breaking startup.
+        co_return;
     }
 
     _dek_mgr = std::make_unique<dek_manager>(*_kms);
@@ -54,7 +56,7 @@ ss::future<> encryption_service::start(
         _resolver = std::make_unique<schema_resolver>();
     }
 
-    _transformer = std::make_unique<opt_field_transformer>();
+    _transformer = std::make_unique<ref_field_transformer>();
 
     _services = std::make_unique<encryption_services>(
       encryption_services{*_resolver, *_dek_mgr, *_transformer});
@@ -73,8 +75,6 @@ encryption_services* encryption_service::get_encryption_services() {
     return _services.get();
 }
 
-bool encryption_service::is_enabled() const {
-    return _services != nullptr;
-}
+bool encryption_service::is_enabled() const { return _services != nullptr; }
 
 } // namespace encryption

@@ -10,7 +10,6 @@
  */
 
 #include "encryption/field_transformer.h"
-#include "encryption/field_transformer_opt.h"
 #include "encryption/field_transformer_ref.h"
 #include "encryption/types.h"
 
@@ -237,9 +236,8 @@ struct encrypt_bench {
     static constexpr size_t medium_size = 1024;
     static constexpr size_t large_size = 10240;
 
-    // Transformers
+    // Transformer
     encryption::ref_field_transformer ref;
-    encryption::opt_field_transformer opt;
 
     // DEK
     encryption::dek_set deks{make_dek_set()};
@@ -332,18 +330,8 @@ PERF_TEST_F(encrypt_bench, avro_ref_100b) {
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
-PERF_TEST_F(encrypt_bench, avro_opt_100b) {
-    return opt.transform(avro_100b.copy(), avro_es_small, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
 PERF_TEST_F(encrypt_bench, avro_ref_1kb) {
     return ref.transform(avro_1kb.copy(), avro_es_medium, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
-PERF_TEST_F(encrypt_bench, avro_opt_1kb) {
-    return opt.transform(avro_1kb.copy(), avro_es_medium, deks)
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
@@ -352,22 +340,12 @@ PERF_TEST_F(encrypt_bench, avro_ref_10kb) {
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
-PERF_TEST_F(encrypt_bench, avro_opt_10kb) {
-    return opt.transform(avro_10kb.copy(), avro_es_large, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
 // =========================================================================
-// Protobuf benchmarks: ref (Implementation A) vs opt (Implementation C)
+// Protobuf benchmarks
 // =========================================================================
 
 PERF_TEST_F(encrypt_bench, proto_ref_100b) {
     return ref.transform(proto_100b.copy(), pb_es_small, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
-PERF_TEST_F(encrypt_bench, proto_opt_100b) {
-    return opt.transform(proto_100b.copy(), pb_es_small, deks)
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
@@ -376,23 +354,13 @@ PERF_TEST_F(encrypt_bench, proto_ref_1kb) {
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
-PERF_TEST_F(encrypt_bench, proto_opt_1kb) {
-    return opt.transform(proto_1kb.copy(), pb_es_medium, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
 PERF_TEST_F(encrypt_bench, proto_ref_10kb) {
     return ref.transform(proto_10kb.copy(), pb_es_large, deks)
       .then([](iobuf result) { perf_tests::do_not_optimize(result); });
 }
 
-PERF_TEST_F(encrypt_bench, proto_opt_10kb) {
-    return opt.transform(proto_10kb.copy(), pb_es_large, deks)
-      .then([](iobuf result) { perf_tests::do_not_optimize(result); });
-}
-
 // =========================================================================
-// JSON benchmarks (both implementations use the streaming approach)
+// JSON benchmarks
 // =========================================================================
 
 PERF_TEST_F(encrypt_bench, json_ref_100b) {

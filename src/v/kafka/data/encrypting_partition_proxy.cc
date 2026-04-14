@@ -57,7 +57,8 @@ std::optional<iobuf> strip_schema_prefix(iobuf& value) {
     }
     // Rewind: share the first 5 bytes as prefix, the rest as payload.
     iobuf prefix = value.share(0, schema_prefix_len);
-    iobuf payload = value.share(schema_prefix_len, value.size_bytes() - schema_prefix_len);
+    iobuf payload = value.share(
+      schema_prefix_len, value.size_bytes() - schema_prefix_len);
     value = std::move(payload);
     return prefix;
 }
@@ -70,8 +71,17 @@ encrypting_partition_proxy::encrypt_batch(model::record_batch batch) {
 
     auto schema_opt = co_await _resolver.resolve(topic);
     if (!schema_opt.has_value()) {
+        vlog(
+          kdlog.trace,
+          "No encryption schema for topic {}, passing through",
+          topic);
         co_return batch;
     }
+    vlog(
+      kdlog.trace,
+      "Encrypting batch for topic {} with {} tagged fields",
+      topic,
+      schema_opt->tagged_fields.size());
     auto& schema = *schema_opt;
 
     // Collect DEKs for all distinct kek_names in the schema.

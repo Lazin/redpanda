@@ -47,8 +47,7 @@ dek_algorithm algorithm_from_string(std::string_view s) {
     if (s == "AES256_SIV") {
         return dek_algorithm::aes256_siv;
     }
-    throw std::invalid_argument(
-      fmt::format("unknown dek_algorithm: {}", s));
+    throw std::invalid_argument(fmt::format("unknown dek_algorithm: {}", s));
 }
 
 } // namespace
@@ -80,8 +79,7 @@ ss::future<dek_set> deserialize_encryption_metadata(iobuf buf) {
         state.kms_type = entry.get_kms_type();
         state.kms_key_id = entry.get_kms_key_id();
         state.encrypted_dek = bytes(
-          bytes::initialized_later{},
-          entry.get_encrypted_dek().size_bytes());
+          bytes::initialized_later{}, entry.get_encrypted_dek().size_bytes());
         {
             iobuf::iterator_consumer it(
               entry.get_encrypted_dek().cbegin(),

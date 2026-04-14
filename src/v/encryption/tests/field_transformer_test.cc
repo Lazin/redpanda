@@ -56,9 +56,7 @@ constexpr std::array<uint8_t, 32> test_dek2_bytes = {
   0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
 };
 
-bytes make_dek(const auto& arr) {
-    return bytes(arr.data(), arr.size());
-}
+bytes make_dek(const auto& arr) { return bytes(arr.data(), arr.size()); }
 
 dek_state make_dek_state(const auto& arr, ss::sstring kek_name) {
     return dek_state{
@@ -133,22 +131,19 @@ struct proto_schema {
         f1->set_name("name");
         f1->set_number(1);
         f1->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
-        f1->set_label(
-          google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+        f1->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
 
         auto* f2 = msg->add_field();
         f2->set_name("ssn");
         f2->set_number(2);
         f2->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
-        f2->set_label(
-          google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+        f2->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
 
         auto* f3 = msg->add_field();
         f3->set_name("age");
         f3->set_number(3);
         f3->set_type(google::protobuf::FieldDescriptorProto::TYPE_INT32);
-        f3->set_label(
-          google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
+        f3->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
 
         file = pool.BuildFile(file_proto);
         return file->FindMessageTypeByName("SimpleRecord");
@@ -168,8 +163,7 @@ struct proto_schema {
             auto* f = addr_msg->add_field();
             f->set_name("street");
             f->set_number(1);
-            f->set_type(
-              google::protobuf::FieldDescriptorProto::TYPE_STRING);
+            f->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
             f->set_label(
               google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
         }
@@ -177,8 +171,7 @@ struct proto_schema {
             auto* f = addr_msg->add_field();
             f->set_name("city");
             f->set_number(2);
-            f->set_type(
-              google::protobuf::FieldDescriptorProto::TYPE_STRING);
+            f->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
             f->set_label(
               google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
         }
@@ -189,8 +182,7 @@ struct proto_schema {
             auto* f = person_msg->add_field();
             f->set_name("name");
             f->set_number(1);
-            f->set_type(
-              google::protobuf::FieldDescriptorProto::TYPE_STRING);
+            f->set_type(google::protobuf::FieldDescriptorProto::TYPE_STRING);
             f->set_label(
               google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
         }
@@ -198,8 +190,7 @@ struct proto_schema {
             auto* f = person_msg->add_field();
             f->set_name("address");
             f->set_number(2);
-            f->set_type(
-              google::protobuf::FieldDescriptorProto::TYPE_MESSAGE);
+            f->set_type(google::protobuf::FieldDescriptorProto::TYPE_MESSAGE);
             f->set_type_name("Address");
             f->set_label(
               google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
@@ -208,8 +199,7 @@ struct proto_schema {
             auto* f = person_msg->add_field();
             f->set_name("age");
             f->set_number(3);
-            f->set_type(
-              google::protobuf::FieldDescriptorProto::TYPE_INT32);
+            f->set_type(google::protobuf::FieldDescriptorProto::TYPE_INT32);
             f->set_label(
               google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
         }
@@ -219,8 +209,7 @@ struct proto_schema {
     }
 };
 
-iobuf pb_serialize(
-  const google::protobuf::Message& msg) {
+iobuf pb_serialize(const google::protobuf::Message& msg) {
     auto s = msg.SerializeAsString();
     iobuf buf;
     buf.append(s.data(), s.size());
@@ -288,12 +277,10 @@ TEST_CORO(field_transformer_avro, single_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Parse the result and verify ssn is not the original plaintext.
-    auto parsed = co_await serde::avro::parse(
-      std::move(result), schema);
+    auto parsed = co_await serde::avro::parse(std::move(result), schema);
     auto& result_rec = std::get<serde::avro::parsed::record>(*parsed);
 
     // name (field 0) should be unchanged.
@@ -335,8 +322,7 @@ TEST_CORO(field_transformer_avro, multiple_tagged_fields) {
     auto& rec = datum.value<::avro::GenericRecord>();
     rec.setFieldAt(0, ::avro::GenericDatum(std::string("Bob")));
     rec.setFieldAt(1, ::avro::GenericDatum(std::string("987-65-4321")));
-    rec.setFieldAt(
-      2, ::avro::GenericDatum(std::string("4111-1111-1111-1111")));
+    rec.setFieldAt(2, ::avro::GenericDatum(std::string("4111-1111-1111-1111")));
     rec.setFieldAt(3, ::avro::GenericDatum(int32_t(45)));
 
     auto input = avro_serialize(datum, schema);
@@ -353,8 +339,7 @@ TEST_CORO(field_transformer_avro, multiple_tagged_fields) {
 
     ref_field_transformer transformer;
     auto deks = make_multi_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     auto parsed = co_await serde::avro::parse(std::move(result), schema);
     auto& result_rec = std::get<serde::avro::parsed::record>(*parsed);
@@ -382,8 +367,7 @@ TEST_CORO(field_transformer_avro, multiple_tagged_fields) {
       std::get<serde::avro::parsed::primitive>(*result_rec.fields[2]));
     auto cc_decrypted = decrypt_field_value(
       make_dek(test_dek2_bytes), cc_buf.copy());
-    EXPECT_EQ(
-      cc_decrypted.linearize_to_string(), "4111-1111-1111-1111");
+    EXPECT_EQ(cc_decrypted.linearize_to_string(), "4111-1111-1111-1111");
 }
 
 TEST_CORO(field_transformer_avro, nested_tagged_field) {
@@ -433,8 +417,7 @@ TEST_CORO(field_transformer_avro, nested_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     auto parsed = co_await serde::avro::parse(std::move(result), schema);
     auto& result_rec = std::get<serde::avro::parsed::record>(*parsed);
@@ -486,8 +469,7 @@ TEST_CORO(field_transformer_avro, no_tagged_fields_passthrough) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // With no tagged fields, output should be exactly the input.
     EXPECT_EQ(result, input_copy);
@@ -526,8 +508,7 @@ TEST_CORO(field_transformer_avro, null_field_not_encrypted) {
     auto deks = make_single_dek_set();
 
     // Should not crash. The null field is simply left as-is.
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     auto parsed = co_await serde::avro::parse(std::move(result), schema);
     // Verify we got a valid parse result (no crash).
@@ -551,10 +532,8 @@ TEST_CORO(field_transformer_proto, single_tagged_field) {
       factory.GetPrototype(desc)->New());
     auto* reflect = msg->GetReflection();
 
-    reflect->SetString(
-      msg.get(), desc->FindFieldByName("name"), "Alice");
-    reflect->SetString(
-      msg.get(), desc->FindFieldByName("ssn"), "123-45-6789");
+    reflect->SetString(msg.get(), desc->FindFieldByName("name"), "Alice");
+    reflect->SetString(msg.get(), desc->FindFieldByName("ssn"), "123-45-6789");
     reflect->SetInt32(msg.get(), desc->FindFieldByName("age"), 30);
 
     auto input = pb_serialize(*msg);
@@ -569,8 +548,7 @@ TEST_CORO(field_transformer_proto, single_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Parse back using our protobuf parser.
     auto parsed = co_await serde::pb::parse(std::move(result), *desc);
@@ -610,8 +588,7 @@ TEST_CORO(field_transformer_proto, nested_tagged_field) {
       factory.GetPrototype(desc)->New());
     auto* reflect = msg->GetReflection();
 
-    reflect->SetString(
-      msg.get(), desc->FindFieldByName("name"), "Bob");
+    reflect->SetString(msg.get(), desc->FindFieldByName("name"), "Bob");
     reflect->SetInt32(msg.get(), desc->FindFieldByName("age"), 35);
 
     auto* addr_field = desc->FindFieldByName("address");
@@ -637,8 +614,7 @@ TEST_CORO(field_transformer_proto, nested_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     auto parsed = co_await serde::pb::parse(std::move(result), *desc);
 
@@ -680,8 +656,7 @@ TEST_CORO(field_transformer_json, single_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Parse the result JSON and check fields.
     auto p = serde::json::parser(std::move(result));
@@ -736,8 +711,7 @@ TEST_CORO(field_transformer_json, nested_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Parse and verify by walking the JSON tokens.
     auto p = serde::json::parser(std::move(result));
@@ -801,8 +775,7 @@ TEST_CORO(field_transformer_json, array_of_objects_tagged_field) {
 
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Parse the result and collect all ssn values from the array.
     auto p = serde::json::parser(std::move(result));
@@ -861,8 +834,7 @@ TEST_CORO(field_transformer_json, null_field_not_encrypted) {
     ref_field_transformer transformer;
     auto deks = make_single_dek_set();
     // Should not crash when encountering null for a tagged field.
-    auto result = co_await transformer.transform(
-      std::move(input), es, deks);
+    auto result = co_await transformer.transform(std::move(input), es, deks);
 
     // Verify the output contains null for ssn.
     auto result_str = result.linearize_to_string();
@@ -874,8 +846,7 @@ TEST_CORO(field_transformer_json, null_field_not_encrypted) {
         if (p.token() == serde::json::token::key) {
             current_key = p.value_string().linearize_to_string();
         } else if (
-          p.token() == serde::json::token::value_null
-          && current_key == "ssn") {
+          p.token() == serde::json::token::value_null && current_key == "ssn") {
             ssn_is_null = true;
         }
     }

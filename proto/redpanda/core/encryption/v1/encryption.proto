@@ -24,16 +24,16 @@ option (pbgen.cpp_namespace) = "proto::encryption";
 // during field-level encryption. Consumers parse this to discover the
 // encrypted DEK(s) needed for decryption.
 message EncryptionMetadata {
-  repeated DekEntry deks = 1;
+    repeated DekEntry deks = 1;
 }
 
 // A single Data Encryption Key entry, encrypted (wrapped) by the named KEK
 // via the specified KMS.
 message DekEntry {
-  string kek_name = 1;
-  string kms_type = 2;
-  string kms_key_id = 3;
-  bytes encrypted_dek = 4 [debug_redact = true];
-  string algorithm = 5;
-  uint32 dek_version = 6;
+    string kek_name = 1;
+    string kms_type = 2;
+    string kms_key_id = 3;
+    bytes encrypted_dek = 4 [debug_redact = true];
+    string algorithm = 5;
+    uint32 dek_version = 6;
 }

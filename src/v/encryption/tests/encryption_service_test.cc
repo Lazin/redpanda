@@ -48,13 +48,12 @@ TEST_CORO(encryption_service, enabled_with_mock_kms) {
     co_await svc.stop();
 }
 
-TEST_CORO(encryption_service, unknown_kms_type_throws) {
+TEST_CORO(encryption_service, unknown_kms_type_disables) {
     encryption::encryption_service svc;
 
-    ASSERT_THROW_CORO(
-      co_await svc.start(
-        encryption::schema_fetcher{}, "unknown", "key", "aes256_gcm", 3600),
-      std::runtime_error);
+    // Unknown KMS type silently disables encryption rather than crashing.
+    co_await svc.start(
+      encryption::schema_fetcher{}, "unknown", "key", "aes256_gcm", 3600);
 
     EXPECT_FALSE(svc.is_enabled());
     EXPECT_EQ(svc.get_encryption_services(), nullptr);

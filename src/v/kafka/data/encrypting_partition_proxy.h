@@ -42,8 +42,8 @@ public:
       model::record_batch batch,
       raft::replicate_options opts) final;
 
-    std::unique_ptr<exact_offset_replicator>
-    make_exact_offset_replicator() && final;
+    std::unique_ptr<exact_offset_replicator> make_exact_offset_replicator()
+      && final;
 
 private:
     ss::future<model::record_batch> encrypt_batch(model::record_batch batch);

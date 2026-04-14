@@ -9,9 +9,8 @@
  * by the Apache License, Version 2.0
  */
 
-#include "encryption/encryption_metadata_ser.h"
-
 #include "bytes/bytes.h"
+#include "encryption/encryption_metadata_ser.h"
 #include "encryption/types.h"
 #include "model/record.h"
 #include "model/record_batch_types.h"
@@ -52,8 +51,7 @@ model::record_batch make_test_batch(int num_records) {
 }
 
 void verify_dek_state(
-  const encryption::dek_state& actual,
-  const encryption::dek_state& expected) {
+  const encryption::dek_state& actual, const encryption::dek_state& expected) {
     EXPECT_EQ(actual.kek_name, expected.kek_name);
     EXPECT_EQ(actual.kms_type, expected.kms_type);
     EXPECT_EQ(actual.kms_key_id, expected.kms_key_id);

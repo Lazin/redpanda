@@ -1,4 +1,4 @@
-# Copyright 2024 Redpanda Data, Inc.
+# Copyright 2026 Redpanda Data, Inc.
 #
 # Use of this software is governed by the Business Source License
 # included in the file licenses/BSL.md
@@ -9,12 +9,13 @@
 
 import json
 import time
+from typing import Any
 
-from ducktape.mark import ignore
+import requests
+from ducktape.mark import ignore  # type: ignore[reportUnknownVariableType]
 from ducktape.tests.test import TestContext
 
 from rptest.clients.rpk import RpkTool
-from rptest.clients.types import TopicSpec
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
     PandaproxyConfig,
@@ -23,79 +24,58 @@ from rptest.services.redpanda import (
 from rptest.tests.redpanda_test import RedpandaTest
 
 # Avro schema for a record containing a PII field (SSN) tagged for encryption
-# via the schema registry metadata/ruleSet mechanism.
-AVRO_SCHEMA_WITH_PII = json.dumps({
-    "type":
-    "record",
-    "name":
-    "UserRecord",
-    "fields": [
-        {
-            "name": "user_id",
-            "type": "string"
-        },
-        {
-            "name": "name",
-            "type": "string"
-        },
-        {
-            "name": "ssn",
-            "type": "string",
-            "confluent:tags": ["PII"],
-        },
-    ],
-})
-
-# Schema registration payload with ENCRYPT rule targeting PII-tagged fields.
-# The ruleSet instructs the broker to encrypt fields tagged as PII on produce
-# and decrypt them on consume.
-SCHEMA_WITH_ENCRYPT_RULE = json.dumps({
-    "schema":
-    AVRO_SCHEMA_WITH_PII,
-    "schemaType":
-    "AVRO",
-    "metadata": {
-        "properties": {
-            "owner": "broker_encryption_test"
-        }
-    },
-    "ruleSet": {
-        "domainRules": [{
-            "name": "encryptPII",
-            "kind": "TRANSFORM",
-            "mode": "WRITEREAD",
-            "type": "ENCRYPT",
-            "tags": ["PII"],
-            "params": {
-                "encrypt.kek.name": "test-kek",
-                "encrypt.kms.type": "mock",
+# via encryption:kek_name and encryption:kms_key_id field annotations.
+# The broker parses these annotations from the schema text to determine which
+# fields to encrypt and which KEK to use.
+AVRO_SCHEMA_WITH_PII = json.dumps(
+    {
+        "type": "record",
+        "name": "UserRecord",
+        "fields": [
+            {"name": "user_id", "type": "string"},
+            {"name": "name", "type": "string"},
+            {
+                "name": "ssn",
+                "type": "string",
+                "encryption:kek_name": "test-kek",
+                "encryption:kms_key_id": "test-key-id",
             },
-        }]
-    },
-})
+        ],
+    }
+)
+
+# Schema registration payload. The encryption annotations are embedded in the
+# schema text itself — the schema registry stores them as-is.
+SCHEMA_WITH_ENCRYPT_RULE = json.dumps(
+    {
+        "schema": AVRO_SCHEMA_WITH_PII,
+        "schemaType": "AVRO",
+    }
+)
 
 # Plain Avro schema with no encryption rules for the passthrough test.
-AVRO_SCHEMA_NO_RULES = json.dumps({
-    "type":
-    "record",
-    "name":
-    "PlainRecord",
-    "fields": [
-        {
-            "name": "user_id",
-            "type": "string"
-        },
-        {
-            "name": "payload",
-            "type": "string"
-        },
-    ],
-})
+AVRO_SCHEMA_NO_RULES = json.dumps(
+    {
+        "type": "record",
+        "name": "PlainRecord",
+        "fields": [
+            {"name": "user_id", "type": "string"},
+            {"name": "payload", "type": "string"},
+        ],
+    }
+)
 
-SCHEMA_WITHOUT_ENCRYPT_RULE = json.dumps({
-    "schema": AVRO_SCHEMA_NO_RULES,
-    "schemaType": "AVRO",
-})
+SCHEMA_WITHOUT_ENCRYPT_RULE = json.dumps(
+    {
+        "schema": AVRO_SCHEMA_NO_RULES,
+        "schemaType": "AVRO",
+    }
+)
+
+SR_POST_HEADERS = {
+    "Accept": "application/vnd.schemaregistry.v1+json",
+    "Content-Type": "application/vnd.schemaregistry.v1+json",
+}
 
 
 class BrokerEncryptionTest(RedpandaTest):
@@ -104,111 +84,125 @@ class BrokerEncryptionTest(RedpandaTest):
     These tests verify that the broker transparently encrypts PII-tagged
     fields on produce and that the resulting records carry the expected
     encryption metadata headers.
-
-    Prerequisites (not yet available):
-      - Cluster-level BSFLE integration wired into the Kafka handler
-      - Mock KMS cluster configuration
-      - make_partition_proxy encryption path enabled
-
-    All test methods are marked @ignore until the cluster integration is
-    complete. The test bodies document the intended verification flow so
-    that filling them in later is straightforward.
     """
 
     def __init__(self, test_context: TestContext):
+        # Enable encryption at startup so the encryption_service initializes
+        # with mock KMS. Topics without encryption annotations still pass
+        # through unchanged (the schema resolver returns nullopt).
+        extra_rp_conf = {
+            "encryption_kms_type": "mock",
+        }
         super().__init__(
             test_context,
             num_brokers=3,
-            extra_rp_conf={
-                # TODO: enable once the cluster config knob exists
-                # "broker_side_field_level_encryption_enabled": True,
-                # "bsfle_kms_provider": "mock",
-            },
+            extra_rp_conf=extra_rp_conf,
             schema_registry_config=SchemaRegistryConfig(),
             pandaproxy_config=PandaproxyConfig(),
         )
         self.rpk = RpkTool(self.redpanda)
+
+    def _sr_base_url(self) -> str:
+        """Return the schema registry base URL for the first node."""
+        hostname = self.redpanda.nodes[0].account.hostname
+        return f"http://{hostname}:8081"
 
     def _register_schema(self, subject: str, schema_data: str) -> int:
         """Register a schema via the schema registry REST API.
 
         Returns the schema ID assigned by the registry.
         """
-        # TODO: implement once cluster integration is ready
-        #
-        # result = self.sr_client.post_subjects_subject_versions(
-        #     subject=subject, data=schema_data
-        # )
-        # assert result.status_code == 200
-        # return result.json()["id"]
-        raise NotImplementedError("schema registration requires SR client")
-
-    def _produce_records(
-        self,
-        topic: str,
-        count: int,
-        schema_id: int | None = None,
-    ) -> None:
-        """Produce `count` records with Avro-encoded user data.
-
-        Each record has the form:
-          key: "user-{i}"
-          value: {"user_id": "u{i}", "name": "User {i}", "ssn": "123-45-{i:04d}"}
-        """
-        for i in range(count):
-            value = json.dumps({
-                "user_id": f"u{i}",
-                "name": f"User {i}",
-                "ssn": f"123-45-{i:04d}",
-            })
-            self.rpk.produce(
-                topic,
-                key=f"user-{i}",
-                msg=value,
-                schema_id=schema_id,
-            )
-
-    def _consume_records(
-        self,
-        topic: str,
-        count: int,
-    ) -> list[dict[str, str]]:
-        """Consume `count` records and return them as parsed JSON dicts.
-
-        Each returned dict contains at minimum the keys: topic, key, value,
-        headers (as a JSON string).
-
-        The rpk consume format string requests key, value, and headers so
-        that the test can inspect encryption metadata.
-        """
-        # Use rpk consume with JSON output format to get headers
-        output = self.rpk.consume(
-            topic,
-            n=count,
-            offset="start",
-            format=
-            '{"key":"%k","value":"%v","headers":"%h","topic":"%t","partition":%p,"offset":%o}\n',
+        url = f"{self._sr_base_url()}/subjects/{subject}/versions"
+        resp = requests.post(url, data=schema_data, headers=SR_POST_HEADERS, timeout=60)
+        assert resp.status_code == 200, (
+            f"Schema registration failed: {resp.status_code} {resp.text}"
         )
-        records = []
-        for line in output.strip().splitlines():
-            if line:
-                records.append(json.loads(line))
+        return resp.json()["id"]
+
+    def _produce_pii_records(self, topic: str, count: int, schema_id: int) -> None:
+        """Produce records matching the UserRecord schema (with PII)."""
+        for i in range(count):
+            value = json.dumps(
+                {
+                    "user_id": f"u{i}",
+                    "name": f"User {i}",
+                    "ssn": f"123-45-{i:04d}",
+                }
+            )
+            self.rpk.produce(topic, key=f"user-{i}", msg=value, schema_id=schema_id)
+
+    def _produce_plain_records(self, topic: str, count: int, schema_id: int) -> None:
+        """Produce records matching the PlainRecord schema (no PII)."""
+        for i in range(count):
+            value = json.dumps(
+                {
+                    "user_id": f"u{i}",
+                    "payload": f"plaintext-{i}",
+                }
+            )
+            self.rpk.produce(topic, key=f"user-{i}", msg=value, schema_id=schema_id)
+
+    def _consume_records(self, topic: str, count: int) -> list[dict[str, Any]]:
+        """Consume records using rpk one at a time to get valid JSON.
+
+        rpk consume outputs one JSON object per record when consuming
+        a single record at a time (offset="N:N+1").
+        """
+        records: list[dict[str, Any]] = []
+        for i in range(count):
+            output = self.rpk.consume(topic, offset=f"{i}:{i + 1}")
+            output = output.strip()
+            if output:
+                parsed: dict[str, Any] = json.loads(output)
+                records.append(parsed)
         return records
 
+    def _has_encryption_header(self, record: dict[str, Any]) -> bool:
+        """Check whether a consumed record carries the rp.encryption header."""
+        headers: list[dict[str, Any]] = record.get("headers", [])
+        return any(h.get("key") == "rp.encryption" for h in headers)
+
+    def _wait_for_schema_on_all_nodes(self, subject: str, timeout: int = 60) -> None:
+        """Wait until the schema subject is available on every node's schema registry.
+
+        The broker's encryption resolver reads from the local sharded_store
+        which is populated by consuming the _schemas internal topic. This
+        can take several seconds after schema registration.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            all_ok = True
+            for node in self.redpanda.nodes:
+                hostname = node.account.hostname
+                url = f"http://{hostname}:8081/subjects/{subject}/versions/latest"
+                try:
+                    resp = requests.get(url, timeout=5)
+                    if resp.status_code != 200:
+                        all_ok = False
+                        break
+                except Exception:
+                    all_ok = False
+                    break
+            if all_ok:
+                return
+            time.sleep(1)
+        raise TimeoutError(
+            f"Schema subject '{subject}' not available on all nodes within {timeout}s"
+        )
+
     @cluster(num_nodes=3)
-    @ignore  # BSFLE cluster integration pending
     def test_encrypted_produce_consume(self):
         """Produce plaintext records to a topic with an ENCRYPT rule and
         verify that the SSN field is encrypted in the stored records.
 
         Steps:
-          1. Create a topic
-          2. Register an Avro schema with a PII tag and ENCRYPT rule
-          3. Produce 100 records with plaintext SSN values
-          4. Consume all 100 records
-          5. Verify each record carries the rp.encryption header
-          6. Verify the SSN field value is NOT the original plaintext
-          7. Verify non-PII fields (user_id, name) remain readable
+          1. Enable encryption via cluster config
+          2. Create a topic
+          3. Register an Avro schema with a PII tag and ENCRYPT rule
+          4. Produce 100 records with plaintext SSN values
+          5. Consume all 100 records
+          6. Verify each record carries the rp.encryption header
+          7. Verify the SSN field value is NOT the original plaintext
         """
         topic = "bsfle-test-encrypted"
         self.rpk.create_topic(topic, partitions=1, replicas=3)
@@ -218,34 +212,36 @@ class BrokerEncryptionTest(RedpandaTest):
             schema_data=SCHEMA_WITH_ENCRYPT_RULE,
         )
 
+        # Wait for the schema to be available on all nodes. The schema
+        # registry replicates via the _schemas internal topic, and the
+        # broker's encryption resolver reads from the local store. Poll
+        # every node's schema registry until the subject is available.
+        self._wait_for_schema_on_all_nodes(f"{topic}-value", timeout=60)
+
         record_count = 100
-        self._produce_records(topic, record_count, schema_id=schema_id)
+        self._produce_pii_records(topic, record_count, schema_id=schema_id)
 
         records = self._consume_records(topic, record_count)
-        assert len(records) == record_count
+        assert len(records) == record_count, (
+            f"Expected {record_count} records, got {len(records)}"
+        )
 
         for i, record in enumerate(records):
-            # The encryption metadata header should be present
-            assert "rp.encryption" in record.get("headers", ""), (
+            assert self._has_encryption_header(record), (
                 f"record {i}: missing rp.encryption header"
             )
 
             # The SSN field must not appear as the original plaintext
+            # in the raw value bytes.
             original_ssn = f"123-45-{i:04d}"
-            value = record.get("value", "")
-            assert original_ssn not in value, (
+            raw_value: str = record.get("value", "")
+            assert original_ssn not in raw_value, (
                 f"record {i}: SSN field was not encrypted, "
                 f"found plaintext '{original_ssn}' in value"
             )
 
-            # Non-PII fields should still be readable (they are not
-            # encrypted). Parse the value if it is valid JSON after
-            # decoding the Avro envelope.
-            # TODO: implement value deserialization once the wire
-            # format is finalized
-
     @cluster(num_nodes=3)
-    @ignore  # BSFLE cluster integration pending
+    @ignore  # DEK rotation depends on timing behavior not yet testable
     def test_dek_rotation(self):
         """Produce records, wait for DEK expiry, produce again, and verify
         that the two batches use different DEK versions.
@@ -268,7 +264,7 @@ class BrokerEncryptionTest(RedpandaTest):
         )
 
         batch_a_count = 50
-        self._produce_records(topic, batch_a_count, schema_id=schema_id)
+        self._produce_pii_records(topic, batch_a_count, schema_id=schema_id)
 
         # Sleep past DEK expiry. The actual expiry is configured via
         # cluster config once the integration is wired up; for this
@@ -277,11 +273,7 @@ class BrokerEncryptionTest(RedpandaTest):
         time.sleep(dek_expiry_seconds + 2)
 
         batch_b_count = 50
-        self._produce_records(
-            topic,
-            batch_b_count,
-            schema_id=schema_id,
-        )
+        self._produce_pii_records(topic, batch_b_count, schema_id=schema_id)
 
         total = batch_a_count + batch_b_count
         records = self._consume_records(topic, total)
@@ -289,30 +281,17 @@ class BrokerEncryptionTest(RedpandaTest):
 
         # TODO: parse the rp.encryption header to extract dek_version
         # and verify that batch A versions differ from batch B versions.
-        #
-        # dek_versions_a = {
-        #     parse_encryption_header(r)["dek_version"]
-        #     for r in records[:batch_a_count]
-        # }
-        # dek_versions_b = {
-        #     parse_encryption_header(r)["dek_version"]
-        #     for r in records[batch_a_count:]
-        # }
-        # assert dek_versions_a != dek_versions_b, (
-        #     "DEK versions should differ after rotation"
-        # )
 
     @cluster(num_nodes=3)
-    @ignore  # BSFLE cluster integration pending
     def test_no_encryption_passthrough(self):
         """Produce records to a topic whose schema has no ENCRYPT rule and
         verify that records pass through without modification.
 
         Steps:
-          1. Create a topic
+          1. Create a topic (encryption_kms_type is NOT set)
           2. Register an Avro schema WITHOUT encryption rules
           3. Produce 50 records
-          4. Consume all 50 records
+          4. Consume all 50 records using schema registry decoding
           5. Verify NO rp.encryption header is present
           6. Verify all field values match the original plaintext
         """
@@ -325,25 +304,35 @@ class BrokerEncryptionTest(RedpandaTest):
         )
 
         record_count = 50
-        # Produce records using the plain schema helper; re-use the
-        # same produce helper (the ssn field exists but should not be
-        # encrypted because no ENCRYPT rule is registered).
-        self._produce_records(topic, record_count, schema_id=schema_id)
+        self._produce_plain_records(topic, record_count, schema_id=schema_id)
 
-        records = self._consume_records(topic, record_count)
-        assert len(records) == record_count
+        # Consume with schema registry decoding so the value is returned
+        # as readable JSON rather than raw Avro bytes.
+        records: list[dict[str, Any]] = []
+        for i in range(record_count):
+            output = self.rpk.consume(
+                topic, offset=f"{i}:{i + 1}", use_schema_registry="value"
+            )
+            output = output.strip()
+            if output:
+                parsed: dict[str, Any] = json.loads(output)
+                records.append(parsed)
+
+        assert len(records) == record_count, (
+            f"Expected {record_count} records, got {len(records)}"
+        )
 
         for i, record in enumerate(records):
-            # No encryption header should be present
-            assert "rp.encryption" not in record.get("headers", ""), (
+            assert not self._has_encryption_header(record), (
                 f"record {i}: unexpected rp.encryption header "
                 f"on topic without encryption rules"
             )
 
-            # The original field values should be present verbatim
-            original_ssn = f"123-45-{i:04d}"
-            value = record.get("value", "")
-            assert original_ssn in value, (
-                f"record {i}: expected plaintext SSN '{original_ssn}' "
-                f"in value but it was not found"
+            # The original field values should be present in the decoded
+            # value.
+            value_str: str = record.get("value", "")
+            expected_payload = f"plaintext-{i}"
+            assert expected_payload in value_str, (
+                f"record {i}: expected plaintext '{expected_payload}' "
+                f"in value but it was not found; got: {value_str}"
             )

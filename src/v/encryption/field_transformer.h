@@ -63,10 +63,7 @@ public:
     /// Transform a single record value: deserialize, encrypt tagged
     /// fields, re-serialize. Returns the modified value iobuf.
     virtual ss::future<iobuf> transform(
-      iobuf value,
-      const encryption_schema& schema,
-      const dek_set& deks)
-      = 0;
+      iobuf value, const encryption_schema& schema, const dek_set& deks) = 0;
 };
 
 } // namespace encryption

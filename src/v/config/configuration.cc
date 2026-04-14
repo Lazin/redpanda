@@ -4853,32 +4853,28 @@ configuration::configuration()
       *this,
       "encryption_kms_type",
       "KMS provider type for broker-side field-level encryption. "
-      "Empty string disables encryption. Supported: \"mock\".",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::user},
-      "")
+      "Null disables encryption. Supported: \"mock\".",
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
   , encryption_kms_key_id(
       *this,
       "encryption_kms_key_id",
       "Default KMS key identifier used when schema annotations do not "
       "specify encryption:kms_key_id.",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::user},
-      "")
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
+      std::nullopt)
   , encryption_dek_algorithm(
       *this,
       "encryption_dek_algorithm",
       "Algorithm for data encryption keys. "
       "Supported: AES128_GCM, AES256_GCM, AES256_SIV.",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::user},
+      {.needs_restart = needs_restart::no, .visibility = visibility::user},
       "AES256_GCM")
   , encryption_dek_expiry_seconds(
       *this,
       "encryption_dek_expiry_seconds",
       "Seconds before automatic DEK rotation. 0 disables rotation.",
-      {.needs_restart = needs_restart::no,
-       .visibility = visibility::tunable},
+      {.needs_restart = needs_restart::no, .visibility = visibility::tunable},
       0)
   , enable_developmental_unrecoverable_data_corrupting_features(
       *this,

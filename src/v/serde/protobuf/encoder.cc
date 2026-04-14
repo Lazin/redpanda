@@ -61,8 +61,7 @@ wire_type wire_type_for_field(const pb::FieldDescriptor& field) {
 
 void write_tag_for_field(const pb::FieldDescriptor& field, iobuf* out) {
     tag::write(
-      {.wire_type = wire_type_for_field(field),
-       .field_number = field.number()},
+      {.wire_type = wire_type_for_field(field), .field_number = field.number()},
       out);
 }
 
@@ -71,8 +70,9 @@ template<typename T>
 requires std::is_integral_v<T>
 void write_fixed(T val, iobuf* out) {
     T le_val = ss::cpu_to_le(val);
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    out->append(reinterpret_cast<const char*>(&le_val), sizeof(T));
+    char buf[sizeof(T)];
+    std::memcpy(buf, &le_val, sizeof(T));
+    out->append(buf, sizeof(T));
 }
 
 // Write a float/double in IEEE 754 little-endian byte order.
@@ -236,9 +236,7 @@ void encode_singular_field(
 // Encode packed repeated elements into a length-delimited blob.
 template<typename T>
 void write_packed_elements(
-  const pb::FieldDescriptor& field,
-  const chunked_vector<T>& vec,
-  iobuf* out) {
+  const pb::FieldDescriptor& field, const chunked_vector<T>& vec, iobuf* out) {
     iobuf packed;
     for (const auto& val : vec) {
         if constexpr (std::is_same_v<T, double>) {
@@ -294,9 +292,7 @@ void write_packed_elements(
 // Encode unpacked repeated scalar elements, one tag per element.
 template<typename T>
 void write_unpacked_elements(
-  const pb::FieldDescriptor& field,
-  const chunked_vector<T>& vec,
-  iobuf* out) {
+  const pb::FieldDescriptor& field, const chunked_vector<T>& vec, iobuf* out) {
     for (const auto& val : vec) {
         write_tag_for_field(field, out);
         if constexpr (std::is_same_v<T, double>) {
@@ -346,9 +342,7 @@ void write_unpacked_elements(
 }
 
 void encode_repeated_field(
-  const pb::FieldDescriptor& field,
-  const parsed::repeated& rep,
-  iobuf* out) {
+  const pb::FieldDescriptor& field, const parsed::repeated& rep, iobuf* out) {
     bool packed = field.is_packed();
     std::visit(
       [&](const auto& vec) {
@@ -367,8 +361,7 @@ void encode_repeated_field(
                   write_tag_for_field(field, out);
                   iobuf nested;
                   encode_message(*val, *field.message_type(), &nested);
-                  write_length(
-                    static_cast<int32_t>(nested.size_bytes()), out);
+                  write_length(static_cast<int32_t>(nested.size_bytes()), out);
                   out->append(std::move(nested));
               }
           } else {
@@ -429,9 +422,7 @@ void encode_map_entry_value(
 }
 
 void encode_map_field(
-  const pb::FieldDescriptor& field,
-  const parsed::map& map,
-  iobuf* out) {
+  const pb::FieldDescriptor& field, const parsed::map& map, iobuf* out) {
     const auto* entry_desc = field.message_type();
     const auto* key_field = entry_desc->map_key();
     const auto* val_field = entry_desc->map_value();
@@ -457,8 +448,7 @@ void encode_field_value(
     if (std::holds_alternative<parsed::map>(value)) {
         encode_map_field(field, std::get<parsed::map>(value), out);
     } else if (std::holds_alternative<parsed::repeated>(value)) {
-        encode_repeated_field(
-          field, std::get<parsed::repeated>(value), out);
+        encode_repeated_field(field, std::get<parsed::repeated>(value), out);
     } else {
         encode_singular_field(field, value, out);
     }

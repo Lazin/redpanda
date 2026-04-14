@@ -55,9 +55,10 @@ const EVP_CIPHER* cipher_for_key(bytes_view dek) {
     case 32:
         return EVP_aes_256_gcm();
     default:
-        throw crypto::exception(fmt::format(
-          "unsupported AES-GCM key size: {} bytes (need 16 or 32)",
-          dek.size()));
+        throw crypto::exception(
+          fmt::format(
+            "unsupported AES-GCM key size: {} bytes (need 16 or 32)",
+            dek.size()));
     }
 }
 
@@ -79,19 +80,17 @@ serde::avro::parsed::message* walk_avro_path(
         const auto& segment = path[i];
 
         // Unwrap unions: if the current node is a union, descend into it.
-        while (std::holds_alternative<serde::avro::parsed::avro_union>(
-          *current)) {
+        while (
+          std::holds_alternative<serde::avro::parsed::avro_union>(*current)) {
             auto& u = std::get<serde::avro::parsed::avro_union>(*current);
             // If the union branch is null, the field is absent.
             if (
-              std::holds_alternative<serde::avro::parsed::primitive>(
-                *u.message)
+              std::holds_alternative<serde::avro::parsed::primitive>(*u.message)
               && std::holds_alternative<serde::avro::parsed::avro_null>(
                 std::get<serde::avro::parsed::primitive>(*u.message))) {
                 return nullptr;
             }
-            current_schema = current_schema->leafAt(
-              static_cast<int>(u.branch));
+            current_schema = current_schema->leafAt(static_cast<int>(u.branch));
             current = u.message.get();
         }
 
@@ -115,8 +114,7 @@ serde::avro::parsed::message* walk_avro_path(
     }
 
     // Unwrap union at the leaf too.
-    while (
-      std::holds_alternative<serde::avro::parsed::avro_union>(*current)) {
+    while (std::holds_alternative<serde::avro::parsed::avro_union>(*current)) {
         auto& u = std::get<serde::avro::parsed::avro_union>(*current);
         if (
           std::holds_alternative<serde::avro::parsed::primitive>(*u.message)
@@ -164,8 +162,7 @@ void encrypt_pb_field(
     const auto* current_desc = &desc;
 
     for (size_t i = 0; i + 1 < path.size(); ++i) {
-        const auto* fd = current_desc->FindFieldByName(
-          std::string(path[i]));
+        const auto* fd = current_desc->FindFieldByName(std::string(path[i]));
         if (fd == nullptr || fd->message_type() == nullptr) {
             return;
         }
@@ -184,8 +181,7 @@ void encrypt_pb_field(
 
     // Now current_msg is the parent, encrypt the leaf field.
     const auto& leaf_name = path.back();
-    const auto* leaf_fd = current_desc->FindFieldByName(
-      std::string(leaf_name));
+    const auto* leaf_fd = current_desc->FindFieldByName(std::string(leaf_name));
     if (leaf_fd == nullptr) {
         return;
     }
@@ -286,8 +282,7 @@ ss::future<iobuf> transform_json(
             // to this object value.
             if (
               !path_stack.empty()
-              && (context_stack.empty()
-                  || context_stack.back().type == context_type::object)) {
+              && (context_stack.empty() || context_stack.back().type == context_type::object)) {
                 path_stack.pop_back();
             }
             break;
@@ -315,8 +310,7 @@ ss::future<iobuf> transform_json(
             }
             if (
               !path_stack.empty()
-              && (context_stack.empty()
-                  || context_stack.back().type == context_type::object)) {
+              && (context_stack.empty() || context_stack.back().type == context_type::object)) {
                 path_stack.pop_back();
             }
             break;
@@ -330,7 +324,9 @@ ss::future<iobuf> transform_json(
             // The current object's context_entry records the path depth
             // at entry; any path entries beyond that belong to a prior
             // sibling key and must be removed before pushing the new key.
-            if (!context_stack.empty() && context_stack.back().type == context_type::object) {
+            if (
+              !context_stack.empty()
+              && context_stack.back().type == context_type::object) {
                 auto depth = context_stack.back().path_depth_at_entry;
                 while (path_stack.size() > depth) {
                     path_stack.pop_back();
@@ -341,8 +337,7 @@ ss::future<iobuf> transform_json(
             w.key(key_buf);
 
             // Check if current path matches a tagged field.
-            auto match = match_json_path(
-              path_stack, tagged_fields, deks);
+            auto match = match_json_path(path_stack, tagged_fields, deks);
             encrypt_next_value = match.matches;
             if (match.matches) {
                 active_dek = match.dek;
@@ -380,8 +375,7 @@ ss::future<iobuf> transform_json(
                   && val <= std::numeric_limits<int32_t>::max()) {
                     w.integer(static_cast<int32_t>(val));
                 } else {
-                    w.append_raw_json(
-                      iobuf::from(fmt::to_string(val)));
+                    w.append_raw_json(iobuf::from(fmt::to_string(val)));
                 }
             }
             break;
@@ -465,13 +459,16 @@ iobuf encrypt_field_value(bytes_view dek, iobuf plaintext) {
       gcm_iv_size, crypto::use_private_rng::yes);
 
     if (
-      1 != EVP_EncryptInit_ex(ctx.get(), cipher, nullptr, dek.data(), iv.data())) {
+      1
+      != EVP_EncryptInit_ex(
+        ctx.get(), cipher, nullptr, dek.data(), iv.data())) {
         throw crypto::internal::ossl_error("EVP_EncryptInit_ex failed");
     }
 
     // Linearize plaintext for OpenSSL.
     auto pt_bytes = iobuf_to_bytes(plaintext);
-    if (pt_bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    if (
+      pt_bytes.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
         throw crypto::exception("plaintext too large for AES-GCM");
     }
 
@@ -583,9 +580,7 @@ iobuf decrypt_field_value(bytes_view dek, iobuf ciphertext) {
 }
 
 ss::future<iobuf> ref_field_transformer::transform(
-  iobuf value,
-  const encryption_schema& schema,
-  const dek_set& deks) {
+  iobuf value, const encryption_schema& schema, const dek_set& deks) {
     switch (schema.format) {
     case schema_format::avro: {
         auto* avro_schema = std::get_if<std::shared_ptr<::avro::ValidSchema>>(
@@ -608,8 +603,7 @@ ss::future<iobuf> ref_field_transformer::transform(
                 continue;
             }
 
-            auto* node = walk_avro_path(
-              *parsed, **avro_schema, tf.path);
+            auto* node = walk_avro_path(*parsed, **avro_schema, tf.path);
             if (node != nullptr) {
                 encrypt_avro_field(*node, dek_it->second.plaintext_dek);
             }
@@ -619,8 +613,8 @@ ss::future<iobuf> ref_field_transformer::transform(
     }
 
     case schema_format::protobuf: {
-        auto* const* pb_desc
-          = std::get_if<const google::protobuf::Descriptor*>(&schema.handle);
+        auto* const* pb_desc = std::get_if<const google::protobuf::Descriptor*>(
+          &schema.handle);
         if (pb_desc == nullptr || *pb_desc == nullptr) {
             throw std::runtime_error(
               "protobuf descriptor missing for protobuf format");
@@ -630,8 +624,7 @@ ss::future<iobuf> ref_field_transformer::transform(
             co_return std::move(value);
         }
 
-        auto parsed = co_await serde::pb::parse(
-          std::move(value), **pb_desc);
+        auto parsed = co_await serde::pb::parse(std::move(value), **pb_desc);
 
         for (const auto& tf : schema.tagged_fields) {
             auto dek_it = deks.find(tf.kek_name);

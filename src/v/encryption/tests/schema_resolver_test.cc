@@ -27,8 +27,8 @@ TEST_CORO(schema_resolver_test, topic_with_encrypt_rules) {
         .format = schema_format::avro,
         .handle = std::monostate{},
         .rules = {encryption_rule{.tag = "PII", .kek_name = "pii-kek"}},
-        .field_tags
-        = {field_tag_mapping{.path = {"card_number"}, .tag = "PII"}},
+        .field_tags = {field_tag_mapping{
+          .path = {"card_number"}, .tag = "PII"}},
       });
 
     auto result = co_await resolver.resolve(model::topic("payments"));
@@ -36,7 +36,8 @@ TEST_CORO(schema_resolver_test, topic_with_encrypt_rules) {
     ASSERT_TRUE_CORO(result.has_value());
     EXPECT_EQ(result->format, schema_format::avro);
     ASSERT_EQ_CORO(result->tagged_fields.size(), 1);
-    EXPECT_EQ(result->tagged_fields[0].path, std::vector<ss::sstring>{"card_number"});
+    EXPECT_EQ(
+      result->tagged_fields[0].path, std::vector<ss::sstring>{"card_number"});
     EXPECT_EQ(result->tagged_fields[0].tag, "PII");
     EXPECT_EQ(result->tagged_fields[0].kek_name, "pii-kek");
 }
@@ -58,11 +59,9 @@ TEST_CORO(schema_resolver_test, multiple_rules_different_tags) {
         .format = schema_format::protobuf,
         .handle = std::monostate{},
         .rules
-        = {encryption_rule{.tag = "PII", .kek_name = "pii-kek"},
-           encryption_rule{.tag = "FINANCIAL", .kek_name = "finance-kek"}},
+        = {encryption_rule{.tag = "PII", .kek_name = "pii-kek"}, encryption_rule{.tag = "FINANCIAL", .kek_name = "finance-kek"}},
         .field_tags
-        = {field_tag_mapping{.path = {"ssn"}, .tag = "PII"},
-           field_tag_mapping{.path = {"salary"}, .tag = "FINANCIAL"}},
+        = {field_tag_mapping{.path = {"ssn"}, .tag = "PII"}, field_tag_mapping{.path = {"salary"}, .tag = "FINANCIAL"}},
       });
 
     auto result = co_await resolver.resolve(model::topic("users"));
@@ -91,10 +90,8 @@ TEST_CORO(schema_resolver_test, first_matching_rule_wins) {
         .format = schema_format::json,
         .handle = std::monostate{},
         .rules
-        = {encryption_rule{.tag = "PII", .kek_name = "primary-kek"},
-           encryption_rule{.tag = "PII", .kek_name = "secondary-kek"}},
-        .field_tags
-        = {field_tag_mapping{.path = {"email"}, .tag = "PII"}},
+        = {encryption_rule{.tag = "PII", .kek_name = "primary-kek"}, encryption_rule{.tag = "PII", .kek_name = "secondary-kek"}},
+        .field_tags = {field_tag_mapping{.path = {"email"}, .tag = "PII"}},
       });
 
     auto result = co_await resolver.resolve(model::topic("orders"));
@@ -116,8 +113,7 @@ TEST_CORO(schema_resolver_test, has_encryption_rules_cached) {
         .format = schema_format::avro,
         .handle = std::monostate{},
         .rules = {encryption_rule{.tag = "SECRET", .kek_name = "s-kek"}},
-        .field_tags
-        = {field_tag_mapping{.path = {"data"}, .tag = "SECRET"}},
+        .field_tags = {field_tag_mapping{.path = {"data"}, .tag = "SECRET"}},
       });
 
     EXPECT_TRUE(
@@ -175,8 +171,7 @@ TEST_CORO(schema_resolver_test, nested_field_path) {
         .format = schema_format::avro,
         .handle = std::monostate{},
         .rules = {encryption_rule{.tag = "PII", .kek_name = "kek-1"}},
-        .field_tags
-        = {field_tag_mapping{
+        .field_tags = {field_tag_mapping{
           .path = {"address", "street"}, .tag = "PII"}},
       });
 

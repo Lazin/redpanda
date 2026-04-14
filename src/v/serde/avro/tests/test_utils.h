@@ -23,8 +23,7 @@ namespace serde::avro::testing {
 
 /// Convert a parsed message tree back to an Avro GenericDatum for comparison.
 void parsed_to_avro(
-  ::avro::GenericDatum& datum,
-  const std::unique_ptr<parsed::message>& msg);
+  ::avro::GenericDatum& datum, const std::unique_ptr<parsed::message>& msg);
 
 namespace detail {
 
@@ -100,8 +99,7 @@ struct parsed_msg_visitor {
 } // namespace detail
 
 inline void parsed_to_avro(
-  ::avro::GenericDatum& datum,
-  const std::unique_ptr<parsed::message>& msg) {
+  ::avro::GenericDatum& datum, const std::unique_ptr<parsed::message>& msg) {
     std::visit(detail::parsed_msg_visitor{&datum}, *msg);
 }
 

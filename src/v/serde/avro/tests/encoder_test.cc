@@ -65,8 +65,7 @@ struct AvroEncoderTest : ::testing::Test {
     /// Parse -> encode -> parse roundtrip, returning the re-parsed tree
     /// converted to GenericDatum for comparison.
     ::avro::GenericDatum roundtrip(
-      const ::avro::GenericDatum& original,
-      const ::avro::ValidSchema& schema) {
+      const ::avro::GenericDatum& original, const ::avro::ValidSchema& schema) {
         // Serialize with Apache Avro library
         iobuf original_bytes = serialize_with_avro(original, schema);
 
@@ -211,8 +210,7 @@ TEST_P(AvroEncoderRoundtripTest, roundtrip_preserves_data) {
         iobuf original_bytes = serialize_with_avro(original, schema);
 
         // Parse with our parser
-        auto parsed
-          = serde::avro::parse(original_bytes.copy(), schema).get();
+        auto parsed = serde::avro::parse(original_bytes.copy(), schema).get();
 
         // Encode back with our encoder
         auto encoded = serde::avro::encode(*parsed, schema).get();
@@ -273,8 +271,8 @@ INSTANTIATE_TEST_SUITE_P(
     "union_map_union",
     "union_redundant_types",
     "unionwithmap"),
-  [](const ::testing::TestParamInfo<AvroEncoderRoundtripTest::ParamType>&
-       info) {
+  [](
+    const ::testing::TestParamInfo<AvroEncoderRoundtripTest::ParamType>& info) {
       auto name = std::string(std::get<0>(info.param));
       std::replace(name.begin(), name.end(), '.', '_');
       return name;

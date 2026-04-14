@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Redpanda Data, Inc.
+ * Copyright 2026 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -9,12 +9,12 @@
  * by the Apache License, Version 2.0
  */
 
+#include "absl/strings/str_cat.h"
 #include "bytes/iobuf.h"
 #include "serde/json/parser.h"
 #include "serde/json/writer.h"
 #include "test_utils/test.h"
 
-#include "absl/strings/str_cat.h"
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -93,37 +93,31 @@ ss::future<iobuf> roundtrip_json(iobuf input) {
     co_return std::move(w).finish();
 }
 
-std::string iobuf_to_string(iobuf buf) {
-    return buf.linearize_to_string();
-}
+std::string iobuf_to_string(iobuf buf) { return buf.linearize_to_string(); }
 
 } // namespace
 
 TEST_CORO(encoder_roundtrip, simple_object) {
     constexpr std::string_view input = R"({"a":"b","c":1})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, nested) {
     constexpr std::string_view input = R"({"outer":{"inner":"value"}})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, array) {
     constexpr std::string_view input = R"({"arr":[1,2,3]})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, null_and_bool) {
     constexpr std::string_view input = R"({"n":null,"b":true,"f":false})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
@@ -134,29 +128,25 @@ TEST_CORO(encoder_roundtrip, mixed) {
       = R"({"str":"hello","num":42,"flag":true,"nothing":null,)"
         R"("nested":{"a":[1,2,3],"b":{"deep":"val"}},)"
         R"("list":[null,false,true,"x",99,{"k":"v"},[1]]})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, empty_object) {
     constexpr std::string_view input = R"({})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, empty_array) {
     constexpr std::string_view input = R"({"a":[]})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
 TEST_CORO(encoder_roundtrip, nested_arrays) {
     constexpr std::string_view input = R"({"a":[[1],[2,3],[]]})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }
 
@@ -166,8 +156,7 @@ TEST_CORO(encoder_roundtrip, string_escaping) {
     // form.
     constexpr std::string_view input
       = R"({"msg":"line1\nline2","q":"say \"hi\""})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
 
     // Parse both through the serde parser and compare the value_string tokens
     // to verify semantic equivalence even if escape forms differ.
@@ -188,7 +177,6 @@ TEST_CORO(encoder_roundtrip, string_escaping) {
 
 TEST_CORO(encoder_roundtrip, negative_integer) {
     constexpr std::string_view input = R"({"val":-42})";
-    auto result = iobuf_to_string(
-      co_await roundtrip_json(iobuf::from(input)));
+    auto result = iobuf_to_string(co_await roundtrip_json(iobuf::from(input)));
     EXPECT_EQ(result, input);
 }

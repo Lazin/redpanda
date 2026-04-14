@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Redpanda Data, Inc.
+ * Copyright 2026 Redpanda Data, Inc.
  *
  * Use of this software is governed by the Business Source License
  * included in the file licenses/BSL.md
@@ -28,6 +28,7 @@
 #include "src/v/serde/protobuf/tests/test_messages_edition2023.pb.h"
 #pragma clang diagnostic pop
 #include "src/v/serde/protobuf/tests/three.pb.h"
+
 #include <gtest/gtest.h>
 #include <protobuf_mutator/mutator.h>
 
@@ -75,8 +76,7 @@ public:
         buf.append(binpb.data(), binpb.size());
 
         auto parsed
-          = ::serde::pb::parse(std::move(buf), *original.GetDescriptor())
-              .get();
+          = ::serde::pb::parse(std::move(buf), *original.GetDescriptor()).get();
         auto encoded
           = ::serde::pb::encode(*parsed, *original.GetDescriptor()).get();
 
@@ -102,9 +102,9 @@ public:
           = ::serde::pb::parse(buf.copy(), *original.GetDescriptor()).get();
         auto encoded
           = ::serde::pb::encode(*parsed1, *original.GetDescriptor()).get();
-        auto parsed2
-          = ::serde::pb::parse(std::move(encoded), *original.GetDescriptor())
-              .get();
+        auto parsed2 = ::serde::pb::parse(
+                         std::move(encoded), *original.GetDescriptor())
+                         .get();
 
         // Convert both parsed results back to protobuf and compare.
         auto msg1 = convert_parsed_to_protobuf(
@@ -174,9 +174,7 @@ private:
               auto str = parser.read_string(v.size_bytes());
               reflect->SetString(output, field, std::move(str));
           },
-          [=, this](const parsed::map& v) {
-              convert_map(v, field, output);
-          });
+          [=, this](const parsed::map& v) { convert_map(v, field, output); });
     }
 
     void convert_repeated(
