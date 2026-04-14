@@ -10,7 +10,6 @@
  */
 
 #include "encryption/mock_kms_provider.h"
-
 #include "test_utils/test.h"
 
 #include <gtest/gtest.h>

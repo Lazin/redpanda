@@ -77,10 +77,7 @@ bytes aes_key_wrap(bytes_view wrapping_key, bytes_view plaintext) {
     }
 
     int final_len = 0;
-    if (
-      1
-      != EVP_EncryptFinal_ex(
-        ctx.get(), wrapped.data() + len, &final_len)) {
+    if (1 != EVP_EncryptFinal_ex(ctx.get(), wrapped.data() + len, &final_len)) {
         throw crypto::internal::ossl_error(
           "AES key wrap: EVP_EncryptFinal_ex failed");
     }
@@ -131,9 +128,7 @@ bytes aes_key_unwrap(bytes_view wrapping_key, bytes_view ciphertext) {
 
     int final_len = 0;
     if (
-      1
-      != EVP_DecryptFinal_ex(
-        ctx.get(), unwrapped.data() + len, &final_len)) {
+      1 != EVP_DecryptFinal_ex(ctx.get(), unwrapped.data() + len, &final_len)) {
         throw crypto::internal::ossl_error(
           "AES key unwrap: EVP_DecryptFinal_ex failed");
     }
