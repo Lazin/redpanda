@@ -8,6 +8,7 @@ redpanda_cc_library(
     ],
     hdrs = [
         "dek_manager.h",
+        "encryption_services.h",
         "fwd.h",
         "kms_provider.h",
         "mock_kms_provider.h",

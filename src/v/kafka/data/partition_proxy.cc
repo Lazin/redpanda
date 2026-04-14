@@ -15,8 +15,11 @@
 #include "cloud_topics/read_replica/stm.h"
 #include "cloud_topics/state_accessors.h"
 #include "cluster/partition_manager.h"
+#include "encryption/encryption_services.h"
+#include "encryption/schema_resolver.h"
 #include "kafka/data/cloud_topic_partition.h"
 #include "kafka/data/cloud_topic_read_replica.h"
+#include "kafka/data/encrypting_partition_proxy.h"
 #include "kafka/data/replicated_partition.h"
 
 namespace kafka {
@@ -74,6 +77,25 @@ std::optional<partition_proxy> make_partition_proxy(
         return make_partition_proxy(partition);
     }
     return std::nullopt;
+}
+
+partition_proxy make_partition_proxy(
+  const ss::lw_shared_ptr<cluster::partition>& partition,
+  encryption::encryption_services* enc) {
+    auto proxy = make_partition_proxy(partition);
+    if (!enc) {
+        return proxy;
+    }
+    if (!partition->get_ntp_config().cloud_topic_enabled()) {
+        return proxy;
+    }
+    const auto& topic = partition->ntp().tp.topic;
+    if (!enc->resolver.has_encryption_rules_cached(topic)) {
+        return proxy;
+    }
+    auto inner = std::move(proxy).release_impl();
+    return partition_proxy(std::make_unique<encrypting_partition_proxy>(
+      std::move(inner), enc->resolver, enc->dek_mgr, enc->transformer));
 }
 
 } // namespace kafka

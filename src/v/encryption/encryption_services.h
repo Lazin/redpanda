@@ -8,15 +8,17 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
-
 #pragma once
+
+#include "encryption/fwd.h"
 
 namespace encryption {
 
-class kms_provider;
-class dek_manager;
-class schema_resolver;
-class field_transformer;
-struct encryption_services;
+/// Bundle of encryption services passed to make_partition_proxy.
+struct encryption_services {
+    schema_resolver& resolver;
+    dek_manager& dek_mgr;
+    field_transformer& transformer;
+};
 
 } // namespace encryption

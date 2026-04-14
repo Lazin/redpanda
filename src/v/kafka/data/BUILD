@@ -43,12 +43,14 @@ redpanda_cc_library(
     srcs = [
         "cloud_topic_partition.cc",
         "cloud_topic_read_replica.cc",
+        "encrypting_partition_proxy.cc",
         "partition_proxy.cc",
         "replicated_partition.cc",
     ],
     hdrs = [
         "cloud_topic_partition.h",
         "cloud_topic_read_replica.h",
+        "encrypting_partition_proxy.h",
         "forwarding_partition_proxy.h",
         "partition_proxy.h",
         "replicated_partition.h",
@@ -63,6 +65,9 @@ redpanda_cc_library(
         "//src/v/cloud_topics/read_replica:snapshot_provider",
         "//src/v/cloud_topics/read_replica:stm",
         "//src/v/cluster",
+        "//src/v/encryption:encryption_metadata_ser",
+        "//src/v/encryption:field_transformer",
+        "//src/v/encryption:schema_resolver",
         "//src/v/kafka/server:write_at_offset_stm",
         "//src/v/raft",
         "//src/v/storage",
@@ -72,6 +77,9 @@ redpanda_cc_library(
     deps = [
         ":exact_offset_replicator",
         "//src/v/base",
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf",
+        "//src/v/bytes:iobuf_parser",
         "//src/v/cloud_storage:types",
         "//src/v/cloud_topics:data_plane_api",
         "//src/v/cloud_topics:log_reader_config",
@@ -80,6 +88,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/frontend:errc",
         "//src/v/cloud_topics/level_one/metastore",
         "//src/v/cloud_topics/level_zero/frontend_reader",
+        "//src/v/encryption",
         "//src/v/kafka/data:log_reader_config",
         "//src/v/kafka/protocol",
         "//src/v/kafka/server:errors",
@@ -93,33 +102,11 @@ redpanda_cc_library(
     ],
 )
 
-redpanda_cc_library(
+# Alias for backwards compatibility with existing dependents.
+alias(
     name = "encrypting_partition_proxy",
-    srcs = [
-        "encrypting_partition_proxy.cc",
-    ],
-    hdrs = [
-        "encrypting_partition_proxy.h",
-    ],
-    implementation_deps = [
-        ":logger",
-        "//src/v/encryption:encryption_metadata_ser",
-        "//src/v/encryption:field_transformer",
-        "//src/v/encryption:schema_resolver",
-        "//src/v/storage:record_batch_builder",
-    ],
+    actual = ":partition_proxy",
     visibility = ["//visibility:public"],
-    deps = [
-        ":partition_proxy",
-        "//src/v/base",
-        "//src/v/bytes",
-        "//src/v/bytes:iobuf",
-        "//src/v/bytes:iobuf_parser",
-        "//src/v/encryption",
-        "//src/v/model",
-        "//src/v/raft",
-        "@seastar",
-    ],
 )
 
 redpanda_cc_library(
