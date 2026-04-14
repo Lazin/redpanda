@@ -46,6 +46,20 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "schema_annotation_parser_test",
+    timeout = "short",
+    srcs = [
+        "schema_annotation_parser_test.cc",
+    ],
+    deps = [
+        "//src/v/encryption:schema_annotation_parser",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "schema_resolver_test",
     timeout = "short",
     srcs = [
