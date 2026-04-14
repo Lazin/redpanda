@@ -11,9 +11,19 @@
 
 #include "encryption/schema_resolver.h"
 
+#include "encryption/schema_annotation_parser.h"
+
 #include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/as_future.hh>
+
+#include <avro/Compiler.hh>
 
 namespace encryption {
+
+schema_resolver::schema_resolver(
+  schema_fetcher fetcher, ss::sstring default_kms_key_id)
+  : _fetcher(std::make_unique<schema_fetcher>(std::move(fetcher)))
+  , _default_kms_key_id(std::move(default_kms_key_id)) {}
 
 void schema_resolver::register_rules(
   model::topic topic, topic_encryption_config config) {
@@ -34,29 +44,39 @@ schema_resolver::resolve(model::topic topic) const {
         };
     }
 
-    // Look up pre-configured rules.
+    // Look up pre-configured (manual) rules first.
     auto cfg_it = _configs.find(topic);
-    if (cfg_it == _configs.end()) {
-        co_return std::nullopt;
+    if (cfg_it != _configs.end()) {
+        auto result = build_schema(cfg_it->second);
+        if (!result.has_value()) {
+            co_return std::nullopt;
+        }
+
+        // Cache the resolved schema. const_cast is safe here because we are
+        // populating a lazy cache that does not change observable state.
+        auto& mutable_cache
+          = const_cast<chunked_hash_map<model::topic, encryption_schema>&>(
+            _cache);
+        mutable_cache.emplace(
+          topic,
+          encryption_schema{
+            .format = result->format,
+            .handle = result->handle,
+            .tagged_fields = result->tagged_fields,
+          });
+        co_return std::move(result);
     }
 
-    auto result = build_schema(cfg_it->second);
-    if (!result.has_value()) {
-        co_return std::nullopt;
+    // No manual rules; try the registry path if available.
+    if (_fetcher) {
+        // Check negative cache for topics known to have no annotations.
+        if (_no_encryption_cache.contains(topic)) {
+            co_return std::nullopt;
+        }
+        co_return co_await resolve_from_registry(topic);
     }
 
-    // Cache the resolved schema. const_cast is safe here because we are
-    // populating a lazy cache that does not change observable state.
-    auto& mutable_cache
-      = const_cast<chunked_hash_map<model::topic, encryption_schema>&>(_cache);
-    mutable_cache.emplace(
-      std::move(topic),
-      encryption_schema{
-        .format = result->format,
-        .handle = result->handle,
-        .tagged_fields = result->tagged_fields,
-      });
-    co_return std::move(result);
+    co_return std::nullopt;
 }
 
 bool schema_resolver::has_encryption_rules_cached(
@@ -96,6 +116,95 @@ schema_resolver::build_schema(const topic_encryption_config& config) {
       .handle = config.handle,
       .tagged_fields = std::move(tagged_fields),
     };
+}
+
+ss::future<std::optional<encryption_schema>>
+schema_resolver::resolve_from_registry(const model::topic& topic) const {
+    // Derive the subject name: "{topic}-value"
+    auto subject_name = ss::sstring(topic()) + "-value";
+
+    // Fetch the latest schema for the subject via the fetcher callback.
+    auto fetch_fut = co_await ss::coroutine::as_future(
+      (*_fetcher)(subject_name));
+    if (fetch_fut.failed()) {
+        fetch_fut.ignore_ready_future();
+        co_return std::nullopt;
+    }
+    auto fetched = std::move(fetch_fut.get());
+    if (!fetched.has_value()) {
+        co_return std::nullopt;
+    }
+
+    auto& schema_text = fetched->schema_text;
+
+    // Parse encryption annotations based on schema type.
+    std::vector<field_encryption_annotation> annotations;
+    schema_format format;
+    schema_handle handle;
+
+    switch (fetched->type) {
+    case fetched_schema_type::avro: {
+        annotations = parse_avro_encryption_annotations(schema_text);
+        format = schema_format::avro;
+        // Parse the Avro schema to get a ValidSchema handle.
+        try {
+            auto valid = std::make_shared<::avro::ValidSchema>();
+            *valid = ::avro::compileJsonSchemaFromString(schema_text);
+            handle = std::move(valid);
+        } catch (...) {
+            handle = std::monostate{};
+        }
+        break;
+    }
+    case fetched_schema_type::json: {
+        annotations = parse_json_schema_encryption_annotations(schema_text);
+        format = schema_format::json;
+        handle = std::monostate{};
+        break;
+    }
+    case fetched_schema_type::protobuf:
+        // Protobuf annotation parsing is not yet supported.
+        co_return std::nullopt;
+    }
+
+    // No annotations means no encryption for this topic.
+    if (annotations.empty()) {
+        auto& mutable_no_enc_cache
+          = const_cast<chunked_hash_map<model::topic, bool>&>(
+            _no_encryption_cache);
+        mutable_no_enc_cache.emplace(topic, true);
+        co_return std::nullopt;
+    }
+
+    // Build tagged_fields from annotations.
+    std::vector<tagged_field> tagged_fields;
+    tagged_fields.reserve(annotations.size());
+    for (auto& ann : annotations) {
+        tagged_fields.push_back(
+          tagged_field{
+            .path = std::move(ann.path),
+            .tag = "ENCRYPT",
+            .kek_name = std::move(ann.kek_name),
+          });
+    }
+
+    auto result = encryption_schema{
+      .format = format,
+      .handle = std::move(handle),
+      .tagged_fields = std::move(tagged_fields),
+    };
+
+    // Cache the resolved schema.
+    auto& mutable_cache
+      = const_cast<chunked_hash_map<model::topic, encryption_schema>&>(_cache);
+    mutable_cache.emplace(
+      topic,
+      encryption_schema{
+        .format = result.format,
+        .handle = result.handle,
+        .tagged_fields = result.tagged_fields,
+      });
+    co_return std::move(result);
 }
 
 } // namespace encryption

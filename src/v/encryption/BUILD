@@ -62,6 +62,10 @@ redpanda_cc_library(
     hdrs = [
         "schema_resolver.h",
     ],
+    implementation_deps = [
+        ":schema_annotation_parser",
+        "@avro",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":field_transformer",
