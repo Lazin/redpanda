@@ -44,7 +44,7 @@ using seen_dek_set = chunked_hash_set<dek_id>;
 /// Newly encountered pairs are added to seen_deks. If all DEK entries in
 /// a record's header are duplicates, the header is removed entirely.
 /// The batch is rebuilt only when modifications are made.
-ss::future<model::record_batch> strip_duplicate_dek_headers(
-  model::record_batch batch, seen_dek_set& seen_deks);
+ss::future<model::record_batch>
+strip_duplicate_dek_headers(model::record_batch batch, seen_dek_set& seen_deks);
 
 } // namespace encryption

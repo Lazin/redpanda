@@ -86,8 +86,7 @@ ss::future<model::record_batch> strip_duplicate_dek_headers(
         chunked_vector<model::record_header> hdrs;
         for (const auto& h : rec.headers()) {
             auto key_str = h.key().linearize_to_string();
-            if (
-              key_str == ss::sstring{encryption_header_key} && first_record) {
+            if (key_str == ss::sstring{encryption_header_key} && first_record) {
                 // Replace or remove the encryption header on the first record
                 if (filtered_header) {
                     iobuf hdr_key;
