@@ -94,6 +94,35 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "encrypting_partition_proxy",
+    srcs = [
+        "encrypting_partition_proxy.cc",
+    ],
+    hdrs = [
+        "encrypting_partition_proxy.h",
+    ],
+    implementation_deps = [
+        ":logger",
+        "//src/v/encryption:encryption_metadata_ser",
+        "//src/v/encryption:field_transformer",
+        "//src/v/encryption:schema_resolver",
+        "//src/v/storage:record_batch_builder",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":partition_proxy",
+        "//src/v/base",
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf",
+        "//src/v/bytes:iobuf_parser",
+        "//src/v/encryption",
+        "//src/v/model",
+        "//src/v/raft",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "record_batcher",
     srcs = [
         "record_batcher.cc",
