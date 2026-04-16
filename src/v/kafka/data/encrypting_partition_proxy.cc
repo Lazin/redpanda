@@ -18,6 +18,7 @@
 #include "encryption/encryption_metadata_ser.h"
 #include "encryption/field_transformer.h"
 #include "encryption/schema_resolver.h"
+#include "kafka/data/dek_refilling_reader.h"
 #include "kafka/data/logger.h"
 #include "model/record.h"
 #include "storage/record_batch_builder.h"
@@ -173,6 +174,13 @@ raft::replicate_stages encrypting_partition_proxy::replicate(
                           return std::move(inner.request_enqueued);
                       });
     return raft::replicate_stages(std::move(enqueued), std::move(finished));
+}
+
+ss::future<storage::translating_reader>
+encrypting_partition_proxy::make_reader(kafka::log_reader_config cfg) {
+    auto reader = co_await _inner->make_reader(cfg);
+    reader.reader = make_dek_refilling_reader(std::move(reader.reader));
+    co_return reader;
 }
 
 std::unique_ptr<exact_offset_replicator>

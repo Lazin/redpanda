@@ -34,8 +34,8 @@ ss::future<iobuf> serialize_encryption_metadata(const dek_set& deks);
 ss::future<dek_set> deserialize_encryption_metadata(iobuf buf);
 
 /// Inject rp.encryption headers into a record batch.
-/// First record gets the full header; subsequent records get no
-/// encryption header (deduplication).
+/// First record gets the full header; subsequent records get a
+/// sentinel (empty value) indicating the DEK should be inherited.
 ss::future<model::record_batch>
 inject_encryption_headers(model::record_batch batch, const dek_set& deks);
 

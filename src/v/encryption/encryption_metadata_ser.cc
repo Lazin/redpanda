@@ -121,13 +121,16 @@ inject_encryption_headers(model::record_batch batch, const dek_set& deks) {
             hdrs.push_back(h.copy());
         }
 
+        iobuf header_key;
+        header_key.append(
+          encryption_header_key.data(), encryption_header_key.size());
         if (first) {
-            // Add encryption header to first record
-            iobuf header_key;
-            header_key.append(
-              encryption_header_key.data(), encryption_header_key.size());
+            // Add full encryption header to first record
             hdrs.emplace_back(std::move(header_key), serialized.copy());
             first = false;
+        } else {
+            // Add sentinel (empty value) to subsequent records
+            hdrs.emplace_back(std::move(header_key), iobuf{});
         }
 
         builder.add_raw_kw(std::move(key), std::move(value), std::move(hdrs));

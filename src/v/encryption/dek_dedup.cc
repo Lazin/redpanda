@@ -88,15 +88,18 @@ ss::future<model::record_batch> strip_duplicate_dek_headers(
             auto key_str = h.key().linearize_to_string();
             if (key_str == ss::sstring{encryption_header_key} && first_record) {
                 // Replace or remove the encryption header on the first record
+                iobuf hdr_key;
+                hdr_key.append(
+                  encryption_header_key.data(), encryption_header_key.size());
                 if (filtered_header) {
-                    iobuf hdr_key;
-                    hdr_key.append(
-                      encryption_header_key.data(),
-                      encryption_header_key.size());
                     hdrs.emplace_back(
                       std::move(hdr_key), filtered_header->copy());
+                } else {
+                    // All DEKs were duplicates -- emit a sentinel (empty
+                    // value) so the read path knows to use a previously
+                    // seen DEK.
+                    hdrs.emplace_back(std::move(hdr_key), iobuf{});
                 }
-                // If filtered_header is empty, we skip (remove) this header
             } else {
                 hdrs.push_back(h.copy());
             }

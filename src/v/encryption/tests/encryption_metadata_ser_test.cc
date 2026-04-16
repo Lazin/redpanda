@@ -131,27 +131,23 @@ TEST_CORO(encryption_metadata_ser, inject_header_into_batch) {
 
     int record_idx = 0;
     injected.for_each_record([&](model::record rec) {
-        if (record_idx == 0) {
-            // First record must have the encryption header
-            bool found = false;
-            for (const auto& h : rec.headers()) {
-                auto key_str = h.key().linearize_to_string();
-                if (key_str == ss::sstring{encryption::encryption_header_key}) {
-                    found = true;
+        bool found = false;
+        for (const auto& h : rec.headers()) {
+            auto key_str = h.key().linearize_to_string();
+            if (key_str == ss::sstring{encryption::encryption_header_key}) {
+                found = true;
+                if (record_idx == 0) {
+                    EXPECT_GT(h.value_size(), 0)
+                      << "first record should have non-empty value";
+                } else {
+                    EXPECT_EQ(h.value_size(), 0)
+                      << "record " << record_idx
+                      << " should have empty sentinel value";
                 }
             }
-            EXPECT_TRUE(found)
-              << "first record should have rp.encryption header";
-        } else {
-            // Subsequent records must not have the encryption header
-            for (const auto& h : rec.headers()) {
-                auto key_str = h.key().linearize_to_string();
-                EXPECT_NE(
-                  key_str, ss::sstring{encryption::encryption_header_key})
-                  << "record " << record_idx
-                  << " should not have rp.encryption header";
-            }
         }
+        EXPECT_TRUE(found) << "record " << record_idx
+                           << " should have rp.encryption header";
         ++record_idx;
     });
     EXPECT_EQ(record_idx, 3);
@@ -196,16 +192,64 @@ TEST_CORO(encryption_metadata_ser, dedup_within_batch) {
       std::move(batch), deks);
 
     int header_count = 0;
+    int non_empty_count = 0;
     injected.for_each_record([&](model::record rec) {
         for (const auto& h : rec.headers()) {
             if (
               h.key().linearize_to_string()
               == ss::sstring{encryption::encryption_header_key}) {
                 ++header_count;
+                if (h.value_size() > 0) {
+                    ++non_empty_count;
+                }
             }
         }
     });
-    EXPECT_EQ(header_count, 1) << "only first record should have the header";
+    EXPECT_EQ(header_count, 5)
+      << "all records should have rp.encryption header";
+    EXPECT_EQ(non_empty_count, 1)
+      << "only first record should have non-empty value";
+}
+
+TEST_CORO(encryption_metadata_ser, sentinel_has_empty_value) {
+    auto batch = make_test_batch(3);
+    encryption::dek_set deks;
+    deks.emplace(
+      "sentinel-kek",
+      make_dek_state(
+        "sentinel-kek",
+        "mock",
+        "key-5",
+        bytes::from_string("sentinel-material"),
+        encryption::dek_algorithm::aes256_gcm,
+        1));
+
+    auto injected = co_await encryption::inject_encryption_headers(
+      std::move(batch), deks);
+
+    int record_idx = 0;
+    injected.for_each_record([&](model::record rec) {
+        bool found = false;
+        for (const auto& h : rec.headers()) {
+            if (
+              h.key().linearize_to_string()
+              == ss::sstring{encryption::encryption_header_key}) {
+                found = true;
+                if (record_idx == 0) {
+                    EXPECT_GT(h.value_size(), 0)
+                      << "record 0 should have non-empty encryption metadata";
+                } else {
+                    EXPECT_EQ(h.value_size(), 0)
+                      << "record " << record_idx
+                      << " should have empty sentinel value";
+                }
+            }
+        }
+        EXPECT_TRUE(found) << "record " << record_idx
+                           << " should have rp.encryption header";
+        ++record_idx;
+    });
+    EXPECT_EQ(record_idx, 3);
 }
 
 TEST_CORO(encryption_metadata_ser, no_encryption_header_returns_nullopt) {

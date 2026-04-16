@@ -43,6 +43,7 @@ redpanda_cc_library(
     srcs = [
         "cloud_topic_partition.cc",
         "cloud_topic_read_replica.cc",
+        "dek_refilling_reader.cc",
         "encrypting_partition_proxy.cc",
         "partition_proxy.cc",
         "replicated_partition.cc",
@@ -50,6 +51,7 @@ redpanda_cc_library(
     hdrs = [
         "cloud_topic_partition.h",
         "cloud_topic_read_replica.h",
+        "dek_refilling_reader.h",
         "encrypting_partition_proxy.h",
         "forwarding_partition_proxy.h",
         "partition_proxy.h",
@@ -65,6 +67,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/read_replica:snapshot_provider",
         "//src/v/cloud_topics/read_replica:stm",
         "//src/v/cluster",
+        "//src/v/encryption:dek_refill",
         "//src/v/encryption:encryption_metadata_ser",
         "//src/v/encryption:field_transformer",
         "//src/v/encryption:schema_resolver",

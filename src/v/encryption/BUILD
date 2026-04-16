@@ -97,6 +97,29 @@ redpanda_cc_library(
 )
 
 redpanda_cc_library(
+    name = "dek_refill",
+    srcs = [
+        "dek_refill.cc",
+    ],
+    hdrs = [
+        "dek_refill.h",
+    ],
+    implementation_deps = [
+        ":encryption_metadata_ser",
+        "//src/v/storage:record_batch_builder",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":encryption",
+        "//src/v/base",
+        "//src/v/bytes",
+        "//src/v/bytes:iobuf",
+        "//src/v/model",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_library(
     name = "schema_annotation_parser",
     srcs = [
         "schema_annotation_parser.cc",

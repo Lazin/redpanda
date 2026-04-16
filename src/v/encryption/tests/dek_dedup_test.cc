@@ -67,6 +67,25 @@ bool has_encryption_header(const model::record_batch& batch) {
     return found;
 }
 
+/// Return true when the first record of the batch carries an rp.encryption
+/// header whose value is the empty sentinel (zero-length iobuf).
+bool first_record_has_sentinel(const model::record_batch& batch) {
+    bool found = false;
+    batch.for_each_record([&](model::record rec) {
+        // Only inspect the first record.
+        for (const auto& h : rec.headers()) {
+            if (
+              h.key().linearize_to_string()
+                == ss::sstring{encryption::encryption_header_key}
+              && h.value_size() == 0) {
+                found = true;
+            }
+        }
+        return ss::stop_iteration::yes;
+    });
+    return found;
+}
+
 ss::future<std::optional<encryption::dek_set>>
 get_batch_deks(const model::record_batch& batch) {
     co_return co_await encryption::extract_encryption_metadata(batch);
@@ -113,11 +132,37 @@ TEST_CORO(dek_dedup, duplicate_dek_stripped) {
     auto result = co_await encryption::strip_duplicate_dek_headers(
       std::move(batch), seen);
 
-    // DEK A was already seen, so the encryption header should be removed
-    EXPECT_FALSE(has_encryption_header(result));
+    // DEK A was already seen, so the encryption header should be a sentinel
+    // (key present, empty value)
+    EXPECT_TRUE(has_encryption_header(result));
+    EXPECT_TRUE(first_record_has_sentinel(result));
 
     // Seen set should still have just one entry
     EXPECT_EQ(seen.size(), 1);
+}
+
+TEST_CORO(dek_dedup, sentinel_preserved_on_full_strip) {
+    encryption::dek_set deks;
+    auto state_a = make_dek_state("kek-a", 1);
+    deks.emplace("kek-a", state_a);
+
+    auto batch = co_await make_encrypted_batch(3, deks);
+
+    // Pre-populate the seen set with DEK A
+    encryption::seen_dek_set seen;
+    seen.emplace(encryption::dek_id{.kek_name = "kek-a", .dek_version = 1});
+
+    auto result = co_await encryption::strip_duplicate_dek_headers(
+      std::move(batch), seen);
+
+    // The rp.encryption key must be present with an empty value sentinel
+    EXPECT_TRUE(has_encryption_header(result));
+    EXPECT_TRUE(first_record_has_sentinel(result));
+
+    // Extracting DEK metadata from a sentinel should yield an empty DEK set
+    auto extracted = co_await get_batch_deks(result);
+    EXPECT_TRUE(extracted.has_value());
+    EXPECT_EQ(extracted->size(), 0);
 }
 
 TEST_CORO(dek_dedup, mixed_new_and_duplicate) {
@@ -136,8 +181,10 @@ TEST_CORO(dek_dedup, mixed_new_and_duplicate) {
     auto result = co_await encryption::strip_duplicate_dek_headers(
       std::move(batch), seen);
 
-    // DEK A should be stripped, DEK B should be kept
+    // DEK A should be stripped, DEK B should be kept with a non-empty value
+    // (not a sentinel)
     EXPECT_TRUE(has_encryption_header(result));
+    EXPECT_FALSE(first_record_has_sentinel(result));
     auto extracted = co_await get_batch_deks(result);
     EXPECT_TRUE(extracted.has_value());
     EXPECT_EQ(extracted->size(), 1);
@@ -165,11 +212,12 @@ TEST_CORO(dek_dedup, reset_after_index_entry) {
       std::move(batch1), seen);
     EXPECT_TRUE(has_encryption_header(result1));
 
-    // Second batch: DEK A is duplicate
+    // Second batch: DEK A is duplicate -- sentinel expected
     auto batch2 = co_await make_encrypted_batch(3, deks);
     auto result2 = co_await encryption::strip_duplicate_dek_headers(
       std::move(batch2), seen);
-    EXPECT_FALSE(has_encryption_header(result2));
+    EXPECT_TRUE(has_encryption_header(result2));
+    EXPECT_TRUE(first_record_has_sentinel(result2));
 
     // Simulate index entry creation by clearing the seen set
     seen.clear();

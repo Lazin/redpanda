@@ -64,6 +64,25 @@ redpanda_cc_gtest(
 )
 
 redpanda_cc_gtest(
+    name = "dek_refill_test",
+    timeout = "short",
+    srcs = [
+        "dek_refill_test.cc",
+    ],
+    deps = [
+        "//src/v/bytes",
+        "//src/v/encryption",
+        "//src/v/encryption:dek_refill",
+        "//src/v/encryption:encryption_metadata_ser",
+        "//src/v/model",
+        "//src/v/storage:record_batch_builder",
+        "//src/v/test_utils:gtest",
+        "@googletest//:gtest",
+        "@seastar",
+    ],
+)
+
+redpanda_cc_gtest(
     name = "encryption_metadata_ser_test",
     timeout = "short",
     srcs = [
@@ -149,6 +168,7 @@ redpanda_cc_gtest(
         "//src/v/bytes:iobuf_parser",
         "//src/v/cluster",
         "//src/v/encryption",
+        "//src/v/encryption:dek_refill",
         "//src/v/encryption:encryption_metadata_ser",
         "//src/v/encryption:field_transformer",
         "//src/v/encryption:schema_resolver",

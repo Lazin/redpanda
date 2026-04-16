@@ -20,6 +20,7 @@
 #include "cluster/partition_probe.h"
 #include "cluster/types.h"
 #include "encryption/dek_manager.h"
+#include "encryption/dek_refill.h"
 #include "encryption/encryption_metadata_ser.h"
 #include "encryption/field_transformer.h"
 #include "encryption/field_transformer_ref.h"
@@ -981,5 +982,125 @@ TEST_CORO(encryption_integration, multiple_batches_same_dek_version) {
             EXPECT_EQ(payload_sv.find("1990-01-"), std::string_view::npos)
               << "birthday should be encrypted in batch " << batch_idx;
         });
+    }
+}
+
+// =========================================================================
+// Test 6: produce->consume all records have full rp.encryption header
+// =========================================================================
+
+TEST_CORO(
+  encryption_integration, produce_consume_all_records_have_full_header) {
+    constexpr size_t record_count = 5;
+
+    auto schema = compile_avro_schema(R"({
+        "name": "PersonalData",
+        "type": "record",
+        "namespace": "com.example",
+        "fields": [
+            {"name": "id", "type": "string"},
+            {"name": "name", "type": "string"},
+            {"name": "birthday", "type": "string"},
+            {"name": "ssn", "type": "string"}
+        ]
+    })");
+
+    encryption::mock_kms_provider kms;
+    encryption::dek_manager dek_mgr{kms};
+    encryption::schema_resolver resolver;
+    encryption::ref_field_transformer transformer;
+
+    register_avro_rules(resolver, schema);
+
+    auto mock = std::make_unique<mock_partition_proxy>();
+    auto* mock_ptr = mock.get();
+
+    auto proxy = std::make_unique<kafka::encrypting_partition_proxy>(
+      std::move(mock), resolver, dek_mgr, transformer);
+
+    auto batch = make_avro_batch(schema, record_count);
+    chunked_vector<model::record_batch> batches;
+    batches.push_back(std::move(batch));
+
+    auto result = co_await proxy->replicate(
+      std::move(batches),
+      raft::replicate_options{raft::consistency_level::quorum_ack});
+
+    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(mock_ptr->last_batches.has_value());
+    if (!result.has_value() || !mock_ptr->last_batches.has_value()) {
+        co_return;
+    }
+    EXPECT_EQ(mock_ptr->last_batches->size(), 1);
+    if (mock_ptr->last_batches->empty()) {
+        co_return;
+    }
+
+    // --- Verify the intermediate state after the write path ---
+    // Record 0 should have a full (non-empty) rp.encryption header.
+    // Records 1-4 should have sentinel (empty) rp.encryption headers.
+    auto& captured = mock_ptr->last_batches->front();
+    {
+        size_t rec_idx = 0;
+        captured.for_each_record([&](model::record rec) {
+            for (const auto& h : rec.headers()) {
+                if (
+                  h.key().linearize_to_string()
+                  == ss::sstring{encryption::encryption_header_key}) {
+                    if (rec_idx == 0) {
+                        EXPECT_GT(h.value_size(), 0)
+                          << "record 0 must have full DEK header";
+                    } else {
+                        EXPECT_EQ(h.value_size(), 0)
+                          << "record " << rec_idx
+                          << " must have sentinel (empty) header";
+                    }
+                }
+            }
+            ++rec_idx;
+        });
+        EXPECT_EQ(rec_idx, record_count);
+    }
+
+    // --- Simulate the read path: refill sentinels ---
+    auto refill = co_await encryption::refill_dek_sentinels(
+      captured.copy(), std::nullopt);
+
+    // All 5 records should now have non-empty rp.encryption headers.
+    std::vector<iobuf> header_values;
+    {
+        size_t rec_idx = 0;
+        refill.batch.for_each_record([&](model::record rec) {
+            bool found = false;
+            for (const auto& h : rec.headers()) {
+                if (
+                  h.key().linearize_to_string()
+                  == ss::sstring{encryption::encryption_header_key}) {
+                    found = true;
+                    EXPECT_GT(h.value_size(), 0)
+                      << "record " << rec_idx
+                      << " must have non-empty header after refill";
+                    header_values.push_back(h.value().copy());
+                }
+            }
+            EXPECT_TRUE(found)
+              << "record " << rec_idx << " must have rp.encryption header";
+            ++rec_idx;
+        });
+        EXPECT_EQ(rec_idx, record_count);
+    }
+
+    // All header values must be byte-identical (same serialized DEK metadata).
+    EXPECT_EQ(header_values.size(), record_count);
+    for (size_t i = 1; i < header_values.size(); ++i) {
+        EXPECT_EQ(header_values[0], header_values[i])
+          << "header value for record " << i
+          << " must be identical to record 0";
+    }
+
+    // The refill result should carry the DEK metadata forward.
+    EXPECT_TRUE(refill.last_dek_metadata.has_value());
+    if (refill.last_dek_metadata.has_value()) {
+        EXPECT_EQ(*refill.last_dek_metadata, header_values[0]);
     }
 }
