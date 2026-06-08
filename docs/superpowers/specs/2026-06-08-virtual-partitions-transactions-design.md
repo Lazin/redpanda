@@ -202,9 +202,14 @@ Everything else is skipped (no client offset): other VPs' placeholders,
 `tx_fence` batches, and any marker for a txn that did not touch this VP. A
 shard's native marker is never assigned to a VP by its physical log position; it
 reaches a VP only through the §5 fan-out, which places it in exactly the VPs the
-txn touched. This mirrors Redpanda's existing Raft↔Kafka offset translation,
-where data and Kafka control records consume offsets and Redpanda-internal
-batches (e.g. `tx_fence`) are skipped.
+txn touched. Note the partition's own Raft→Kafka translator does **not** skip
+`tx_fence` — it is absent from `offset_translator_batch_types()`
+(`src/v/model/record_batch_types.h:78`), so on the shard a fence consumes a
+Kafka offset; LF nonetheless skips it in *per-VP* translation by its own choice,
+since LF defines the per-VP mapping independently. (Earlier drafts wrongly
+attributed the skip to the translator.) The exact fence/marker offset treatment
+is confirmed by the verification spike,
+`docs/superpowers/plans/2026-06-08-vp-transactions-spike.md`.
 
 The marker assignment is fixed when the LF processes the marker (apply-time), so
 client offsets are stable. The read merge (`apply_placeholder_to_batch`,
