@@ -485,6 +485,29 @@ TEST(ctp_stm_state_test, set_then_get_allowed_local_start_offset) {
     EXPECT_FALSE(s.get_allowed_local_start_offset().has_value());
 }
 
+TEST(ctp_stm_state_test, allowed_local_start_offset_monotonic) {
+    ct::ctp_stm_state s;
+    s.set_allowed_local_start_offset(kafka::offset{100});
+    ASSERT_TRUE(s.get_allowed_local_start_offset().has_value());
+    EXPECT_EQ(*s.get_allowed_local_start_offset(), kafka::offset{100});
+
+    // Smaller value is ignored.
+    s.set_allowed_local_start_offset(kafka::offset{50});
+    EXPECT_EQ(*s.get_allowed_local_start_offset(), kafka::offset{100});
+
+    // Equal value is a no-op.
+    s.set_allowed_local_start_offset(kafka::offset{100});
+    EXPECT_EQ(*s.get_allowed_local_start_offset(), kafka::offset{100});
+
+    // Larger value advances.
+    s.set_allowed_local_start_offset(kafka::offset{150});
+    EXPECT_EQ(*s.get_allowed_local_start_offset(), kafka::offset{150});
+
+    // Reset to nullopt is allowed for recovery / test paths.
+    s.set_allowed_local_start_offset(std::nullopt);
+    EXPECT_FALSE(s.get_allowed_local_start_offset().has_value());
+}
+
 TEST(ctp_stm_state_test, allowed_local_start_offset_round_trips_through_serde) {
     ct::ctp_stm_state s;
     s.set_allowed_local_start_offset(kafka::offset{1234});

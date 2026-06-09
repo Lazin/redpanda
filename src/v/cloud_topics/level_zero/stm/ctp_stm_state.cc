@@ -182,6 +182,18 @@ kafka::offset ctp_stm_state::start_offset() const noexcept {
 
 void ctp_stm_state::set_allowed_local_start_offset(
   std::optional<kafka::offset> offset) noexcept {
+    // The allowed local start offset is a kafka-offset floor below which L1
+    // has compacted; it is monotonic non-decreasing within a term. Resetting
+    // to nullopt is permitted for recovery / test paths.
+    if (!offset.has_value()) {
+        _allowed_local_start_offset = std::nullopt;
+        return;
+    }
+    if (
+      _allowed_local_start_offset.has_value()
+      && *offset <= *_allowed_local_start_offset) {
+        return;
+    }
     _allowed_local_start_offset = offset;
 }
 
