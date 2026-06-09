@@ -67,6 +67,9 @@ public:
     /// Get the last reconciled log offset from the ctp_stm state
     model::offset get_last_reconciled_log_offset() const;
 
+    /// Get threshold offset for local readers
+    kafka::offset get_allowed_local_start_offset() const;
+
     ss::future<std::expected<std::monostate, ctp_stm_api_errc>>
     advance_reconciled_offset(
       kafka::offset last_reconciled_offset,

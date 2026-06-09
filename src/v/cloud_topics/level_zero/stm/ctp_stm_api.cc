@@ -281,6 +281,11 @@ kafka::offset ctp_stm_api::get_last_reconciled_offset() const {
     return _stm->state().get_last_reconciled_offset().value_or(kafka::offset());
 }
 
+kafka::offset ctp_stm_api::get_allowed_local_start_offset() const {
+    return _stm->state().get_allowed_local_start_offset().value_or(
+      kafka::offset());
+}
+
 model::offset ctp_stm_api::get_last_reconciled_log_offset() const {
     return _stm->state().get_last_reconciled_log_offset().value_or(
       model::offset{});
