@@ -70,6 +70,7 @@ redpanda_cc_library(
         "//src/v/cloud_topics/level_one/maintenance/compaction:compaction_source_and_sink",
         "//src/v/cloud_topics/level_one/metastore",
         "//src/v/cloud_topics/level_one/metastore:replicated_metastore",
+        "//src/v/cloud_topics/level_zero/notifier:level_zero_notifier",
         "//src/v/cluster",
         "//src/v/cluster:fwd",
         "//src/v/cluster:members_table",
