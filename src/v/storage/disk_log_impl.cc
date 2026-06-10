@@ -1226,8 +1226,11 @@ disk_log_impl::maybe_apply_local_storage_overrides(gc_config cfg) const {
         return cfg;
     }
 
-    // cloud_retention is disabled, do not override
-    if (!is_cloud_retention_active()) {
+    // cloud_retention is disabled, do not override. Cloud-topic partitions
+    // (storage.mode in {cloud, tiered_cloud}) bypass this gate:
+    // is_cloud_retention_active() is false for them, but ctp_stm still needs
+    // the local-target override to engage under retention_local_strict.
+    if (!is_cloud_retention_active() && !config().cloud_topic_enabled()) {
         return cfg;
     }
 
@@ -1809,7 +1812,7 @@ ss::future<std::optional<model::offset>> disk_log_impl::do_gc(gc_config cfg) {
       config().ntp(),
       cfg);
 
-    auto max_offset = co_await maybe_adjusted_retention_offset(cfg);
+    auto max_offset = co_await adjusted_retention_offset(cfg);
 
     if (max_offset) {
         co_return request_eviction_until_offset(*max_offset);
@@ -1904,6 +1907,22 @@ ss::future<> disk_log_impl::maybe_adjust_retention_timestamps() {
 ss::future<std::optional<model::offset>>
 disk_log_impl::maybe_adjusted_retention_offset(gc_config cfg) {
     co_await maybe_adjust_retention_timestamps();
+    co_return retention_offset(cfg);
+}
+
+ss::future<std::optional<model::offset>>
+disk_log_impl::adjusted_retention_offset(gc_config cfg) {
+    // Single retention computation shared by gc() housekeeping and by
+    // ctp_stm for cloud-topic partitions. maybe_apply_local_storage_overrides
+    // bypasses the is_cloud_retention_active() gate for cloud-topic partitions
+    // (the gate is false for storage.mode in {cloud, tiered_cloud}), so the
+    // local-target override engages there under retention_local_strict.
+    cfg = apply_kafka_retention_overrides(cfg);
+    if (_cloud_gc_offset.has_value()) {
+        co_return _cloud_gc_offset;
+    }
+    co_await maybe_adjust_retention_timestamps();
+    cfg = maybe_apply_local_storage_overrides(cfg);
     co_return retention_offset(cfg);
 }
 

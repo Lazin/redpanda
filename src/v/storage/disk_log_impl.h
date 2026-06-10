@@ -207,6 +207,14 @@ public:
 
     std::optional<model::offset> retention_offset(gc_config) const final;
 
+    /// Applies retention overrides (callers need not pre-apply them) and
+    /// adjusts bogus (future) retention timestamps, mutating segment indexes
+    /// when an entire segment is bogus, then returns the offset local
+    /// retention would evict to. When _cloud_gc_offset is set it is returned
+    /// immediately (without resetting it -- that is do_gc's responsibility).
+    ss::future<std::optional<model::offset>>
+    adjusted_retention_offset(gc_config cfg) final;
+
     // Collects an iterable list of segments over which to perform sliding
     // window compaction. This can include segments which have already had their
     // keys de-duplicated in every segment between the start of the log and
