@@ -25,7 +25,8 @@ compaction_scheduler::compaction_scheduler(
   compaction_cluster_state state,
   ss::sharded<file_io>* io,
   ss::sharded<l1::replicated_metastore>* metastore,
-  ss::sharded<level_one_reader_probe>* l1_reader_probe)
+  ss::sharded<level_one_reader_probe>* l1_reader_probe,
+  ss::sharded<cloud_topics::level_zero_notifier>* notifier)
   : _io(io)
   , _metastore(metastore)
   , _log_collector(make_default_log_collector(
@@ -50,7 +51,8 @@ compaction_scheduler::compaction_scheduler(
       metastore,
       state.metadata_cache,
       _probe,
-      l1_reader_probe)
+      l1_reader_probe,
+      notifier)
   , _compaction_interval(
       config::shard_local_cfg().cloud_topics_compaction_interval_ms.bind())
   , _compaction_queue(_scheduling_policy->get_comparator()) {
