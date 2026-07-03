@@ -7,13 +7,16 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0
 
+from collections.abc import Callable
+
 from ducktape.tests.test import TestContext
 
-from rptest.clients.rpk import RpkTool
+from rptest.clients.rpk import RpkException, RpkTool
 from rptest.clients.types import TopicSpec
 from rptest.services.admin import Admin
 from rptest.services.cluster import cluster
 from rptest.services.redpanda import (
+    PREV_VERSION_LOG_ALLOW_LIST,
     RESTART_LOG_ALLOW_LIST,
     SISettings,
 )
@@ -669,6 +672,143 @@ class StorageModeValidationTest(RedpandaTest):
         assert config["default_redpanda_storage_mode"] != "tiered_cloud", (
             "default_redpanda_storage_mode should not be tiered_cloud"
         )
+
+
+class TieredCloudUpgradeTest(StorageModeTestBase):
+    """
+    The tiered_cloud storage mode is gated by the tiered_cloud_topics
+    feature flag (v26.2, available_policy::always). While the cluster is
+    only partially upgraded to v26.2 the flag is not active, so creating a
+    tiered_cloud topic or converting a cloud topic to tiered_cloud must be
+    rejected. Once every node runs v26.2 the flag auto-activates and both
+    operations succeed without any admin action.
+    """
+
+    def __init__(self, test_context: TestContext):
+        si_settings = SISettings(
+            test_context,
+            cloud_storage_enable_remote_read=False,
+            cloud_storage_enable_remote_write=False,
+        )
+
+        super(TieredCloudUpgradeTest, self).__init__(
+            test_context=test_context,
+            num_brokers=3,
+            si_settings=si_settings,
+            # The v26.1 binary additionally gates cloud-mode topics on the
+            # cloud_topics_enabled cluster property; deprecated and ignored
+            # from v26.2 on.
+            extra_rp_conf={"cloud_topics_enabled": True},
+        )
+        self.installer = self.redpanda._installer
+
+    def setUp(self):
+        # Start the whole cluster on the latest release of the prior feature
+        # line (26.1.x), which supports the cloud storage mode but predates
+        # tiered_cloud and its feature flag.
+        old_version = self.installer.highest_from_prior_feature_version(
+            RedpandaInstaller.HEAD
+        )
+        self.installer.install(self.redpanda.nodes, old_version)
+        super(TieredCloudUpgradeTest, self).setUp()
+
+    def _expect_rejected(self, what: str, fn: Callable[[], object]):
+        try:
+            fn()
+        except RpkException as e:
+            self.logger.info(f"{what} rejected as expected: {e}")
+        else:
+            raise AssertionError(
+                f"{what} should have been rejected in a partially upgraded cluster"
+            )
+
+    @cluster(
+        num_nodes=3,
+        log_allow_list=RESTART_LOG_ALLOW_LIST + PREV_VERSION_LOG_ALLOW_LIST,
+    )
+    def test_tiered_cloud_gated_in_mixed_cluster(self):
+        rpk = RpkTool(self.redpanda)
+        _ = wait_for_num_versions(self.redpanda, 1)
+
+        # The cloud storage mode is available since v26.1, so this topic can
+        # be created before the upgrade begins.
+        self._create_topic(
+            rpk,
+            "topic-cloud",
+            config={TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_CLOUD},
+        )
+        assert (
+            self._get_topic_storage_mode(rpk, "topic-cloud")
+            == TopicSpec.STORAGE_MODE_CLOUD
+        )
+
+        # Upgrade a single node to HEAD to put the cluster in a mixed state.
+        first = self.redpanda.nodes[0]
+        self.installer.install([first], RedpandaInstaller.HEAD)
+        self.redpanda.restart_nodes([first])
+        _ = wait_for_num_versions(self.redpanda, 2)
+
+        # The upgraded node knows the feature but must not report it active
+        # while old nodes are still in the cluster.
+        state = self.redpanda.get_feature_state("tiered_cloud_topics", node=first)
+        assert state == "unavailable", (
+            f"tiered_cloud_topics should be unavailable in a mixed cluster, got {state}"
+        )
+
+        # Both binaries must reject tiered_cloud: the old one does not know
+        # the storage mode at all, the new one enforces the feature gate.
+        self._expect_rejected(
+            "tiered_cloud topic creation",
+            lambda: self._create_topic(
+                rpk,
+                "topic-tiered-cloud",
+                config={
+                    TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD
+                },
+            ),
+        )
+
+        self._expect_rejected(
+            "cloud to tiered_cloud conversion",
+            lambda: rpk.alter_topic_config(
+                "topic-cloud",
+                TopicSpec.PROPERTY_STORAGE_MODE,
+                TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+            ),
+        )
+        assert (
+            self._get_topic_storage_mode(rpk, "topic-cloud")
+            == TopicSpec.STORAGE_MODE_CLOUD
+        ), "Storage mode should still be cloud after the rejected conversion"
+
+        # Finish the upgrade: the feature auto-activates once every node
+        # runs v26.2.
+        self.installer.install(self.redpanda.nodes, RedpandaInstaller.HEAD)
+        self.redpanda.restart_nodes(self.redpanda.nodes[1:])
+        _ = wait_for_num_versions(self.redpanda, 1)
+        self.redpanda.await_feature("tiered_cloud_topics", "active", timeout_sec=60)
+
+        self._create_topic(
+            rpk,
+            "topic-tiered-cloud",
+            config={
+                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD
+            },
+        )
+        assert (
+            self._get_topic_storage_mode(rpk, "topic-tiered-cloud")
+            == TopicSpec.STORAGE_MODE_TIERED_CLOUD
+        ), "tiered_cloud topic creation should succeed after the upgrade"
+
+        rpk.alter_topic_config(
+            "topic-cloud",
+            TopicSpec.PROPERTY_STORAGE_MODE,
+            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+        )
+        assert (
+            self._get_topic_storage_mode(rpk, "topic-cloud")
+            == TopicSpec.STORAGE_MODE_TIERED_CLOUD
+        ), "cloud to tiered_cloud conversion should succeed after the upgrade"
 
 
 class StorageModeCloudTransitionTest(StorageModeTestBase):
