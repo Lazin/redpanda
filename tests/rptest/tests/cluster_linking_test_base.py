@@ -613,6 +613,9 @@ class ShadowLinkTestBase(PreallocNodesTest):
             {
                 "enable_shadow_linking": True,
                 "group_initial_rebalance_delay": 1000,
+                # The storage-mode matrix arms rely on the classic (v1)
+                # meaning and display name of the 'tiered' storage mode.
+                "cloud_storage_default_mode": "tiered_v1",
             }
         )
 
@@ -637,8 +640,11 @@ class ShadowLinkTestBase(PreallocNodesTest):
             sec_kwargs = dict(secondary_cluster_args.kwargs)
             if "si_settings" not in sec_kwargs:
                 sec_kwargs["si_settings"] = kwargs.get("si_settings")
+            sec_extra = dict(sec_kwargs.get("extra_rp_conf", {}))
+            # Same v1 pin as the primary: source topics are created here.
+            sec_extra["cloud_storage_default_mode"] = "tiered_v1"
+            sec_kwargs["extra_rp_conf"] = sec_extra
             if needs_cloud_topics:
-                sec_extra = dict(sec_kwargs.get("extra_rp_conf", {}))
                 sec_extra.update(
                     {
                         "enable_cluster_metadata_upload_loop": False,
@@ -656,7 +662,6 @@ class ShadowLinkTestBase(PreallocNodesTest):
                         "cloud_topics_compaction_interval_ms": 1000,
                     }
                 )
-                sec_kwargs["extra_rp_conf"] = sec_extra
             secondary_cluster_args = SecondaryClusterArgs(
                 *secondary_cluster_args.args, **sec_kwargs
             )

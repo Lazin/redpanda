@@ -75,6 +75,9 @@ class FollowerFetchingTest(PreallocNodesTest):
                 "enable_rack_awareness": True,
                 # disable leader balancer to prevent leaders from moving and causing additional client retries
                 "enable_leader_balancer": False,
+                # the tiered-storage arm of this test relies on the classic
+                # (v1) meaning of the 'tiered' storage mode
+                "cloud_storage_default_mode": "tiered_v1",
             },
             si_settings=si_settings,
         )

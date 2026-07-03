@@ -27,7 +27,11 @@ class TopicSpec:
     STORAGE_MODE_LOCAL = "local"
     STORAGE_MODE_TIERED = "tiered"
     STORAGE_MODE_CLOUD = "cloud"
-    STORAGE_MODE_TIERED_CLOUD = "tiered_cloud"
+    STORAGE_MODE_TIERED_V1 = "tiered_v1"
+    STORAGE_MODE_TIERED_V2 = "tiered_v2"
+    # Legacy name for the tiered_v2 storage mode; the 'tiered_cloud' spelling
+    # is no longer accepted by redpanda.
+    STORAGE_MODE_TIERED_CLOUD = STORAGE_MODE_TIERED_V2
     STORAGE_MODE_UNSET = "unset"
 
     PROPERTY_COMPRESSSION = "compression.type"

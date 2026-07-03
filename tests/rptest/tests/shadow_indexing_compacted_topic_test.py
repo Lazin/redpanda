@@ -44,6 +44,8 @@ class ShadowIndexingCompactedTopicTest(EndToEndTest):
             group_initial_rebalance_delay=300,
             compacted_log_segment_size=self.segment_size,
             min_cleanable_dirty_ratio=0.0,
+            # the test alters a topic to the classic (v1) tiered storage mode
+            cloud_storage_default_mode="tiered_v1",
         )
         self.redpanda = make_redpanda_service(
             context=self.test_context,

@@ -80,6 +80,9 @@ class TieredStorageTest(TieredStorageEndToEndTest, RedpandaTest):
         self.extra_rp_conf["log_compaction_interval_ms"] = 1000
         # Default is too high for the test; clamp segment.ms floor to 1 min.
         self.extra_rp_conf["log_segment_ms_min"] = 60000
+        # The model drives topics through the classic (v1) tiered storage
+        # mode via the plain 'tiered' alias.
+        self.extra_rp_conf["cloud_storage_default_mode"] = "tiered_v1"
 
         super(TieredStorageTest, self).__init__(
             test_context=test_context,
