@@ -585,7 +585,85 @@ redpanda_storage_mode_from_string(std::string_view s) {
         model::redpanda_storage_mode_to_string(
           model::redpanda_storage_mode::unset),
         model::redpanda_storage_mode::unset)
+      .match(
+        model::cloud_storage_default_mode_to_string(
+          model::cloud_storage_default_mode::tiered_v1),
+        model::redpanda_storage_mode::tiered)
+      .match(
+        model::cloud_storage_default_mode_to_string(
+          model::cloud_storage_default_mode::tiered_v2),
+        model::redpanda_storage_mode::tiered_cloud)
       .default_match(std::nullopt);
+}
+
+fmt::iterator format_to(cloud_storage_default_mode mode, fmt::iterator out) {
+    return fmt::format_to(
+      out, "{}", cloud_storage_default_mode_to_string(mode));
+}
+
+std::istream& operator>>(std::istream& i, cloud_storage_default_mode& mode) {
+    ss::sstring s;
+    i >> s;
+    auto value = cloud_storage_default_mode_from_string(s);
+    if (!value) {
+        i.setstate(std::ios::failbit);
+        return i;
+    }
+    mode = *value;
+    return i;
+}
+
+std::optional<cloud_storage_default_mode>
+cloud_storage_default_mode_from_string(std::string_view s) {
+    return string_switch<std::optional<cloud_storage_default_mode>>(s)
+      .match(
+        cloud_storage_default_mode_to_string(
+          cloud_storage_default_mode::tiered_v1),
+        cloud_storage_default_mode::tiered_v1)
+      .match(
+        cloud_storage_default_mode_to_string(
+          cloud_storage_default_mode::tiered_v2),
+        cloud_storage_default_mode::tiered_v2)
+      .default_match(std::nullopt);
+}
+
+std::optional<redpanda_storage_mode> redpanda_storage_mode_from_user_string(
+  std::string_view s, cloud_storage_default_mode default_mode) {
+    if (
+      s
+      == redpanda_storage_mode_to_string(redpanda_storage_mode::tiered_cloud)) {
+        // Internal spelling, not part of the user-facing vocabulary.
+        return std::nullopt;
+    }
+    if (s == redpanda_storage_mode_to_string(redpanda_storage_mode::tiered)) {
+        return default_mode == cloud_storage_default_mode::tiered_v2
+                 ? redpanda_storage_mode::tiered_cloud
+                 : redpanda_storage_mode::tiered;
+    }
+    return redpanda_storage_mode_from_string(s);
+}
+
+const char* redpanda_storage_mode_user_name(
+  redpanda_storage_mode mode, cloud_storage_default_mode default_mode) {
+    switch (mode) {
+    case redpanda_storage_mode::tiered:
+        return default_mode == cloud_storage_default_mode::tiered_v1
+                 ? redpanda_storage_mode_to_string(
+                     redpanda_storage_mode::tiered)
+                 : cloud_storage_default_mode_to_string(
+                     cloud_storage_default_mode::tiered_v1);
+    case redpanda_storage_mode::tiered_cloud:
+        return default_mode == cloud_storage_default_mode::tiered_v2
+                 ? redpanda_storage_mode_to_string(
+                     redpanda_storage_mode::tiered)
+                 : cloud_storage_default_mode_to_string(
+                     cloud_storage_default_mode::tiered_v2);
+    case redpanda_storage_mode::local:
+    case redpanda_storage_mode::cloud:
+    case redpanda_storage_mode::unset:
+        return redpanda_storage_mode_to_string(mode);
+    }
+    throw std::invalid_argument("unknown redpanda_storage_mode");
 }
 
 fmt::iterator format_to(recovery_validation_mode vm, fmt::iterator out) {

@@ -646,6 +646,46 @@ std::optional<redpanda_storage_mode>
 fmt::iterator format_to(redpanda_storage_mode m, fmt::iterator out);
 std::istream& operator>>(std::istream&, redpanda_storage_mode&);
 
+// Selects which storage mode the plain 'tiered' user-facing alias refers to:
+// 'tiered_v1' is redpanda_storage_mode::tiered, 'tiered_v2' is
+// redpanda_storage_mode::tiered_cloud. Value of the cloud_storage_default_mode
+// cluster config.
+enum class cloud_storage_default_mode : uint8_t {
+    tiered_v1 = 0,
+    tiered_v2 = 1,
+};
+
+constexpr const char*
+cloud_storage_default_mode_to_string(cloud_storage_default_mode m) {
+    switch (m) {
+    case cloud_storage_default_mode::tiered_v1:
+        return "tiered_v1";
+    case cloud_storage_default_mode::tiered_v2:
+        return "tiered_v2";
+    }
+    throw std::invalid_argument("unknown cloud_storage_default_mode");
+}
+
+std::optional<cloud_storage_default_mode>
+  cloud_storage_default_mode_from_string(std::string_view);
+
+fmt::iterator format_to(cloud_storage_default_mode m, fmt::iterator out);
+std::istream& operator>>(std::istream&, cloud_storage_default_mode&);
+
+/// Parse a user-supplied storage mode string (the redpanda.storage.mode topic
+/// property). Unlike redpanda_storage_mode_from_string this resolves the
+/// 'tiered' alias against the cloud_storage_default_mode cluster config and
+/// rejects the internal 'tiered_cloud' spelling, which is not part of the
+/// user-facing vocabulary.
+std::optional<redpanda_storage_mode> redpanda_storage_mode_from_user_string(
+  std::string_view, cloud_storage_default_mode);
+
+/// The user-facing name of a storage mode: the tiered variant matching
+/// cloud_storage_default_mode displays as 'tiered', the other one as its real
+/// name ('tiered_v1' or 'tiered_v2'). Other modes display as their enum name.
+const char* redpanda_storage_mode_user_name(
+  redpanda_storage_mode, cloud_storage_default_mode);
+
 enum class recovery_validation_mode : std::uint16_t {
     // ensure that either the manifest is in TS or that no manifest is present.
     // download issues will fail the validation
