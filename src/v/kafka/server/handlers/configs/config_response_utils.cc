@@ -1218,7 +1218,11 @@ config_response_container_t make_topic_configs(
       maybe_make_documentation(
         include_documentation,
         config::shard_local_cfg().default_redpanda_storage_mode.desc()),
-      &describe_as_string<model::redpanda_storage_mode>);
+      [](const model::redpanda_storage_mode& mode) {
+          return ss::sstring(
+            model::redpanda_storage_mode_user_name(
+              mode, config::shard_local_cfg().cloud_storage_default_mode()));
+      });
 
     return result;
 }

@@ -444,11 +444,14 @@ struct storage_mode_validator {
         }
 
         if (!is_storage_mode_transition_permitted(*current_mode, value)) {
+            auto default_mode
+              = config::shard_local_cfg().cloud_storage_default_mode();
             return fmt::format(
               "Cannot alter redpanda.storage.mode from {} to {} - this "
               "transition is not permitted",
-              *current_mode,
-              value);
+              model::redpanda_storage_mode_user_name(
+                *current_mode, default_mode),
+              model::redpanda_storage_mode_user_name(value, default_mode));
         }
         return std::nullopt;
     }

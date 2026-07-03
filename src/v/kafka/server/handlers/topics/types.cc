@@ -354,8 +354,11 @@ cluster::topic_configuration to_topic_config(
         /*clamp_to_duration_max=*/true);
 
     cfg.properties.storage_mode
-      = get_enum_value<model::redpanda_storage_mode>(
-          config_entries, topic_property_redpanda_storage_mode)
+      = get_string_value(config_entries, topic_property_redpanda_storage_mode)
+          .and_then([](const ss::sstring& raw) {
+              return model::redpanda_storage_mode_from_user_string(
+                raw, config::shard_local_cfg().cloud_storage_default_mode());
+          })
           .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
 
     schema_id_validation_config_parser schema_id_validation_config_parser{

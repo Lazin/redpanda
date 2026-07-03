@@ -557,17 +557,27 @@ create_topic_properties_update(
                       value == model::redpanda_storage_mode::tiered_cloud
                       && !feature_table.is_active(
                         features::feature::tiered_cloud_topics)) {
-                        return "tiered_cloud storage mode requires the "
+                        return "tiered_v2 storage mode requires the "
                                "cluster to be fully upgraded to at least "
                                "v26.2.1";
                     }
                     return std::nullopt;
                 };
+                auto parse = [](const ss::sstring& raw) {
+                    auto mode = model::redpanda_storage_mode_from_user_string(
+                      raw,
+                      config::shard_local_cfg().cloud_storage_default_mode());
+                    if (!mode) {
+                        throw boost::bad_lexical_cast();
+                    }
+                    return *mode;
+                };
                 parse_and_set_optional(
                   update.properties.storage_mode,
                   cfg.value,
                   kafka::config_resource_operation::set,
-                  validator);
+                  validator,
+                  parse);
                 continue;
             }
 

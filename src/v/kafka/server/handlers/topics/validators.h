@@ -552,11 +552,12 @@ struct min_max_compaction_lag_ms_validator {
  */
 struct storage_mode_config_validator {
     static constexpr const char* error_message
-      = "Invalid storage mode: 'cloud' requires cloud storage to be enabled "
-        "and the cluster to be fully upgraded to at least v26.1.1, "
-        "'tiered_cloud' additionally requires the cluster to be fully "
-        "upgraded to at least v26.2.1, "
-        "'tiered' requires cloud storage to be enabled.";
+      = "Invalid storage mode: valid values are 'local', 'tiered', "
+        "'tiered_v1', 'tiered_v2', 'cloud' and 'unset'. 'tiered_v1' requires "
+        "cloud storage to be enabled, 'cloud' additionally requires the "
+        "cluster to be fully upgraded to at least v26.1.1 and 'tiered_v2' to "
+        "at least v26.2.1. 'tiered' resolves to 'tiered_v1' or 'tiered_v2' "
+        "according to the cloud_storage_default_mode cluster config.";
     static constexpr error_code ec = error_code::invalid_config;
 
     static bool
@@ -570,7 +571,9 @@ struct storage_mode_config_validator {
         if (it == c.configs.end() || !it->value.has_value()) {
             return true;
         }
-        auto mode = model::redpanda_storage_mode_from_string(it->value.value());
+        auto mode = model::redpanda_storage_mode_from_user_string(
+          it->value.value(),
+          config::shard_local_cfg().cloud_storage_default_mode());
         if (!mode) {
             return false;
         }
