@@ -342,4 +342,10 @@ void rjson_serialize(
     stringize(w, m);
 }
 
+void rjson_serialize(
+  json::Writer<json::StringBuffer>& w,
+  const model::cloud_storage_default_mode& m) {
+    stringize(w, m);
+}
+
 } // namespace json

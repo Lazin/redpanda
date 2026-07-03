@@ -2099,6 +2099,25 @@ configuration::configuration()
        model::redpanda_storage_mode::tiered,
        model::redpanda_storage_mode::cloud,
        model::redpanda_storage_mode::unset})
+  , cloud_storage_default_mode(
+      *this,
+      "cloud_storage_default_mode",
+      "Selects which storage mode the `tiered` value of the "
+      "`redpanda.storage.mode` topic property refers to: `tiered_v1` is the "
+      "classic Tiered Storage architecture, `tiered_v2` stores both local "
+      "and object storage data using the Cloud Topics architecture. The "
+      "matching mode is also displayed as `tiered` in topic configuration "
+      "output, while the other mode is displayed under its own name.",
+      {.needs_restart = needs_restart::no,
+       .example = "tiered_v1",
+       .visibility = visibility::user},
+      model::cloud_storage_default_mode::tiered_v2,
+      {model::cloud_storage_default_mode::tiered_v1,
+       model::cloud_storage_default_mode::tiered_v2},
+      // Clusters upgraded from pre-26.2 keep the classic meaning of
+      // `tiered` (v26.1.1 is logical version 18).
+      legacy_default<model::cloud_storage_default_mode>(
+        model::cloud_storage_default_mode::tiered_v1, legacy_version{18}))
   , cloud_storage_disable_archiver_manager(
       *this,
       "cloud_storage_disable_archiver_manager",

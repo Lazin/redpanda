@@ -177,4 +177,7 @@ void rjson_serialize(
 void rjson_serialize(
   json::Writer<json::StringBuffer>&, const model::redpanda_storage_mode&);
 
+void rjson_serialize(
+  json::Writer<json::StringBuffer>&, const model::cloud_storage_default_mode&);
+
 } // namespace json

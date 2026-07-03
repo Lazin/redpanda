@@ -806,6 +806,9 @@ consteval std::string_view property_type_name() {
         return "string";
     } else if constexpr (std::is_same_v<type, model::redpanda_storage_mode>) {
         return "string";
+    } else if constexpr (
+      std::is_same_v<type, model::cloud_storage_default_mode>) {
+        return "string";
     } else if constexpr (std::is_same_v<type, cloud_io::policy_type>) {
         return "string";
     } else {
