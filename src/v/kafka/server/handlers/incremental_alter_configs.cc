@@ -528,7 +528,8 @@ create_topic_properties_update(
                       && !feature_table.is_active(
                         features::feature::tiered_cloud_topics)) {
                         return "tiered_cloud storage mode requires the "
-                               "tiered_cloud_topics feature to be enabled";
+                               "cluster to be fully upgraded to at least "
+                               "v26.2.1";
                     }
                     return std::nullopt;
                 };

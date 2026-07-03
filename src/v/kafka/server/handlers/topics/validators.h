@@ -554,8 +554,8 @@ struct storage_mode_config_validator {
     static constexpr const char* error_message
       = "Invalid storage mode: 'cloud' requires cloud storage to be enabled "
         "and the cluster to be fully upgraded to at least v26.1.1, "
-        "'tiered_cloud' additionally requires the tiered_cloud_topics feature "
-        "to be explicitly enabled, "
+        "'tiered_cloud' additionally requires the cluster to be fully "
+        "upgraded to at least v26.2.1, "
         "'tiered' requires cloud storage to be enabled.";
     static constexpr error_code ec = error_code::invalid_config;
 

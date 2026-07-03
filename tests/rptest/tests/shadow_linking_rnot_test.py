@@ -475,9 +475,9 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
     def test_node_operations(self, failures: bool, workload_set: str):
         self.setup_scale()
 
-        # tiered_cloud_topics is an explicit-only feature and must be
-        # enabled on both clusters before any tiered_cloud topic can be
-        # created.
+        # tiered_cloud_topics must be active on both clusters before any
+        # tiered_cloud topic can be created (it auto-activates once the
+        # cluster is fully on v26.2; this is a no-op then).
         self.source_cluster.service.set_feature_active(
             "tiered_cloud_topics", True, timeout_sec=30
         )
