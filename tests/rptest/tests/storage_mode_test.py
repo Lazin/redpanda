@@ -781,19 +781,31 @@ class TieredCloudUpgradeTest(StorageModeTestBase):
             f"tiered_cloud_topics should be unavailable in a mixed cluster, got {state}"
         )
 
-        # Both binaries must reject a tiered_v2 topic: the old one does not
-        # know the redpanda.storage.mode.version property, the new one
-        # enforces the feature gate.
-        self._expect_rejected(
-            "tiered_v2 topic creation",
-            lambda: self._create_topic(
+        # CreateTopics is routed to the controller broker. A HEAD controller
+        # rejects the request via the feature gate. A v26.1 controller does
+        # not know the redpanda.storage.mode.version property: unsupported
+        # topic configs are ignored on create, so the request silently
+        # degrades to a classic tiered topic. Either way the gating
+        # invariant holds: no tiered_v2 topic can exist in a partially
+        # upgraded cluster.
+        created_in_mixed = True
+        try:
+            self._create_topic(
                 rpk,
-                "topic-tiered-v2",
+                "topic-tiered-v2-mixed",
                 config=TopicSpec.storage_mode_config(
                     TopicSpec.STORAGE_MODE_VERSION_TIERED_V2
                 ),
-            ),
-        )
+            )
+        except RpkException as e:
+            created_in_mixed = False
+            self.logger.info(f"tiered_v2 creation rejected in mixed cluster: {e}")
+        if created_in_mixed:
+            version = self._get_topic_storage_mode_version(rpk, "topic-tiered-v2-mixed")
+            assert version != TopicSpec.STORAGE_MODE_VERSION_TIERED_V2, (
+                "a tiered_v2 topic must not be creatable in a partially "
+                "upgraded cluster"
+            )
 
         # Conversion is expressed as an alter to 'tiered'; both binaries
         # resolve it to a variant the cloud -> X transition rules forbid
@@ -827,6 +839,16 @@ class TieredCloudUpgradeTest(StorageModeTestBase):
         assert default_mode == "tiered_v1", (
             f"upgraded cluster should default to tiered_v1, got {default_mode}"
         )
+
+        # If the mixed-cluster create went through a v26.1 controller, the
+        # resulting topic must have degraded to classic tiered - never the
+        # v2 variant. Now that every broker runs HEAD, the version property
+        # is authoritative.
+        if created_in_mixed:
+            assert (
+                self._get_topic_storage_mode_version(rpk, "topic-tiered-v2-mixed")
+                == TopicSpec.STORAGE_MODE_VERSION_TIERED_V1
+            ), "the mixed-cluster create must not have produced a tiered_v2 topic"
 
         # Creation with an explicit version works under any default.
         self._create_topic(
