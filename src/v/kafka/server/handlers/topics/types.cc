@@ -360,6 +360,21 @@ cluster::topic_configuration to_topic_config(
                 raw, config::shard_local_cfg().cloud_storage_default_mode());
           })
           .value_or(config::shard_local_cfg().default_redpanda_storage_mode());
+    // An explicit redpanda.storage.mode.version picks the tiered variant.
+    // Malformed combinations are rejected by storage_mode_config_validator
+    // before conversion; the checks here just keep the combine total.
+    if (
+      auto version
+      = get_string_value(
+          config_entries, topic_property_redpanda_storage_mode_version)
+          .and_then([](const ss::sstring& raw) {
+              return model::cloud_storage_default_mode_from_string(raw);
+          });
+      version.has_value()
+      && model::storage_mode_version(cfg.properties.storage_mode).has_value()) {
+        cfg.properties.storage_mode = model::storage_mode_with_version(
+          *version);
+    }
 
     schema_id_validation_config_parser schema_id_validation_config_parser{
       cfg.properties};

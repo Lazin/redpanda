@@ -549,33 +549,64 @@ struct min_max_compaction_lag_ms_validator {
  * - 'cloud' mode requires cloud_storage_enabled()
  * - 'tiered' mode requires cloud_storage_enabled()
  * - 'local' mode is always allowed
+ * The optional redpanda.storage.mode.version property picks the tiered
+ * variant and is only valid together with redpanda.storage.mode=tiered.
  */
 struct storage_mode_config_validator {
     static constexpr const char* error_message
-      = "Invalid storage mode: valid values are 'local', 'tiered', "
-        "'tiered_v1', 'tiered_v2', 'cloud' and 'unset'. 'tiered_v1' requires "
-        "cloud storage to be enabled, 'cloud' additionally requires the "
-        "cluster to be fully upgraded to at least v26.1.1 and 'tiered_v2' to "
-        "at least v26.2.1. 'tiered' resolves to 'tiered_v1' or 'tiered_v2' "
-        "according to the cloud_storage_default_mode cluster config.";
+      = "Invalid storage mode: valid redpanda.storage.mode values are "
+        "'local', 'tiered', 'cloud' and 'unset'; the tiered variant is "
+        "selected with redpanda.storage.mode.version ('tiered_v1' or "
+        "'tiered_v2', only valid together with redpanda.storage.mode=tiered, "
+        "default per the cloud_storage_default_mode cluster config). "
+        "'tiered_v1' requires cloud storage to be enabled, 'cloud' "
+        "additionally requires the cluster to be fully upgraded to at least "
+        "v26.1.1 and 'tiered_v2' to at least v26.2.1.";
     static constexpr error_code ec = error_code::invalid_config;
 
     static bool
     is_valid(const creatable_topic& c, features::feature_table* ft) {
-        auto it = std::find_if(
-          c.configs.begin(),
-          c.configs.end(),
-          [](const createable_topic_config& cfg) {
-              return cfg.name == topic_property_redpanda_storage_mode;
-          });
-        if (it == c.configs.end() || !it->value.has_value()) {
+        auto find_cfg = [&c](std::string_view name) {
+            auto it = std::find_if(
+              c.configs.begin(),
+              c.configs.end(),
+              [name](const createable_topic_config& cfg) {
+                  return cfg.name == name;
+              });
+            return it == c.configs.end() ? nullptr : &*it;
+        };
+        const auto* mode_cfg = find_cfg(topic_property_redpanda_storage_mode);
+        const auto* version_cfg = find_cfg(
+          topic_property_redpanda_storage_mode_version);
+
+        std::optional<model::cloud_storage_default_mode> version;
+        if (version_cfg != nullptr && version_cfg->value.has_value()) {
+            version = model::cloud_storage_default_mode_from_string(
+              version_cfg->value.value());
+            if (!version) {
+                return false;
+            }
+            // The version is only meaningful together with an explicit
+            // redpanda.storage.mode=tiered.
+            if (mode_cfg == nullptr || !mode_cfg->value.has_value()) {
+                return false;
+            }
+        }
+        if (mode_cfg == nullptr || !mode_cfg->value.has_value()) {
             return true;
         }
         auto mode = model::redpanda_storage_mode_from_user_string(
-          it->value.value(),
+          mode_cfg->value.value(),
           config::shard_local_cfg().cloud_storage_default_mode());
         if (!mode) {
             return false;
+        }
+        if (version.has_value()) {
+            if (!model::storage_mode_version(*mode).has_value()) {
+                // A version was supplied with a non-tiered mode.
+                return false;
+            }
+            mode = model::storage_mode_with_version(*version);
         }
         switch (*mode) {
         case model::redpanda_storage_mode::local:

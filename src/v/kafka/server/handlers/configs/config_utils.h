@@ -444,14 +444,25 @@ struct storage_mode_validator {
         }
 
         if (!is_storage_mode_transition_permitted(*current_mode, value)) {
-            auto default_mode
-              = config::shard_local_cfg().cloud_storage_default_mode();
+            // Annotate tiered modes with their variant: both display as
+            // 'tiered', which would make e.g. a rejected tiered_v1 ->
+            // tiered_v2 transition read as "from tiered to tiered".
+            auto describe = [](model::redpanda_storage_mode m) {
+                auto version = model::storage_mode_version(m);
+                if (version.has_value()) {
+                    return fmt::format(
+                      "{} ({})",
+                      model::redpanda_storage_mode_user_name(m),
+                      model::cloud_storage_default_mode_to_string(*version));
+                }
+                return fmt::format(
+                  "{}", model::redpanda_storage_mode_user_name(m));
+            };
             return fmt::format(
               "Cannot alter redpanda.storage.mode from {} to {} - this "
               "transition is not permitted",
-              model::redpanda_storage_mode_user_name(
-                *current_mode, default_mode),
-              model::redpanda_storage_mode_user_name(value, default_mode));
+              describe(*current_mode),
+              describe(value));
         }
         return std::nullopt;
     }

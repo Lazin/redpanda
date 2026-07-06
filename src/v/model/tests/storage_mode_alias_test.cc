@@ -17,7 +17,9 @@ using model::cloud_storage_default_mode;
 using model::redpanda_storage_mode;
 
 // Full matrix: user input string x cloud_storage_default_mode -> parsed enum
-// (nullopt = rejected).
+// (nullopt = rejected). Only local/tiered/cloud/unset are valid mode values;
+// the variant names and the internal 'tiered_cloud' spelling are rejected --
+// a variant is selected with redpanda.storage.mode.version instead.
 TEST(storage_mode_alias, from_user_string_matrix) {
     struct {
         std::string_view input;
@@ -28,15 +30,10 @@ TEST(storage_mode_alias, from_user_string_matrix) {
       {"tiered",
        redpanda_storage_mode::tiered,
        redpanda_storage_mode::tiered_cloud},
-      {"tiered_v1",
-       redpanda_storage_mode::tiered,
-       redpanda_storage_mode::tiered},
-      {"tiered_v2",
-       redpanda_storage_mode::tiered_cloud,
-       redpanda_storage_mode::tiered_cloud},
       {"cloud", redpanda_storage_mode::cloud, redpanda_storage_mode::cloud},
       {"unset", redpanda_storage_mode::unset, redpanda_storage_mode::unset},
-      // The internal spelling is not part of the user-facing vocabulary.
+      {"tiered_v1", std::nullopt, std::nullopt},
+      {"tiered_v2", std::nullopt, std::nullopt},
       {"tiered_cloud", std::nullopt, std::nullopt},
       {"bogus", std::nullopt, std::nullopt},
     };
@@ -54,35 +51,53 @@ TEST(storage_mode_alias, from_user_string_matrix) {
     }
 }
 
-// Full matrix: enum x cloud_storage_default_mode -> displayed name. The
-// variant matching the default mode displays as 'tiered', the other under
-// its real name.
-TEST(storage_mode_alias, user_name_matrix) {
-    struct {
-        redpanda_storage_mode mode;
-        std::string_view under_v1;
-        std::string_view under_v2;
-    } cases[] = {
-      {redpanda_storage_mode::local, "local", "local"},
-      {redpanda_storage_mode::tiered, "tiered", "tiered_v1"},
-      {redpanda_storage_mode::tiered_cloud, "tiered_v2", "tiered"},
-      {redpanda_storage_mode::cloud, "cloud", "cloud"},
-      {redpanda_storage_mode::unset, "unset", "unset"},
-    };
-    for (const auto& c : cases) {
-        EXPECT_EQ(
-          model::redpanda_storage_mode_user_name(
-            c.mode, cloud_storage_default_mode::tiered_v1),
-          c.under_v1);
-        EXPECT_EQ(
-          model::redpanda_storage_mode_user_name(
-            c.mode, cloud_storage_default_mode::tiered_v2),
-          c.under_v2);
-    }
+// Both tiered variants display as 'tiered'; the variant is exposed through
+// redpanda.storage.mode.version (storage_mode_version).
+TEST(storage_mode_alias, user_name) {
+    EXPECT_STREQ(
+      model::redpanda_storage_mode_user_name(redpanda_storage_mode::tiered),
+      "tiered");
+    EXPECT_STREQ(
+      model::redpanda_storage_mode_user_name(
+        redpanda_storage_mode::tiered_cloud),
+      "tiered");
+    EXPECT_STREQ(
+      model::redpanda_storage_mode_user_name(redpanda_storage_mode::local),
+      "local");
+    EXPECT_STREQ(
+      model::redpanda_storage_mode_user_name(redpanda_storage_mode::cloud),
+      "cloud");
+    EXPECT_STREQ(
+      model::redpanda_storage_mode_user_name(redpanda_storage_mode::unset),
+      "unset");
 }
 
-// The context-free parser gains the static aliases and keeps the internal
-// spelling (used for config round-trips).
+TEST(storage_mode_alias, storage_mode_version) {
+    EXPECT_EQ(
+      model::storage_mode_version(redpanda_storage_mode::tiered),
+      cloud_storage_default_mode::tiered_v1);
+    EXPECT_EQ(
+      model::storage_mode_version(redpanda_storage_mode::tiered_cloud),
+      cloud_storage_default_mode::tiered_v2);
+    EXPECT_EQ(
+      model::storage_mode_version(redpanda_storage_mode::local), std::nullopt);
+    EXPECT_EQ(
+      model::storage_mode_version(redpanda_storage_mode::cloud), std::nullopt);
+    EXPECT_EQ(
+      model::storage_mode_version(redpanda_storage_mode::unset), std::nullopt);
+}
+
+TEST(storage_mode_alias, storage_mode_with_version) {
+    EXPECT_EQ(
+      model::storage_mode_with_version(cloud_storage_default_mode::tiered_v1),
+      redpanda_storage_mode::tiered);
+    EXPECT_EQ(
+      model::storage_mode_with_version(cloud_storage_default_mode::tiered_v2),
+      redpanda_storage_mode::tiered_cloud);
+}
+
+// The context-free parser keeps the static aliases and the internal spelling
+// (used for cluster-config round-trips and the shadow-link sync fallback).
 TEST(storage_mode_alias, from_string_static_aliases) {
     EXPECT_EQ(
       model::redpanda_storage_mode_from_string("tiered_v1"),

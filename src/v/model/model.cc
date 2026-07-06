@@ -629,39 +629,49 @@ cloud_storage_default_mode_from_string(std::string_view s) {
 
 std::optional<redpanda_storage_mode> redpanda_storage_mode_from_user_string(
   std::string_view s, cloud_storage_default_mode default_mode) {
-    if (
-      s
-      == redpanda_storage_mode_to_string(redpanda_storage_mode::tiered_cloud)) {
-        // Internal spelling, not part of the user-facing vocabulary.
-        return std::nullopt;
-    }
     if (s == redpanda_storage_mode_to_string(redpanda_storage_mode::tiered)) {
-        return default_mode == cloud_storage_default_mode::tiered_v2
-                 ? redpanda_storage_mode::tiered_cloud
-                 : redpanda_storage_mode::tiered;
+        return storage_mode_with_version(default_mode);
     }
-    return redpanda_storage_mode_from_string(s);
+    return string_switch<std::optional<redpanda_storage_mode>>(s)
+      .match(
+        redpanda_storage_mode_to_string(redpanda_storage_mode::local),
+        redpanda_storage_mode::local)
+      .match(
+        redpanda_storage_mode_to_string(redpanda_storage_mode::cloud),
+        redpanda_storage_mode::cloud)
+      .match(
+        redpanda_storage_mode_to_string(redpanda_storage_mode::unset),
+        redpanda_storage_mode::unset)
+      // The variant names and the internal 'tiered_cloud' spelling are not
+      // valid mode values: variants are selected with the separate
+      // redpanda.storage.mode.version property.
+      .default_match(std::nullopt);
 }
 
-const char* redpanda_storage_mode_user_name(
-  redpanda_storage_mode mode, cloud_storage_default_mode default_mode) {
+const char* redpanda_storage_mode_user_name(redpanda_storage_mode mode) {
     switch (mode) {
     case redpanda_storage_mode::tiered:
-        return default_mode == cloud_storage_default_mode::tiered_v1
-                 ? redpanda_storage_mode_to_string(
-                     redpanda_storage_mode::tiered)
-                 : cloud_storage_default_mode_to_string(
-                     cloud_storage_default_mode::tiered_v1);
     case redpanda_storage_mode::tiered_cloud:
-        return default_mode == cloud_storage_default_mode::tiered_v2
-                 ? redpanda_storage_mode_to_string(
-                     redpanda_storage_mode::tiered)
-                 : cloud_storage_default_mode_to_string(
-                     cloud_storage_default_mode::tiered_v2);
+        return redpanda_storage_mode_to_string(redpanda_storage_mode::tiered);
     case redpanda_storage_mode::local:
     case redpanda_storage_mode::cloud:
     case redpanda_storage_mode::unset:
         return redpanda_storage_mode_to_string(mode);
+    }
+    throw std::invalid_argument("unknown redpanda_storage_mode");
+}
+
+std::optional<cloud_storage_default_mode>
+storage_mode_version(redpanda_storage_mode mode) {
+    switch (mode) {
+    case redpanda_storage_mode::tiered:
+        return cloud_storage_default_mode::tiered_v1;
+    case redpanda_storage_mode::tiered_cloud:
+        return cloud_storage_default_mode::tiered_v2;
+    case redpanda_storage_mode::local:
+    case redpanda_storage_mode::cloud:
+    case redpanda_storage_mode::unset:
+        return std::nullopt;
     }
     throw std::invalid_argument("unknown redpanda_storage_mode");
 }

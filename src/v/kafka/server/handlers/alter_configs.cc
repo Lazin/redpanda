@@ -542,6 +542,13 @@ create_topic_properties_update(
                   /*clamp_to_duration_max=*/true);
                 continue;
             }
+            if (cfg.name == topic_property_redpanda_storage_mode_version) {
+                throw validation_error(
+                  "redpanda.storage.mode.version is read-only; it can only "
+                  "be set on topic creation together with "
+                  "redpanda.storage.mode=tiered");
+            }
+
             if (cfg.name == topic_property_redpanda_storage_mode) {
                 auto validator = [current_storage_mode,
                                   &feature_table = ctx.feature_table().local()](

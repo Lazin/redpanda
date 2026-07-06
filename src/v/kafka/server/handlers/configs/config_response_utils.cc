@@ -1219,10 +1219,38 @@ config_response_container_t make_topic_configs(
         include_documentation,
         config::shard_local_cfg().default_redpanda_storage_mode.desc()),
       [](const model::redpanda_storage_mode& mode) {
-          return ss::sstring(
-            model::redpanda_storage_mode_user_name(
-              mode, config::shard_local_cfg().cloud_storage_default_mode()));
+          return ss::sstring(model::redpanda_storage_mode_user_name(mode));
       });
+
+    // Read-only companion of redpanda.storage.mode: the resolved tiered
+    // variant. Only emitted for topics in a tiered storage mode.
+    if (
+      config_property_requested(
+        config_keys, topic_property_redpanda_storage_mode_version)) {
+        if (
+          auto version = model::storage_mode_version(
+            topic_properties.storage_mode);
+          version.has_value()) {
+            result.push_back(
+              config_response{
+                .name = ss::sstring(
+                  topic_property_redpanda_storage_mode_version),
+                .value = ss::sstring(
+                  model::cloud_storage_default_mode_to_string(*version)),
+                .read_only = true,
+                .config_source = describe_configs_source::topic,
+                .config_type = describe_configs_type::string,
+                .documentation = maybe_make_documentation(
+                  include_documentation,
+                  "The variant of the tiered storage mode: tiered_v1 is the "
+                  "classic Tiered Storage architecture, tiered_v2 stores "
+                  "both local and object storage data using the Cloud "
+                  "Topics architecture. Read-only; can be set on topic "
+                  "creation together with redpanda.storage.mode=tiered to "
+                  "select a non-default variant."),
+              });
+        }
+    }
 
     return result;
 }

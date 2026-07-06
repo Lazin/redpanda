@@ -673,18 +673,34 @@ fmt::iterator format_to(cloud_storage_default_mode m, fmt::iterator out);
 std::istream& operator>>(std::istream&, cloud_storage_default_mode&);
 
 /// Parse a user-supplied storage mode string (the redpanda.storage.mode topic
-/// property). Unlike redpanda_storage_mode_from_string this resolves the
-/// 'tiered' alias against the cloud_storage_default_mode cluster config and
-/// rejects the internal 'tiered_cloud' spelling, which is not part of the
-/// user-facing vocabulary.
+/// property). The user vocabulary is local/tiered/cloud/unset: 'tiered'
+/// resolves against the cloud_storage_default_mode cluster config, and the
+/// variant names (tiered_v1/tiered_v2) as well as the internal 'tiered_cloud'
+/// spelling are rejected -- a specific variant is selected with the separate
+/// redpanda.storage.mode.version property instead.
 std::optional<redpanda_storage_mode> redpanda_storage_mode_from_user_string(
   std::string_view, cloud_storage_default_mode);
 
-/// The user-facing name of a storage mode: the tiered variant matching
-/// cloud_storage_default_mode displays as 'tiered', the other one as its real
-/// name ('tiered_v1' or 'tiered_v2'). Other modes display as their enum name.
-const char* redpanda_storage_mode_user_name(
-  redpanda_storage_mode, cloud_storage_default_mode);
+/// The user-facing name of a storage mode: both tiered variants display as
+/// 'tiered' (the variant is exposed via redpanda.storage.mode.version);
+/// other modes display as their enum name.
+const char* redpanda_storage_mode_user_name(redpanda_storage_mode);
+
+/// The tiered variant of a storage mode: tiered -> tiered_v1,
+/// tiered_cloud -> tiered_v2, nullopt for the other modes. The value of the
+/// read-only redpanda.storage.mode.version topic property.
+std::optional<cloud_storage_default_mode>
+  storage_mode_version(redpanda_storage_mode);
+
+/// Combine the redpanda.storage.mode value with an explicit
+/// redpanda.storage.mode.version into the storage mode enum: the version
+/// picks the tiered variant.
+constexpr redpanda_storage_mode
+storage_mode_with_version(cloud_storage_default_mode version) {
+    return version == cloud_storage_default_mode::tiered_v2
+             ? redpanda_storage_mode::tiered_cloud
+             : redpanda_storage_mode::tiered;
+}
 
 enum class recovery_validation_mode : std::uint16_t {
     // ensure that either the manifest is in TS or that no manifest is present.
