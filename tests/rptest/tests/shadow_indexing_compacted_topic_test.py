@@ -218,6 +218,8 @@ class TSWithAlreadyCompactedTopic(EndToEndTest):
                 partition_autobalancing_mode="off",
                 group_initial_rebalance_delay=300,
                 compacted_log_segment_size=self.segment_size,
+                # the test alters a topic to the classic (v1) tiered storage mode
+                cloud_storage_default_mode="tiered_v1",
             )
         )
         self.redpanda = make_redpanda_service(
