@@ -333,14 +333,48 @@ bool maybe_append_update(
           kafka::max_compaction_lag_ms_validator);
     }
 
-    if (config_name == kafka::topic_property_redpanda_storage_mode) {
-        return parse_and_set(
-          topic_config.tp_ns,
-          update.properties.storage_mode,
-          config_value,
-          std::make_optional(topic_config.properties.storage_mode));
-    }
-
     return false;
+}
+
+bool maybe_append_storage_mode_update(
+  cluster::topic_properties_update& update,
+  const std::optional<ss::sstring>& mode_value,
+  const std::optional<ss::sstring>& version_value,
+  const cluster::topic_configuration& topic_config) {
+    if (!mode_value.has_value()) {
+        return false;
+    }
+    auto mode = ::model::redpanda_storage_mode_from_string(*mode_value);
+    if (!mode.has_value()) {
+        throw kafka::validation_error(
+          fmt::format("Unrecognized storage mode '{}'", *mode_value));
+    }
+    if (
+      ::model::storage_mode_version(*mode).has_value()
+      && version_value.has_value()) {
+        auto version = ::model::cloud_storage_default_mode_from_string(
+          *version_value);
+        if (!version.has_value()) {
+            throw kafka::validation_error(
+              fmt::format(
+                "Unrecognized storage mode version '{}'", *version_value));
+        }
+        mode = ::model::storage_mode_with_version(*version);
+    }
+    auto current = topic_config.properties.storage_mode;
+    if (*mode == current) {
+        return false;
+    }
+    if (!kafka::is_storage_mode_transition_permitted(current, *mode)) {
+        throw kafka::validation_error(
+          fmt::format(
+            "Storage mode transition from {} to {} is not permitted",
+            current,
+            *mode));
+    }
+    update.properties.storage_mode.op
+      = cluster::incremental_update_operation::set;
+    update.properties.storage_mode.value = *mode;
+    return true;
 }
 } // namespace cluster_link::utils

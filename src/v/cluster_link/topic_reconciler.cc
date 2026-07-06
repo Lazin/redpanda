@@ -302,8 +302,45 @@ topic_reconciler::maybe_create_update_mirror_topic(
         config_updated = true;
     }
 
+    // The storage mode is applied from the (mode, version) pair: the mode
+    // value alone is ambiguous because both tiered variants describe as
+    // 'tiered'.
+    auto find_config = [&mirror_topic_config](
+                         std::string_view name) -> std::optional<ss::sstring> {
+        auto it = mirror_topic_config.topic_configs.find(ss::sstring(name));
+        if (it == mirror_topic_config.topic_configs.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    };
+    try {
+        if (
+          utils::maybe_append_storage_mode_update(
+            update,
+            find_config(kafka::topic_property_redpanda_storage_mode),
+            find_config(kafka::topic_property_redpanda_storage_mode_version),
+            local_topic_config)) {
+            config_updated = true;
+        }
+    } catch (const std::exception& e) {
+        vlog(
+          cllog.warn,
+          "Failed updating topic property {} for topic {}: {}",
+          kafka::topic_property_redpanda_storage_mode,
+          topic_name,
+          e);
+    }
+
     for (const auto& [source_topic_config_name, source_topic_config_value] :
          mirror_topic_config.topic_configs) {
+        if (
+          source_topic_config_name
+            == kafka::topic_property_redpanda_storage_mode
+          || source_topic_config_name
+               == kafka::topic_property_redpanda_storage_mode_version) {
+            // Handled jointly above.
+            continue;
+        }
         // Need to check the current value of the local topic config
         // against that stored in the table, so I need to go from
         // string name to actual type
