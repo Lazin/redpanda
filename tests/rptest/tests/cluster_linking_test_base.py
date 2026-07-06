@@ -86,6 +86,7 @@ DEFAULT_SYNCED_TOPIC_PROPERTIES = [
     "max.compaction.lag.ms",
     "min.compaction.lag.ms",
     "redpanda.storage.mode",
+    "redpanda.storage.mode.version",
 ]
 
 DISALLOWED_SYNCED_TOPIC_PROPERTIES = [
@@ -104,9 +105,9 @@ CONTROLLER_LOCKED_TASKS = [
 
 ALL_STORAGE_MODES = [
     TopicSpec.STORAGE_MODE_LOCAL,
-    TopicSpec.STORAGE_MODE_TIERED,
+    TopicSpec.STORAGE_MODE_VERSION_TIERED_V1,
     TopicSpec.STORAGE_MODE_CLOUD,
-    TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+    TopicSpec.STORAGE_MODE_VERSION_TIERED_V2,
 ]
 
 # Log messages that are expected when running shadow link tests with
@@ -592,12 +593,13 @@ class ShadowLinkTestBase(PreallocNodesTest):
         storage_mode = (test_context.injected_args or {}).get("storage_mode")
         needs_si = storage_mode in (
             TopicSpec.STORAGE_MODE_TIERED,
+            TopicSpec.STORAGE_MODE_VERSION_TIERED_V1,
             TopicSpec.STORAGE_MODE_CLOUD,
-            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+            TopicSpec.STORAGE_MODE_VERSION_TIERED_V2,
         )
         needs_cloud_topics = storage_mode in (
             TopicSpec.STORAGE_MODE_CLOUD,
-            TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+            TopicSpec.STORAGE_MODE_VERSION_TIERED_V2,
         )
 
         if needs_si and "si_settings" not in kwargs:
@@ -613,9 +615,6 @@ class ShadowLinkTestBase(PreallocNodesTest):
             {
                 "enable_shadow_linking": True,
                 "group_initial_rebalance_delay": 1000,
-                # The storage-mode matrix arms rely on the classic (v1)
-                # meaning and display name of the 'tiered' storage mode.
-                "cloud_storage_default_mode": "tiered_v1",
             }
         )
 
@@ -640,11 +639,8 @@ class ShadowLinkTestBase(PreallocNodesTest):
             sec_kwargs = dict(secondary_cluster_args.kwargs)
             if "si_settings" not in sec_kwargs:
                 sec_kwargs["si_settings"] = kwargs.get("si_settings")
-            sec_extra = dict(sec_kwargs.get("extra_rp_conf", {}))
-            # Same v1 pin as the primary: source topics are created here.
-            sec_extra["cloud_storage_default_mode"] = "tiered_v1"
-            sec_kwargs["extra_rp_conf"] = sec_extra
             if needs_cloud_topics:
+                sec_extra = dict(sec_kwargs.get("extra_rp_conf", {}))
                 sec_extra.update(
                     {
                         "enable_cluster_metadata_upload_loop": False,
@@ -662,6 +658,7 @@ class ShadowLinkTestBase(PreallocNodesTest):
                         "cloud_topics_compaction_interval_ms": 1000,
                     }
                 )
+                sec_kwargs["extra_rp_conf"] = sec_extra
             secondary_cluster_args = SecondaryClusterArgs(
                 *secondary_cluster_args.args, **sec_kwargs
             )
@@ -1023,7 +1020,7 @@ class ShadowLinkTestBase(PreallocNodesTest):
             self.source_default_client().create_topic(topic)
             return
 
-        if storage_mode == TopicSpec.STORAGE_MODE_TIERED_CLOUD:
+        if storage_mode == TopicSpec.STORAGE_MODE_VERSION_TIERED_V2:
             self.source_cluster_service.set_feature_active(
                 "tiered_cloud_topics", True, timeout_sec=30
             )
@@ -1032,7 +1029,7 @@ class ShadowLinkTestBase(PreallocNodesTest):
             )
 
         config = self._topic_config_from_spec(topic)
-        config[TopicSpec.PROPERTY_STORAGE_MODE] = storage_mode
+        config.update(TopicSpec.storage_mode_config(storage_mode))
 
         source_rpk = RpkTool(self.source_cluster.service)
 

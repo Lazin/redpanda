@@ -277,6 +277,11 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
                 ),
                 extra_rp_conf={
                     "group_new_member_join_timeout": 3000,
+                    # The flipping workload alters redpanda.storage.mode
+                    # between 'cloud' and 'tiered'; the alter path resolves
+                    # 'tiered' through cloud_storage_default_mode, so pin
+                    # tiered_v2 to flip to the cloud-architecture variant.
+                    "cloud_storage_default_mode": "tiered_v2",
                 },
             ),
             extra_rp_conf={
@@ -388,7 +393,9 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
             ClusterLinkingWorkloadSpec(
                 topic="tiered-cloud-topic",
                 topic_properties={
-                    TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+                    **TopicSpec.storage_mode_config(
+                        TopicSpec.STORAGE_MODE_VERSION_TIERED_V2
+                    ),
                     "segment.bytes": f"{1024 * 1024}",
                 },
                 partition_count=self.partition_count,
@@ -410,7 +417,7 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
                 msg_size=self.msg_size,
                 flip_storage_modes=[
                     TopicSpec.STORAGE_MODE_CLOUD,
-                    TopicSpec.STORAGE_MODE_TIERED_CLOUD,
+                    TopicSpec.STORAGE_MODE_TIERED,
                 ],
                 flip_interval_seconds=3.0,
             ),
@@ -420,13 +427,13 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
         specs: list[ClusterLinkingWorkloadSpec] = []
         for mode, mode_label in (
             (TopicSpec.STORAGE_MODE_CLOUD, "cloud"),
-            (TopicSpec.STORAGE_MODE_TIERED_CLOUD, "tiered-cloud"),
+            (TopicSpec.STORAGE_MODE_VERSION_TIERED_V2, "tiered-cloud"),
         ):
             specs.append(
                 ClusterLinkingWorkloadSpec(
                     topic=f"{mode_label}-compacted-topic",
                     topic_properties={
-                        TopicSpec.PROPERTY_STORAGE_MODE: mode,
+                        **TopicSpec.storage_mode_config(mode),
                         "cleanup.policy": "compact",
                         "segment.bytes": f"{1024 * 1024}",
                     },
@@ -447,7 +454,7 @@ class ShadowLinkingRandomOpsTest(ShadowLinkTestBase):
                 ClusterLinkingWorkloadSpec(
                     topic=f"{mode_label}-topic-txns",
                     topic_properties={
-                        TopicSpec.PROPERTY_STORAGE_MODE: mode,
+                        **TopicSpec.storage_mode_config(mode),
                     },
                     msg_count=math.floor(self.msg_count / 10),
                     msg_size=self.msg_size,

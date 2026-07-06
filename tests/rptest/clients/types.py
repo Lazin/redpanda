@@ -27,12 +27,14 @@ class TopicSpec:
     STORAGE_MODE_LOCAL = "local"
     STORAGE_MODE_TIERED = "tiered"
     STORAGE_MODE_CLOUD = "cloud"
-    STORAGE_MODE_TIERED_V1 = "tiered_v1"
-    STORAGE_MODE_TIERED_V2 = "tiered_v2"
-    # Legacy name for the tiered_v2 storage mode; the 'tiered_cloud' spelling
-    # is no longer accepted by redpanda.
-    STORAGE_MODE_TIERED_CLOUD = STORAGE_MODE_TIERED_V2
     STORAGE_MODE_UNSET = "unset"
+
+    # Values of the read-only redpanda.storage.mode.version property, which
+    # selects the tiered variant at topic creation (only valid together with
+    # redpanda.storage.mode=tiered). Not valid as redpanda.storage.mode
+    # values.
+    STORAGE_MODE_VERSION_TIERED_V1 = "tiered_v1"
+    STORAGE_MODE_VERSION_TIERED_V2 = "tiered_v2"
 
     PROPERTY_COMPRESSSION = "compression.type"
     PROPERTY_CLEANUP_POLICY = "cleanup.policy"
@@ -61,6 +63,23 @@ class TopicSpec:
     PROPERTY_REMOTE_READ = "redpanda.remote.read"
     PROPERTY_REMOTE_WRITE = "redpanda.remote.write"
     PROPERTY_STORAGE_MODE = "redpanda.storage.mode"
+    PROPERTY_STORAGE_MODE_VERSION = "redpanda.storage.mode.version"
+
+    @staticmethod
+    def storage_mode_config(mode: str) -> dict[str, str]:
+        """Topic config dict selecting a storage mode. Tiered variants
+        (tiered_v1/tiered_v2) are spelled as redpanda.storage.mode=tiered plus
+        the redpanda.storage.mode.version property, matching the broker's
+        input vocabulary."""
+        if mode in (
+            TopicSpec.STORAGE_MODE_VERSION_TIERED_V1,
+            TopicSpec.STORAGE_MODE_VERSION_TIERED_V2,
+        ):
+            return {
+                TopicSpec.PROPERTY_STORAGE_MODE: TopicSpec.STORAGE_MODE_TIERED,
+                TopicSpec.PROPERTY_STORAGE_MODE_VERSION: mode,
+            }
+        return {TopicSpec.PROPERTY_STORAGE_MODE: mode}
 
     class CompressionTypes(str, Enum):
         """
